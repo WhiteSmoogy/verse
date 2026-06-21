@@ -149,6 +149,7 @@ type ClassMemberInfosResult = (
 );
 
 struct ClassDefinitionParts<'a> {
+    definition_access: AccessLevel,
     specifiers: &'a [String],
     base: Option<&'a TypeAnnotation>,
     interfaces: &'a [TypeAnnotation],

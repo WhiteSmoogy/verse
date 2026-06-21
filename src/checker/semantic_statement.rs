@@ -547,10 +547,16 @@ impl Checker {
             if !self.struct_types.contains_key(&qualified) {
                 let (constructor_access, constructor_scopes) =
                     class_constructor_access_from_specifiers(class_specifiers, span)?;
+                let definition_access = access_level_from_specifiers(
+                    module_member_specifiers(specifiers, expr),
+                    "module member",
+                    span,
+                )?;
                 let (fields, methods, unique, castable, base, implemented_interfaces) = self
                     .class_member_infos(
                         &qualified,
                         ClassDefinitionParts {
+                            definition_access,
                             specifiers: class_specifiers,
                             base: base.as_ref(),
                             interfaces,

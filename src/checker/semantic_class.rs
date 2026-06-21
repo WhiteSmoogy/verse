@@ -96,7 +96,13 @@ impl Checker {
         statements: &[Stmt],
     ) -> Result<(), VerseError> {
         for statement in statements {
-            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+            let StmtKind::Let {
+                name,
+                specifiers: binding_specifiers,
+                expr,
+                ..
+            } = &statement.kind
+            else {
                 continue;
             };
             if let ExprKind::ModuleDefinition {
@@ -130,6 +136,8 @@ impl Checker {
             let local_methods = self.interface_local_method_infos(&qualified, methods)?;
             let method_infos =
                 self.merge_interface_method_set(inherited_methods, local_methods, statement.span)?;
+            let definition_access =
+                access_level_from_specifiers(binding_specifiers, "module member", statement.span)?;
             self.interface_types.insert(
                 qualified.clone(),
                 InterfaceInfo {
@@ -138,7 +146,7 @@ impl Checker {
                     methods: method_infos,
                 },
             );
-            self.check_interface_method_bodies(&qualified, &fields, methods)?;
+            self.check_interface_method_bodies(&qualified, definition_access, &fields, methods)?;
         }
 
         Ok(())
@@ -306,6 +314,7 @@ impl Checker {
     pub(super) fn check_interface_method_bodies(
         &mut self,
         interface_name: &str,
+        definition_access: AccessLevel,
         fields: &[StructFieldInfo],
         methods: &[ClassMethod],
     ) -> Result<(), VerseError> {
@@ -343,10 +352,37 @@ impl Checker {
                 self.check_function(&method.params, &effects, method.return_type.as_ref(), body)
             })();
             self.pop_scope();
-            method_type?;
+            let method_type = method_type?;
+            let access = access_level_from_specifiers(&method.effects, "method", method.span)?;
+            self.ensure_aggregate_member_surface_dependencies_accessible(
+                interface_name,
+                definition_access,
+                &method.name,
+                access,
+                &method_type,
+                method.span,
+            )?;
         }
 
         Ok(())
+    }
+
+    fn ensure_aggregate_member_surface_dependencies_accessible(
+        &self,
+        aggregate_name: &str,
+        aggregate_access: AccessLevel,
+        member_name: &str,
+        member_access: AccessLevel,
+        member_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if !access_requires_dependency_validation(aggregate_access)
+            || !access_requires_dependency_validation(member_access)
+        {
+            return Ok(());
+        }
+        let dependee = format!("{aggregate_name}.{member_name}");
+        self.ensure_type_dependencies_accessible(&dependee, member_access, member_type, span)
     }
 
     fn class_or_interface_method_effects(
@@ -393,7 +429,13 @@ impl Checker {
         statements: &[Stmt],
     ) -> Result<(), VerseError> {
         for statement in statements {
-            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+            let StmtKind::Let {
+                name,
+                specifiers: binding_specifiers,
+                expr,
+                ..
+            } = &statement.kind
+            else {
                 continue;
             };
             if let ExprKind::ModuleDefinition {
@@ -472,10 +514,16 @@ impl Checker {
                                 blocks,
                             ),
                         )?;
+                    let definition_access = access_level_from_specifiers(
+                        module_member_specifiers(binding_specifiers, expr),
+                        "module member",
+                        statement.span,
+                    )?;
                     let (fields, methods, unique, castable, base, implemented_interfaces) = self
                         .class_member_infos(
                             &qualified,
                             ClassDefinitionParts {
+                                definition_access,
                                 specifiers,
                                 base: base.as_ref(),
                                 interfaces,
@@ -714,6 +762,7 @@ impl Checker {
         parts: ClassDefinitionParts<'_>,
     ) -> Result<ClassMemberInfosResult, VerseError> {
         let ClassDefinitionParts {
+            definition_access,
             specifiers,
             base,
             interfaces,
@@ -996,6 +1045,7 @@ impl Checker {
             let local_methods = checker.class_method_infos(
                 class_name,
                 base_name.as_deref(),
+                definition_access,
                 &inherited_fields,
                 &inherited_methods,
                 methods,
@@ -1630,6 +1680,7 @@ impl Checker {
         &mut self,
         class_name: &str,
         base_name: Option<&str>,
+        definition_access: AccessLevel,
         fields: &[StructFieldInfo],
         inherited_methods: &[ClassMethodInfo],
         methods: &[ClassMethod],
@@ -1706,13 +1757,23 @@ impl Checker {
             self.class_context.pop();
             self.pop_scope();
 
+            let method_type = method_type?;
+            let access = access_level_from_specifiers(&method.effects, "method", method.span)?;
+            self.ensure_aggregate_member_surface_dependencies_accessible(
+                class_name,
+                definition_access,
+                &method.name,
+                access,
+                &method_type,
+                method.span,
+            )?;
             infos.push(ClassMethodInfo {
                 qualifier: method.qualifier.clone(),
                 name: method.name.clone(),
-                value_type: method_type?,
+                value_type: method_type,
                 final_member: has_effect(&method.effects, "final"),
                 abstract_member: false,
-                access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                access,
                 scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                 owner: Some(class_name.to_string()),
                 span: method.span,

@@ -18,6 +18,7 @@ pub(super) struct ParametricTypeInfo {
     pub(super) params: Vec<TypeParam>,
     pub(super) expr: Expr,
     pub(super) kind: ParametricTypeKind,
+    pub(super) access: AccessLevel,
     pub(super) module_path: Vec<String>,
     pub(super) span: Span,
 }
@@ -887,7 +888,11 @@ impl Checker {
                     expr,
                 } => {
                     self.validate_data_specifiers(name, specifiers, None, false, statement.span)?;
-                    access_level_from_specifiers(specifiers, "parametric type", statement.span)?;
+                    let access = access_level_from_specifiers(
+                        specifiers,
+                        "parametric type",
+                        statement.span,
+                    )?;
                     ensure_private_protected_access_only_in_classes(specifiers, statement.span)?;
                     let kind = parametric_type_kind(expr).ok_or_else(|| {
                         VerseError::check_at(
@@ -943,6 +948,7 @@ impl Checker {
                             params: params.clone(),
                             expr: expr.clone(),
                             kind,
+                            access,
                             module_path: self.module_path.clone(),
                             span: statement.span,
                         },
@@ -2722,6 +2728,7 @@ impl Checker {
                     .class_member_infos(
                         &instance_name,
                         ClassDefinitionParts {
+                            definition_access: info.access,
                             specifiers,
                             base: base.as_ref(),
                             interfaces,
@@ -2786,7 +2793,7 @@ impl Checker {
                         methods: method_infos,
                     },
                 );
-                self.check_interface_method_bodies(&instance_name, &fields, methods)?;
+                self.check_interface_method_bodies(&instance_name, info.access, &fields, methods)?;
                 Ok(Type::Interface(instance_name.clone()))
             }
             _ => Err(VerseError::check_at(
