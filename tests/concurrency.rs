@@ -322,7 +322,7 @@ Done.Signal()
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -337,7 +337,7 @@ Payload.Signal(7)
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -352,7 +352,7 @@ Move.Signal(7, "go")
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -392,7 +392,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -433,7 +433,7 @@ Ready.Signal()
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -453,7 +453,7 @@ Payload.Signal(41)
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -477,7 +477,7 @@ Ready.Signal()
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -497,7 +497,7 @@ spawn{WaitForReady()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -521,7 +521,7 @@ Ready.Signal()
 AfterFirst * 100 + Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(111.0));
+    assert_eq!(eval(source), Value::Int(111));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -598,7 +598,7 @@ Signal.Signal(42)
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -615,7 +615,7 @@ Handle.Cancel()
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -632,7 +632,7 @@ Handle.Cancel()
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -649,7 +649,7 @@ Handle.Cancel()
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -848,7 +848,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1191,7 +1191,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1215,7 +1215,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1238,7 +1238,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1265,7 +1265,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1294,7 +1294,7 @@ spawn{Start()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(2.0));
+    assert_eq!(eval(source), Value::Int(2));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1322,7 +1322,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1357,7 +1357,7 @@ AfterCanceledTimers:int = Trace
 AfterCanceledTimers
 "#;
 
-    assert_eq!(eval(source), Value::Number(140.0));
+    assert_eq!(eval(source), Value::Int(140));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1394,7 +1394,7 @@ AfterCanceledTimers:int = Trace
 AfterCanceledTimers
 "#;
 
-    assert_eq!(eval(source), Value::Number(140.0));
+    assert_eq!(eval(source), Value::Int(140));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1426,7 +1426,7 @@ AfterCanceledTimers:int = Trace
 AfterCanceledTimers
 "#;
 
-    assert_eq!(eval(source), Value::Number(1940.0));
+    assert_eq!(eval(source), Value::Int(1940));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1463,7 +1463,7 @@ AfterCanceledTimers:int = Trace
 AfterCanceledTimers
 "#;
 
-    assert_eq!(eval(source), Value::Number(19940.0));
+    assert_eq!(eval(source), Value::Int(19940));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1492,7 +1492,7 @@ spawn{Start()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1524,7 +1524,7 @@ AfterCanceledTimers:int = Trace
 AfterCanceledTimers
 "#;
 
-    assert_eq!(eval(source), Value::Number(509.0));
+    assert_eq!(eval(source), Value::Int(509));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1554,7 +1554,7 @@ spawn{Run()}
 Trace
 "#;
 
-    assert_eq!(eval(source), Value::Number(502.0));
+    assert_eq!(eval(source), Value::Int(502));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1578,7 +1578,7 @@ spawn{Start()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1602,7 +1602,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1625,7 +1625,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1650,7 +1650,7 @@ spawn{Run()}
 Trace
 "#;
 
-    assert_eq!(eval(source), Value::Number(19.0));
+    assert_eq!(eval(source), Value::Int(19));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1674,7 +1674,7 @@ AfterSecond:int = Result
 AfterSecond
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1697,7 +1697,7 @@ AfterSecond:int = Result
 AfterSecond
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1720,7 +1720,7 @@ AfterSecond:int = Result
 AfterSecond
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1742,7 +1742,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1773,7 +1773,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1798,7 +1798,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1824,7 +1824,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1849,7 +1849,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1870,7 +1870,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1916,7 +1916,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1939,7 +1939,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1973,7 +1973,7 @@ Tick4:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(66.0));
+    assert_eq!(eval(source), Value::Int(66));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2005,7 +2005,7 @@ Tick3:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2034,7 +2034,7 @@ Tick:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(43.0));
+    assert_eq!(eval(source), Value::Int(43));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2067,7 +2067,7 @@ Tick5:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2100,7 +2100,7 @@ Tick5:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2126,7 +2126,7 @@ Tick3:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2159,7 +2159,7 @@ Tick5:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2190,7 +2190,7 @@ Tick8:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2220,7 +2220,7 @@ Tick5:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2252,7 +2252,7 @@ Tick5:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2282,7 +2282,7 @@ Tick3:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2310,7 +2310,7 @@ Tick4:int = Result
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2442,7 +2442,7 @@ Collected.Length
         check_source(source).expect("source should check"),
         Type::Int
     );
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
 }
 
 #[test]
@@ -2458,7 +2458,7 @@ Collected.Length
         check_source(source).expect("source should check"),
         Type::Int
     );
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
 }
 
 #[test]
@@ -2544,7 +2544,7 @@ Pairs:[]int = for (X := 1..2, Y := 1..3):
 if (Value := Pairs[5]). Pairs.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(29.0));
+    assert_eq!(eval(source), Value::Int(29));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

@@ -11,7 +11,7 @@ using { /Verse.org/Verse }
 Abs(-42)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -28,7 +28,7 @@ using { /UnrealEngine.com/Temporary/Diagnostics }
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -42,7 +42,7 @@ using := 40
 using + 2
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -100,7 +100,7 @@ DataTypes<public> := module:
 DataTypes.Answer
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -138,7 +138,7 @@ Location:DataTypes.tile_coordinate = DataTypes.tile_coordinate{Left := 40, Forwa
 Location.Left + Location.Forward
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -158,7 +158,7 @@ Location:DataTypes.tile_coordinate = DataTypes.tile_coordinate{}
 Location.Sum()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -185,7 +185,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -212,7 +212,7 @@ entry := class<concrete>(child_readable):
 entry{}.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -239,7 +239,7 @@ Read(Base:DataTypes.box(int)):int =
 Read(Child) + Child.Extra
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -257,7 +257,7 @@ Location:(DataTypes:)tile_coordinate = (DataTypes:)tile_coordinate{}
 Location.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -275,7 +275,7 @@ Item:(DataTypes:)box(int) = (DataTypes:)box(int){Value := 42}
 Item.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -420,7 +420,7 @@ Location:tile_coordinate = tile_coordinate{Left := 40, Forward := 2}
 Location.Left + Location.Forward + Origin.Left
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -454,8 +454,87 @@ Math.Double(21)
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
+}
+
+#[test]
+fn evaluates_vproject_manifest_package_root_module_resolution() {
+    let root = temp_project_dir("vproject_package_root");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = Source/main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "Source/main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let manifest = root.join("Demo.vproject");
+    let entry = root.join("Source/main.verse");
+    let project = SourceProject::from_manifest(&manifest).expect("manifest should load");
+    assert_eq!(project.package.as_deref(), Some("DemoPackage"));
+    assert_eq!(
+        check_project_file(&manifest).expect("manifest project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        check_project_file(&entry).expect("entry should discover manifest root"),
+        Type::Int
+    );
+}
+
+#[test]
+fn generates_external_digest_that_project_loader_can_consume() {
+    let implementation = r#"
+Api<public> := module:
+    Hidden:int = 7
+    Answer<public>:int = 42
+    Double<public>(Value:int)<computes>:int = Value * 2
+"#;
+
+    let digest = generate_digest(implementation).expect("digest should generate");
+    assert!(digest.contains("Api<public> := module:"));
+    assert!(digest.contains("Answer<public>:int = external {}"));
+    assert!(digest.contains("Double<public>(Value:int)<computes>:int = external {}"));
+    assert!(!digest.contains("Hidden"));
+    check_source(&digest).expect("digest should be valid source");
+
+    let root = temp_project_dir("external_digest_consumer");
+    write_project_file(&root, "Api.verse", &digest);
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Result:int = Api.Double(21)
+Api.Answer
+"#,
+    );
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("digest-backed project should check"),
+        Type::Int
+    );
+
+    let project_digest = generate_project_digest(root.join("Api.verse"))
+        .expect("project digest should generate from project file");
+    assert!(project_digest.contains("Double<public>(Value:int)<computes>:int = external {}"));
 }
 
 #[test]
@@ -489,7 +568,7 @@ Location.Left + Location.Forward
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -525,7 +604,7 @@ DataTypes.Answer
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -555,7 +634,7 @@ DataTypes.Answer
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -584,7 +663,7 @@ DataTypes.Answer
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -613,7 +692,7 @@ Err("should not load")
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -643,7 +722,7 @@ Double(20) + Offset
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -676,7 +755,7 @@ Value
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -705,7 +784,7 @@ fn evaluates_cross_file_implicit_sibling_source_extension_method() {
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -741,7 +820,7 @@ Answer
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -772,7 +851,7 @@ using { Ops }
     );
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
-        Value::Number(42.0)
+        Value::Int(42)
     );
 }
 
@@ -1128,7 +1207,7 @@ UtilityFunctions<public> := module:
 UtilityFunctions.Sum(DataTypes.tile_coordinate{Left := 40, Forward := 2})
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1213,7 +1292,7 @@ using { DataTypes }
 point{X := 40}.Sum()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1233,7 +1312,7 @@ using { DataTypes }
 point{X := 40}.(DataTypes:)Sum()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1251,7 +1330,7 @@ using { Library.Numbers }
 40.(Library.Numbers:)Bump() + 0.(Numbers:)Bump()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1285,7 +1364,7 @@ Offset(Value:int, ?Amount:int = Value + 1):int = Value + Amount
 Offset(10) + Offset(10, ?Amount := 5)
 "#;
 
-    assert_eq!(eval(source), Value::Number(36.0));
+    assert_eq!(eval(source), Value::Int(36));
 }
 
 #[test]
@@ -1295,7 +1374,7 @@ Bonus((Base:int, ?Amount:int = Base + 2)):int = Amount
 Bonus(40)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1317,7 +1396,7 @@ DataTypes<public> := module:
 DataTypes.counter{}.WithValue(42).Reveal()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

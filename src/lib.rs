@@ -1,18 +1,30 @@
 pub mod ast;
 pub mod checker;
 pub(crate) mod colors;
+pub mod desugar;
+pub mod digest;
 pub mod error;
 pub mod eval;
+pub mod ir;
 pub mod lexer;
 pub mod parser;
 pub mod project;
 pub mod token;
 
-pub use checker::{Checker, Type, check_source};
-pub use error::{Diagnostic, VerseError};
+pub use checker::{
+    CheckResult, Checker, Effect, EffectSet, IntRange, RecoveredCheckResult, Type, TypeVariable,
+    TypeVariableBounds, check_source, check_source_to_typed_program, check_source_with_diagnostics,
+    check_source_with_recovery,
+};
+pub use desugar::desugar_program;
+pub use digest::{generate_digest, generate_digest_for_program, generate_project_digest};
+pub use error::{
+    DIAGNOSTIC_DESCRIPTORS, Diagnostic, DiagnosticCode, DiagnosticSeverity, VerseError,
+};
 pub use eval::{Interpreter, Value};
+pub use ir::TypedProgram;
 pub use parser::parse_source;
-pub use project::{check_project_file, load_project_source, run_project_file};
+pub use project::{SourceProject, check_project_file, load_project_source, run_project_file};
 
 pub fn run_source(source: &str) -> Result<Value, VerseError> {
     let mut interpreter = Interpreter::new();

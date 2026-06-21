@@ -45,7 +45,7 @@ factorial(n:int):int = if (n <= 1) {
 factorial(5)
 "#;
 
-    assert_eq!(eval(source), Value::Number(120.0));
+    assert_eq!(eval(source), Value::Int(120));
 }
 
 #[test]
@@ -57,7 +57,7 @@ Score(Value:string):int = 2
 Score(1) + Score("bonus")
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -76,7 +76,7 @@ Process():int =
 Process()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -93,7 +93,7 @@ Found := if (Value := Pick[40]). Value else. 0
 Found + Pick("bonus")
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -251,7 +251,7 @@ add(a: number, b: number): number = a + b
 add(x, 2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -276,7 +276,7 @@ MakeAdder(X:int) = {
 MakeAdder(40)(2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -287,7 +287,7 @@ Fn:type{_(:int):int} = Double
 Fn(21)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -298,7 +298,7 @@ Double(X:int):int = X * 2
 Apply(Double, 21)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -311,7 +311,7 @@ set Handler = option{Custom}
 Handler?()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -322,7 +322,7 @@ Handler:type{_(:int)<decides><transacts>:int} = Pick
 if (Value := Handler[42]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -337,7 +337,7 @@ Handler:type{_()<transacts>:int} = Compute
 Handler()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -352,7 +352,7 @@ Handler:type{_()<computes>:int} = Stable
 Handler()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -366,7 +366,7 @@ Double(X:int)<computes>:int = X * 2
 Double(21)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -424,13 +424,54 @@ Use()<reads>:int = Base()
 }
 
 #[test]
+fn effect_set_models_call_capability_lattice() {
+    let transacts = EffectSet::from_names(["transacts"]);
+    assert!(
+        transacts
+            .call_allowed_effects()
+            .contains(&Effect::Transacts)
+    );
+    assert!(transacts.call_allowed_effects().contains(&Effect::Writes));
+    assert!(transacts.call_allowed_effects().contains(&Effect::Computes));
+    assert!(
+        transacts
+            .call_allowed_effects()
+            .contains(&Effect::Converges)
+    );
+
+    let reads = EffectSet::from_names(["reads"]);
+    assert!(reads.call_allowed_effects().contains(&Effect::Reads));
+    assert!(reads.call_allowed_effects().contains(&Effect::Computes));
+    assert!(!reads.call_allowed_effects().contains(&Effect::Writes));
+
+    let no_rollback = EffectSet::from_names(std::iter::empty::<&str>());
+    assert!(no_rollback.has_no_rollback());
+    assert_eq!(no_rollback.render_declared(), "<no_rollback>");
+}
+
+#[test]
+fn effect_set_models_function_type_assignability() {
+    let expected = EffectSet::from_names(["computes"]);
+    let actual = EffectSet::from_names(["converges"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["computes"]);
+    let actual = EffectSet::from_names(["transacts"]);
+    assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["transacts", "decides"]);
+    let actual = EffectSet::from_names(["transacts"]);
+    assert!(!expected.assignable_from(&actual));
+}
+
+#[test]
 fn evaluates_function_definitions_with_name_specifiers() {
     let source = r#"
 Visible<public>(X:int):int = X + 1
 Visible(41)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -622,7 +663,7 @@ WriteValue()<writes>:int = 1
 ReadValue() + AllocateValue() + WriteValue()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -644,7 +685,7 @@ Accept(Key:comparable):int = 42
 Accept((1, "a"))
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -758,7 +799,7 @@ Scale(?Value:int, ?Factor:int = 2):int = Value * Factor
 Scale(?Value := 5) + Scale(?Factor := 3, ?Value := 5)
 "#;
 
-    assert_eq!(eval(source), Value::Number(25.0));
+    assert_eq!(eval(source), Value::Int(25));
 }
 
 #[test]
@@ -768,7 +809,7 @@ BuyMousetrap(CoinsPerMousetrap:int):int = CoinsPerMousetrap + 32
 BuyMousetrap(CoinsPerMousetrap := 10)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -782,7 +823,7 @@ Difference(Left:int, Right:int):int = Left - Right
 Difference(Right := 8, Left := 50)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -797,7 +838,7 @@ Pick(Value:string, Bonus:int):int = Bonus + 100
 Pick(Bonus := 2, Value := 40)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -940,7 +981,7 @@ ClampLocal(Value:int):int = {
 ClampLocal(-5) + ClampLocal(7)
 "#;
 
-    assert_eq!(eval(source), Value::Number(7.0));
+    assert_eq!(eval(source), Value::Int(7));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -974,86 +1015,66 @@ Sign(Value:int):int = if (Value < 0) {
 Sign(-2) + Sign(4)
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
 }
 
 #[test]
-fn rejects_unreachable_statement_after_return() {
-    let error = check_source(
+fn warns_unreachable_statement_after_return() {
+    assert_check_warning(
         r#"
 Bad():int = {
     return 1
     2
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after `return`")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after `return`",
     );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_bare_return() {
-    let error = check_source(
+fn warns_unreachable_statement_after_bare_return() {
+    assert_check_warning(
         r#"
 Bad():void =
     return
     print("bad")
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after `return`")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after `return`",
     );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_never_expression() {
-    let error = check_source(
+fn warns_unreachable_statement_after_never_expression() {
+    assert_check_warning(
         r#"
 Bad():int =
     Err("fatal")
     42
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_never_binding_initializer() {
-    let error = check_source(
+fn warns_unreachable_statement_after_never_binding_initializer() {
+    assert_check_warning(
         r#"
 Bad():int = {
     Value:int = Err("fatal")
     42
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_never_call_argument() {
-    let error = check_source(
+fn warns_unreachable_statement_after_never_call_argument() {
+    assert_check_warning(
         r#"
 Halt()<computes> = Err("fatal")
 Bad():int = {
@@ -1061,32 +1082,22 @@ Bad():int = {
     42
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_never_collection_item() {
-    let error = check_source(
+fn warns_unreachable_statement_after_never_collection_item() {
+    assert_check_warning(
         r#"
 Bad():int = {
     Values:[]int = array{1, Err("fatal")}
     42
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
@@ -1618,7 +1629,7 @@ Origin := MakeEntity("Cyd")
 Full.Health + DefaultHealth.Health + Origin.Position.Z
 "#;
 
-    assert_eq!(eval(source), Value::Number(149.0));
+    assert_eq!(eval(source), Value::Int(149));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1676,7 +1687,7 @@ ReadID(Item:entity):int = Item.ID
 ReadID(boss{ID := 40, Threat := 2})
 "#;
 
-    assert_eq!(eval(source), Value::Number(40.0));
+    assert_eq!(eval(source), Value::Int(40));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1736,7 +1747,7 @@ ScoreFor(Scores:player_map, Name:string)<decides><transacts>:int = Scores[Name]
 if (Score := ScoreFor[map{"ada" => 42}, "ada"]). Score else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

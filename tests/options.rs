@@ -32,7 +32,7 @@ else:
     Total + 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -77,7 +77,7 @@ Second := if (Value := Empty?). Value else. 0
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -94,7 +94,7 @@ Second := if (Empty?). 0 else. 2
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -140,7 +140,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(25.0));
+    assert_eq!(eval(source), Value::Int(25));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -157,7 +157,7 @@ Maybe:?int = option{
 if (Value := Maybe?). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -171,7 +171,7 @@ Maybe:?int = option{Value := 40; Value + 2}
 if (Value := Maybe?). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -192,7 +192,7 @@ FromReturn := if (Value := Empty()?). Value else. 5
 Default(false) + Default(option{30}) + Pack(array{false, option{40}}) + FromReturn
 "#;
 
-    assert_eq!(eval(source), Value::Number(92.0));
+    assert_eq!(eval(source), Value::Int(92));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -235,7 +235,7 @@ Second := if (Value := Missing?). Value else. 0
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -257,7 +257,7 @@ else:
     Total + 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -274,7 +274,7 @@ set Maybe = option{42}
 Maybe?
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]

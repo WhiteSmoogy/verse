@@ -11,7 +11,7 @@ Env:session_environment = session_environment.Edit
 if (Env = session_environment.Edit and Env <> session_environment.Live). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -28,7 +28,7 @@ case (Env):
     session_environment.Live => 3
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -53,7 +53,7 @@ Env:session_environment = GetSession().Environment()
 if (Env = session_environment.Edit). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -69,7 +69,7 @@ case (GetSession().Environment()):
     session_environment.Live => 3
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -102,7 +102,7 @@ MaybeTeam:?team = false
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -117,7 +117,7 @@ MaybeTeam:team_reference = false
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -133,7 +133,7 @@ var TeamMap:team_map = map{}
 TeamMap.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -148,7 +148,7 @@ MaybeEntity:?entity_ref = false
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -172,7 +172,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -196,7 +196,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -224,7 +224,7 @@ spawn{Run()}
 Trace
 "#;
 
-    assert_eq!(eval(source), Value::Number(140.0));
+    assert_eq!(eval(source), Value::Int(140));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -252,7 +252,7 @@ spawn{Run()}
 Trace
 "#;
 
-    assert_eq!(eval(source), Value::Number(140.0));
+    assert_eq!(eval(source), Value::Int(140));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -285,7 +285,7 @@ AfterParentResume:int = Trace
 AfterParentResume
 "#;
 
-    assert_eq!(eval(source), Value::Number(5023.0));
+    assert_eq!(eval(source), Value::Int(5023));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -307,7 +307,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -330,7 +330,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(21.0));
+    assert_eq!(eval(source), Value::Int(21));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -352,7 +352,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -370,7 +370,7 @@ spawn{Wait()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -388,7 +388,7 @@ spawn{Wait()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -410,7 +410,7 @@ AfterSecond:int = Result
 AfterFirst * 10 + AfterSecond
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -431,7 +431,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -452,7 +452,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -470,7 +470,7 @@ spawn{Wait()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -491,7 +491,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -517,7 +517,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -543,7 +543,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -569,7 +569,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -595,7 +595,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -822,7 +822,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -973,7 +973,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1002,7 +1002,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1157,7 +1157,7 @@ var SavedD:weak_map(player, player_profile_data) = map{}
 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1220,7 +1220,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1278,7 +1278,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1388,7 +1388,7 @@ Checked:[]int = if (Result := FitsInPlayerMap[Values]). Result else. array{}
 if (Value := Checked[2]). Checked.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(6.0));
+    assert_eq!(eval(source), Value::Int(6));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1429,7 +1429,7 @@ Large := for (I := 1..33000). I
 if (Checked := FitsInPlayerMap[Large]). Checked.Length else. 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1452,7 +1452,7 @@ Make():int = 42
 if (Checked := FitsInPlayerMap[Make]). Checked() else. 7
 "#;
 
-    assert_eq!(eval(source), Value::Number(7.0));
+    assert_eq!(eval(source), Value::Int(7));
 }
 
 #[test]
@@ -1501,7 +1501,7 @@ fn evaluates_get_simulation_elapsed_time_function() {
     let source = "GetSimulationElapsedTime()";
     let value = eval(source);
 
-    assert!(matches!(value, Value::Number(seconds) if seconds >= 0.0));
+    assert!(matches!(value, Value::Float(seconds) if seconds >= 0.0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Float
@@ -1516,7 +1516,7 @@ Second := GetSimulationElapsedTime()
 if (Second >= First). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1622,7 +1622,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1639,7 +1639,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

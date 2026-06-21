@@ -8,7 +8,7 @@ use common::*;
 fn evaluates_hexadecimal_integer_literals() {
     let source = "0x7F + 0xFACE";
 
-    assert_eq!(eval(source), Value::Number(64333.0));
+    assert_eq!(eval(source), Value::Int(64333));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -66,7 +66,7 @@ fn rejects_empty_hexadecimal_integer_literal() {
 fn evaluates_inline_block_comments() {
     let source = "1<# inline comment #> + 2";
 
-    assert_eq!(eval(source), Value::Number(3.0));
+    assert_eq!(eval(source), Value::Int(3));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -83,7 +83,7 @@ Value := 40
 Value + 2
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -99,7 +99,7 @@ fn evaluates_indented_comments() {
 40 + 2
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -435,7 +435,7 @@ Scores:[char]int = map{'a' => 41}
 if (Score := Scores['a']). Score + 1 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -508,7 +508,7 @@ Text:string = "José"
 Text.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(5.0));
+    assert_eq!(eval(source), Value::Int(5));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -574,7 +574,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -759,7 +759,7 @@ Scale(Value:float):float = Value + 0.5
 Scale(41)
 "#;
 
-    assert_eq!(eval(source), Value::Number(41.5));
+    assert_eq!(eval(source), Value::Float(41.5));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Float
@@ -820,7 +820,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -852,7 +852,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(21.0));
+    assert_eq!(eval(source), Value::Int(21));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -885,7 +885,7 @@ RemoveMiss := if (Part := Text.RemoveElement[9]). Part.Length else. 30
 FindHit + FindMiss + SliceMiss + RemoveMiss
 "#;
 
-    assert_eq!(eval(source), Value::Number(60.0));
+    assert_eq!(eval(source), Value::Int(60));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -914,7 +914,7 @@ Fourth := if (Result := RemoveMissing?). Result.Length else. 0
 First + Second + Third + Fourth
 "#;
 
-    assert_eq!(eval(source), Value::Number(71.0));
+    assert_eq!(eval(source), Value::Int(71));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -940,7 +940,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(5.0));
+    assert_eq!(eval(source), Value::Int(5));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -954,7 +954,7 @@ Values:[]int = array{3, 4, 5}
 Values[0] + Values[1] + Values[2]
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
 }
 
 #[test]
@@ -968,7 +968,7 @@ Scores:[string]int = map{
 Scores["alice"] + Scores["bob"] + Scores.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(37.0));
+    assert_eq!(eval(source), Value::Int(37));
 }
 
 #[test]
@@ -978,7 +978,7 @@ Pair := (40, "ignored", 2)
 Pair(0) + Pair(2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -1005,7 +1005,7 @@ Maybe:?int = option{40}
 Maybe? + 2
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -1019,7 +1019,7 @@ Second := if (Value := Missing?). Value else. 0
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1037,7 +1037,7 @@ Second := if (Value := Missing?). Value else. 0
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1054,7 +1054,7 @@ Second := if (Value := Blocked?). if (Value?). 0 else. 0 else. 2
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

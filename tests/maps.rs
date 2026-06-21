@@ -28,7 +28,7 @@ else:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -56,7 +56,7 @@ else:
         0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -73,7 +73,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -138,7 +138,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(44.0));
+    assert_eq!(eval(source), Value::Int(44));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -153,7 +153,7 @@ Scores:[string]int = map{"alice" => 10, "bob" => 20}
 Values.Length + Scores.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(5.0));
+    assert_eq!(eval(source), Value::Int(5));
 }
 
 #[test]
@@ -165,7 +165,7 @@ set Scores["bob"] = 5
 Scores["alice"] + Scores["bob"] + Scores.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(27.0));
+    assert_eq!(eval(source), Value::Int(27));
 }
 
 #[test]
@@ -189,7 +189,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -222,7 +222,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -277,7 +277,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(2198.0));
+    assert_eq!(eval(source), Value::Int(2198));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -317,7 +317,7 @@ for (Score : Scores) {
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(5.0));
+    assert_eq!(eval(source), Value::Int(5));
 }
 
 #[test]
@@ -331,7 +331,7 @@ for (Rank -> Score : Scores) {
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(8.0));
+    assert_eq!(eval(source), Value::Int(8));
 }
 
 #[test]
@@ -354,7 +354,7 @@ Scores:[?int]int = map{option{7} => 42}
 if (Value := Scores[option{7}]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -368,7 +368,7 @@ Scores:[comparable]int = map{option{7} => 42}
 if (Value := Scores[option{7}]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -383,7 +383,7 @@ Scores:[float]int = map{Key => 42}
 if (Value := Scores[1.5]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -404,7 +404,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -418,7 +418,7 @@ Scores:[comparable]int = map{1.5 => 42}
 if (Value := Scores[1.5]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -432,7 +432,7 @@ Scores:[[]int]int = map{array{1, 2} => 40}
 if (Value := Scores[array{1, 2}]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(40.0));
+    assert_eq!(eval(source), Value::Int(40));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -446,7 +446,7 @@ Nested:[[string]int]int = map{map{"ada" => 1} => 42}
 if (Value := Nested[map{"ada" => 1}]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -519,7 +519,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -535,7 +535,7 @@ Scores:team_map = map{"red" => map{"ada" => 42}}
 if (Value := Scores["red"]["ada"]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -577,7 +577,7 @@ Full := if (Value := Scores["full"]?). Value else. 0
 Empty + Full + Scores.Length
 "#;
 
-    assert_eq!(eval(source), Value::Number(43.0));
+    assert_eq!(eval(source), Value::Int(43));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

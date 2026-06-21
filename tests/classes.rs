@@ -15,7 +15,7 @@ counter := class:
 counter{Value := 21}.Double()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -34,7 +34,7 @@ marker := class:
 marker{Base := 2}.MoveMarker(20, ?Scale := 2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -50,7 +50,7 @@ Value:float = 41.0
 Value.AddOne()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Float
@@ -71,7 +71,7 @@ using { Second }
 40.(First:)Bump() + 1.(Second:)Bump()
 "#;
 
-    assert_eq!(eval(source), Value::Number(142.0));
+    assert_eq!(eval(source), Value::Int(142));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -114,7 +114,7 @@ GM := game_manager{}
 GM.ProcessScore(5)
 "#;
 
-    assert_eq!(eval(source), Value::Number(50.0));
+    assert_eq!(eval(source), Value::Int(50));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -136,7 +136,7 @@ counter := class:
 counter{}.Use()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -158,7 +158,7 @@ manager := class:
 manager{}.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -181,7 +181,7 @@ manager := class:
 manager{}.Use()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -222,7 +222,7 @@ token := class:
 if (Value := token{Value := 42}.Pick[]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -365,7 +365,7 @@ Ride:rideable = bicycle{}
 Ride.Mount()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -389,7 +389,7 @@ Ride:rideable = horse{}
 Ride.MoveForward() + Ride.Mount()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -415,7 +415,7 @@ Ride:rideable = saddle_horse{}
 Ride.MoveForward() + Ride.Mount()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -434,7 +434,7 @@ Value:taggable = tagged{}
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -502,7 +502,7 @@ Target:triggerable = button{}
 Target.Trigger() + Target.Trigger()
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -524,7 +524,7 @@ Target.Activate()
 if (Target.Triggered?). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -570,7 +570,7 @@ Value:scorable = player_score{}
 Value.DoubledScore()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -589,7 +589,7 @@ box := class(secret):
 box{}.Reveal()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -609,7 +609,7 @@ box := class(secret):
 box{}.Reveal()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -708,7 +708,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -736,7 +736,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -763,7 +763,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -785,7 +785,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -953,7 +953,7 @@ widget<native><public> := class<concrete>:
 widget{}.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1008,7 +1008,7 @@ Counter.Increment()
 Counter.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1093,7 +1093,7 @@ else:
     Counter.Value + 41
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1133,7 +1133,7 @@ counter := class:
 counter{}.Add(Right := 2, Left := 40)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1177,7 +1177,7 @@ Box := child_box(int){}
 Box.Count() + Box.Extra
 "#;
 
-    assert_eq!(eval(source), Value::Number(2.0));
+    assert_eq!(eval(source), Value::Int(2));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1200,7 +1200,7 @@ Value:child_view(int) = box{}
 Value.Elements.Length + Value.Extra
 "#;
 
-    assert_eq!(eval(source), Value::Number(2.0));
+    assert_eq!(eval(source), Value::Int(2));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1454,7 +1454,7 @@ Set:classifiable_subset(tag) = MakeClassifiableSubset(array{TagType})
 if (Set.Contains[TagType]). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1472,7 +1472,7 @@ Use(Root:castable_subtype(tag), Leaf:castable_subtype(root_tag)):int = 42
 Use(RootType, LeafType)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1487,7 +1487,7 @@ Use(TagType:castable_subtype(tag)):int = 42
 Use(puzzle_light)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1556,7 +1556,7 @@ Use(TagType:concrete_subtype(tag)):int = 42
 Use(puzzle_light)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1572,7 +1572,7 @@ Use(TagType:concrete_subtype(castable_subtype(tag))):int = 42
 Use(puzzle_light)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1665,7 +1665,7 @@ Set:classifiable_subset(moveable) = MakeClassifiableSubset(array{Ride})
 Ride.MoveForward() + Ride.Mount()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1694,7 +1694,7 @@ Root := node{}
 if (Root.Next?). 0 else. 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1802,7 +1802,7 @@ Counter := counter{}
 Counter.Reveal()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1822,7 +1822,7 @@ Counter := child_counter{}
 Counter.Reveal()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2096,7 +2096,7 @@ Default := MakePlayer("Bea")
 Hero.Score + Default.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2117,7 +2117,7 @@ set Hero.Score += 32
 Alias.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2137,7 +2137,7 @@ Second := entity{Name := "same"}
 if (First = Alias and First <> Second). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2157,7 +2157,7 @@ Second := MakeToken()
 if (First <> Second). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2175,7 +2175,7 @@ MakeToken()<transacts>:token = token{ID := 42}
 MakeToken().ID
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2228,7 +2228,7 @@ Second := player{Name := "same"}
 if (First = Second). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2271,7 +2271,7 @@ Right := handler{Callback := Read}
 if (Left = Alias and Left <> Right). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2296,7 +2296,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2367,7 +2367,7 @@ light_component := class<final_super>(component):
 light_component{}.Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2389,7 +2389,7 @@ Accept(Item:component):int = 2
 Read(child_component{}) + Accept(child_component{})
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2496,7 +2496,7 @@ Use(Tag:tag):int = 42
 Use(puzzle_light{})
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2515,7 +2515,7 @@ UseFruit(Tag:fruit_tag):int = 22
 UseTag(banana_tag{}) + UseFruit(banana_tag{})
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2774,7 +2774,7 @@ Hero := player{}
 Hero.ID + Hero.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2831,7 +2831,7 @@ Hero := player{}
 Hero.Score() + Hero.Bonus()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2887,7 +2887,7 @@ settings := class<concrete>():
 settings{}.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -2984,7 +2984,7 @@ set Head.Next = option{Tail}
 Head.Data + if (Next := Head.Next?). Next.Data else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3005,7 +3005,7 @@ Item := settings{}
 Item.BasicInt + Item.Bonus
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3021,7 +3021,7 @@ settings := class:
 settings{}.BasicInt
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3039,7 +3039,7 @@ settings := class:
 settings{}.BasicInt
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3061,7 +3061,7 @@ settings := class:
 settings{}.BasicInt
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3211,7 +3211,7 @@ Base:entity = boss{ID := 40, Threat := 2}
 ReadID(Base)
 "#;
 
-    assert_eq!(eval(source), Value::Number(40.0));
+    assert_eq!(eval(source), Value::Int(40));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3236,7 +3236,7 @@ Use(Thing:moveable):int = Thing.MoveForward()
 Use(horse{})
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3260,7 +3260,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3309,7 +3309,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3459,7 +3459,7 @@ Hero.AddScore(40)
 Hero.ScorePlus(2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3483,7 +3483,7 @@ Hero.Activate()
 if (Hero.Active?) { 42 } else { 0 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3552,7 +3552,7 @@ Item:base = derived{}
 Item.ComputeDouble()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3594,7 +3594,7 @@ Item.Add(2)
 Item.Value + Item.Calls
 "#;
 
-    assert_eq!(eval(source), Value::Number(43.0));
+    assert_eq!(eval(source), Value::Int(43));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3621,7 +3621,7 @@ derived := class(base):
 derived{}.ComputeDouble()
 "#;
 
-    assert_eq!(eval(source), Value::Number(40.0));
+    assert_eq!(eval(source), Value::Int(40));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3670,7 +3670,7 @@ Hero.ApplyBonus(20)
 Hero.ScorePlus(2)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3691,7 +3691,7 @@ Hero := player{}
 Hero.AddScore(20).AddScore(22).Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3713,7 +3713,7 @@ Hero := player{}
 Hero.Read()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3848,7 +3848,7 @@ Value := steps{}
 Value.Step1 + Value.Step2 + Value.Step3 - 13
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3871,7 +3871,7 @@ Hero := player{}
 Hero.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3938,7 +3938,7 @@ Formatter := formatter{}
 Formatter.Total()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3960,7 +3960,7 @@ Value := c1{}
 Value.F(1) + Value.F(1.0)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -3985,7 +3985,7 @@ Value := c1{}
 Value.F(0) + Value.F("bonus")
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4013,7 +4013,7 @@ Value := c1{}
 Value.Total()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4056,7 +4056,7 @@ Value := c{}
 Value.(c:)F(40)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4077,7 +4077,7 @@ Ride := bicycle{}
 Ride.(rideable:)Mount()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4104,7 +4104,7 @@ Obj := collision{}
 Obj.(i:)B(1) + Obj.(j:)B(1)
 "#;
 
-    assert_eq!(eval(source), Value::Number(52.0));
+    assert_eq!(eval(source), Value::Int(52));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4335,7 +4335,7 @@ Hero := player{}
 if (Value := Hero.Pick[]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4358,7 +4358,7 @@ Captured:?int = option{Hero.Pick[1]}
 Found + Missing + if (Value := Captured?). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4628,7 +4628,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(72.0));
+    assert_eq!(eval(source), Value::Int(72));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -4644,7 +4644,7 @@ SliceMiss := if (Slice := Values.Slice[4]). Slice.Length else. 10
 SliceHit + SliceMiss
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

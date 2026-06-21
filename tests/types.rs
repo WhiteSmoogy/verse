@@ -3,6 +3,7 @@
 
 mod common;
 use common::*;
+use verse_rs::ast::{ExprKind, StmtKind, TypeName};
 
 #[test]
 fn checks_distinct_int_and_float_annotations() {
@@ -13,11 +14,98 @@ Widened:float = Whole
 Whole + if (Value := Int[Fraction]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(41.0));
+    assert_eq!(eval(source), Value::Int(41));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
     );
+}
+
+#[test]
+fn evaluates_int_range_type_annotation_for_integer_literals() {
+    let source = r#"
+Small:int_range(-5, 10) = -5
+Small
+"#;
+
+    assert_eq!(eval(source), Value::Int(-5));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::IntRange(IntRange::new(-5, 10))
+    );
+}
+
+#[test]
+fn evaluates_int_range_type_alias_annotation() {
+    let source = r#"
+small := int_range(0, 10)
+Value:small = 7
+Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(7));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::IntRange(IntRange::new(0, 10))
+    );
+}
+
+#[test]
+fn rejects_integer_literal_outside_int_range_annotation() {
+    let error = check_source("Value:int_range(0, 10) = 11").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("annotated as `int_range(0, 10)`")
+    );
+}
+
+#[test]
+fn rejects_non_literal_int_narrowing_to_int_range() {
+    let error = check_source(
+        r#"
+Base:int = 7
+Small:int_range(0, 10) = Base
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("annotated as `int_range(0, 10)`")
+    );
+}
+
+#[test]
+fn rejects_empty_int_range_type_annotation() {
+    let error = parse_source("Value:int_range(10, 0) = 1").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("int_range minimum cannot be greater than maximum")
+    );
+}
+
+#[test]
+fn exposes_type_variables_from_type_parameters() {
+    let program =
+        parse_source("Accept(Value:t where t:subtype(comparable)):t = Value").expect("parse");
+    let StmtKind::Let { expr, .. } = &program.statements[0].kind else {
+        panic!("expected function binding");
+    };
+    let ExprKind::Function { params, .. } = &expr.kind else {
+        panic!("expected function expression");
+    };
+
+    let variables = TypeVariable::from_type_params(&params[0].type_params);
+    assert_eq!(variables.len(), 1);
+    assert_eq!(variables[0].name, "t");
+    assert!(variables[0].explicit);
+    assert_eq!(variables[0].bounds.positive, Some(TypeName::Comparable));
+    assert_eq!(variables[0].bounds.negative, None);
 }
 
 #[test]
@@ -45,10 +133,7 @@ Key:comparable = option{7}
 Key
 "#;
 
-    assert_eq!(
-        eval(source),
-        Value::Option(Some(Box::new(Value::Number(7.0))))
-    );
+    assert_eq!(eval(source), Value::Option(Some(Box::new(Value::Int(7)))));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Comparable
@@ -63,7 +148,7 @@ Key:key = 42
 Key
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Comparable
@@ -99,7 +184,7 @@ ScoreStack:modifier_stack(int) = external {}
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -149,7 +234,7 @@ Subset:classifiable_subset(int) = MakeClassifiableSubset(array{1, 2, 3})
 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -219,7 +304,7 @@ Set:classifiable_subset(entity) = MakeClassifiableSubset(array{Hero})
 Hero.ID + Hero.Health
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -234,7 +319,7 @@ Set:classifiable_subset(tag) = MakeClassifiableSubset(array{TagType})
 if (Set.Contains[TagType]). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -252,7 +337,7 @@ All := if (Set.ContainsAll[TagTypes]). 22 else. 0
 Any + All
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -269,7 +354,7 @@ Combined:classifiable_subset(tag) = Left + Right
 if (Combined.Contains[TagType]). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -327,7 +412,7 @@ MissError := if (Reason := Success.GetError[]). Reason.Length else. 1
 GotSuccess + MissSuccess + GotError + MissError
 "#;
 
-    assert_eq!(eval(source), Value::Number(44.0));
+    assert_eq!(eval(source), Value::Int(44));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -483,7 +568,7 @@ Value:score = 42
 Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

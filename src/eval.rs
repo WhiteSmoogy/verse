@@ -14,13 +14,26 @@ use crate::ast::{
     TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::colors::NAMED_COLORS;
+use crate::desugar::desugar_program;
 use crate::error::VerseError;
+use crate::ir::TypedProgram;
 use crate::parser::parse_source;
 use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 
+mod numeric;
+pub use numeric::RationalValue;
+use numeric::{
+    RuntimeNumber, numeric_values_equal, rational_or_int, runtime_number, runtime_number_to_f64,
+    runtime_number_to_rational,
+};
+mod scope;
+pub use scope::Env;
+use scope::EnvTransaction;
+mod task;
+use task::{RuntimeScheduler, StructuredTaskWait};
+pub use task::{RuntimeSuspension, RuntimeTask};
+
 type NativeFn = fn(Vec<Value>, Span) -> Result<NativeResult, VerseError>;
-type SuspensionResume = dyn Fn(&Interpreter, Value) -> Result<Flow, VerseError>;
-type SuspensionCancel = dyn Fn(&Interpreter) -> Result<(), VerseError>;
 type ValueContinuation = dyn Fn(&Interpreter, Value) -> Result<Flow, VerseError>;
 type ValuesContinuation = dyn Fn(&Interpreter, Vec<Value>) -> Result<Flow, VerseError>;
 type CallArgsContinuation = dyn Fn(&Interpreter, Vec<CallValue>) -> Result<Flow, VerseError>;
@@ -38,48 +51,6 @@ const PLAYER_MAP_MAX_SIZE_DEPTH: usize = 128;
 pub enum NativeResult {
     Value(Value),
     Failure(&'static str),
-}
-
-pub struct RuntimeTask {
-    state: RefCell<RuntimeTaskState>,
-    awaiters: RefCell<Vec<RuntimeTaskAwaiter>>,
-    scoped_children: RefCell<Vec<Rc<RuntimeTask>>>,
-}
-
-enum RuntimeTaskAwaiter {
-    Task(Rc<RuntimeTask>),
-    Structured {
-        task: Rc<RuntimeTask>,
-        branch_index: usize,
-    },
-}
-
-enum RuntimeTaskState {
-    Complete(Result<Value, VerseError>),
-    Suspended(RuntimeSuspension),
-    Running,
-}
-
-#[derive(Clone)]
-pub struct RuntimeSuspension {
-    wait: RuntimeWait,
-    resume: Rc<SuspensionResume>,
-    cancel: Rc<SuspensionCancel>,
-}
-
-#[derive(Clone)]
-enum RuntimeWait {
-    None,
-    Event(Rc<RefCell<Vec<Rc<RuntimeTask>>>>),
-    SleepNextTick(Rc<RuntimeScheduler>),
-    SleepUntil(Rc<RuntimeScheduler>, Instant),
-    Task(Rc<RuntimeTask>),
-    StructuredTasks(Rc<RefCell<StructuredTaskWait>>),
-}
-
-struct StructuredTaskWait {
-    tasks: Vec<(usize, Rc<RuntimeTask>)>,
-    registered: bool,
 }
 
 struct StructuredSyncState {
@@ -115,173 +86,11 @@ enum FailureEval {
     Pending(RuntimeSuspension),
 }
 
-struct RuntimeScheduler {
-    sleepers: RefCell<Vec<Rc<RuntimeTask>>>,
-    timed_sleepers: RefCell<Vec<(Instant, Rc<RuntimeTask>)>>,
-    detached_tasks: RefCell<Vec<Rc<RuntimeTask>>>,
-}
-
-impl RuntimeScheduler {
-    fn new() -> Self {
-        Self {
-            sleepers: RefCell::new(Vec::new()),
-            timed_sleepers: RefCell::new(Vec::new()),
-            detached_tasks: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn schedule_next_tick(&self, task: Rc<RuntimeTask>) {
-        self.sleepers.borrow_mut().push(task);
-    }
-
-    fn schedule_until(&self, deadline: Instant, task: Rc<RuntimeTask>) {
-        self.timed_sleepers.borrow_mut().push((deadline, task));
-    }
-
-    fn take_next_tick_sleepers(&self) -> Vec<Rc<RuntimeTask>> {
-        std::mem::take(&mut *self.sleepers.borrow_mut())
-            .into_iter()
-            .filter(|task| task.is_suspended())
-            .collect()
-    }
-
-    fn take_ready_timed_sleepers(&self, now: Instant) -> Vec<Rc<RuntimeTask>> {
-        let mut ready = Vec::new();
-        self.timed_sleepers.borrow_mut().retain(|(deadline, task)| {
-            if !task.is_suspended() {
-                false
-            } else if *deadline <= now {
-                ready.push(task.clone());
-                false
-            } else {
-                true
-            }
-        });
-        ready
-    }
-
-    fn next_timed_deadline(&self) -> Option<Instant> {
-        self.timed_sleepers
-            .borrow()
-            .iter()
-            .filter(|(_, task)| task.is_suspended())
-            .map(|(deadline, _)| *deadline)
-            .min()
-    }
-
-    fn track_detached_task(&self, task: Rc<RuntimeTask>) {
-        if task.is_complete() {
-            return;
-        }
-        let mut tasks = self.detached_tasks.borrow_mut();
-        if tasks.iter().any(|existing| Rc::ptr_eq(existing, &task)) {
-            return;
-        }
-        tasks.push(task);
-    }
-
-    fn cleanup_detached_tasks(&self) {
-        self.detached_tasks
-            .borrow_mut()
-            .retain(|task| !task.is_complete());
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct RationalValue {
-    numerator: i64,
-    denominator: i64,
-}
-
-impl RationalValue {
-    fn new(numerator: i64, denominator: i64) -> Self {
-        debug_assert!(denominator != 0, "rational denominator cannot be zero");
-        let mut numerator = numerator;
-        let mut denominator = denominator;
-        if denominator < 0 {
-            numerator = -numerator;
-            denominator = -denominator;
-        }
-        let divisor = gcd_i64(numerator, denominator);
-        Self {
-            numerator: numerator / divisor,
-            denominator: denominator / divisor,
-        }
-    }
-
-    fn from_int(value: i64) -> Self {
-        Self {
-            numerator: value,
-            denominator: 1,
-        }
-    }
-
-    fn to_f64(self) -> f64 {
-        self.numerator as f64 / self.denominator as f64
-    }
-
-    fn is_integer(self) -> bool {
-        self.denominator == 1
-    }
-
-    fn add(self, other: Self) -> Self {
-        Self::new(
-            self.numerator * other.denominator + other.numerator * self.denominator,
-            self.denominator * other.denominator,
-        )
-    }
-
-    fn subtract(self, other: Self) -> Self {
-        Self::new(
-            self.numerator * other.denominator - other.numerator * self.denominator,
-            self.denominator * other.denominator,
-        )
-    }
-
-    fn multiply(self, other: Self) -> Self {
-        Self::new(
-            self.numerator * other.numerator,
-            self.denominator * other.denominator,
-        )
-    }
-
-    fn divide(self, other: Self) -> Option<Self> {
-        (other.numerator != 0).then(|| {
-            Self::new(
-                self.numerator * other.denominator,
-                self.denominator * other.numerator,
-            )
-        })
-    }
-}
-
-impl fmt::Display for RationalValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.denominator == 1 {
-            write!(formatter, "{}", self.numerator)
-        } else {
-            write!(formatter, "{}/{}", self.numerator, self.denominator)
-        }
-    }
-}
-
-fn gcd_i64(left: i64, right: i64) -> i64 {
-    let mut left = (left as i128).abs();
-    let mut right = (right as i128).abs();
-    while right != 0 {
-        let next = left % right;
-        left = right;
-        right = next;
-    }
-    left.max(1) as i64
-}
-
 #[derive(Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
     Rational(RationalValue),
-    Number(f64),
     Char(char),
     Char32(char),
     Bool(bool),
@@ -791,8 +600,6 @@ impl fmt::Display for Value {
             Self::Float(value) if value.fract() == 0.0 => write!(formatter, "{value:.1}"),
             Self::Float(value) => write!(formatter, "{value}"),
             Self::Rational(value) => write!(formatter, "{value}"),
-            Self::Number(value) if value.fract() == 0.0 => write!(formatter, "{value:.0}"),
-            Self::Number(value) => write!(formatter, "{value}"),
             Self::Char(value) | Self::Char32(value) => {
                 write!(formatter, "'{}'", render_char_literal(*value))
             }
@@ -1444,9 +1251,9 @@ impl Interpreter {
             },
             false,
         );
-        globals.define("Inf", Value::Number(f64::INFINITY), false);
-        globals.define("NaN", Value::Number(f64::NAN), false);
-        globals.define("PiFloat", Value::Number(std::f64::consts::PI), false);
+        globals.define("Inf", Value::Float(f64::INFINITY), false);
+        globals.define("NaN", Value::Float(f64::NAN), false);
+        globals.define("PiFloat", Value::Float(std::f64::consts::PI), false);
         globals.define(
             "Concatenate",
             Value::NativeFunction {
@@ -1724,6 +1531,15 @@ impl Interpreter {
     }
 
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, VerseError> {
+        let program = desugar_program(program);
+        self.eval_desugared_program(&program)
+    }
+
+    pub fn eval_typed_program(&mut self, program: &TypedProgram) -> Result<Value, VerseError> {
+        self.eval_desugared_program(&program.program)
+    }
+
+    fn eval_desugared_program(&mut self, program: &Program) -> Result<Value, VerseError> {
         let previous_epoch_seconds =
             CURRENT_EPOCH_SECONDS.with(|seconds| -> Result<Option<f64>, VerseError> {
                 Ok(seconds.replace(Some(current_unix_epoch_seconds(Span::new(0, 0, 1, 1))?)))
@@ -4154,13 +3970,10 @@ impl Interpreter {
             ExprKind::Binary { left, op, right } if *op == BinaryOp::Remainder => {
                 let left = self.eval_value(left, env)?;
                 let right = self.eval_value(right, env)?;
-                let divisor = expect_number(&right, "`%` right operand", expr.span)?;
-                if divisor == 0.0 {
+                if numeric_value_is_zero(&right, "`%` right operand", expr.span)? {
                     return Ok(None);
                 }
-                Ok(Some(Value::Number(
-                    expect_number(&left, "`%` left operand", expr.span)? % divisor,
-                )))
+                Ok(Some(remainder_values(left, right, expr.span)?))
             }
             ExprKind::Binary { .. } => {
                 let value = self.eval_value(expr, env)?;
@@ -9835,778 +9648,6 @@ impl Default for Interpreter {
     }
 }
 
-#[derive(Clone)]
-pub struct Env(Rc<RefCell<Scope>>);
-
-struct Scope {
-    values: HashMap<String, Binding>,
-    type_aliases: HashMap<String, TypeName>,
-    extension_methods: HashMap<String, Vec<RuntimeExtensionMethod>>,
-    module_imports: Vec<Env>,
-    module_name: Option<String>,
-    parent: Option<Env>,
-}
-
-#[derive(Clone)]
-struct Binding {
-    value: Value,
-    mutable: bool,
-}
-
-type ArraySnapshot = (Rc<RefCell<Vec<Value>>>, Vec<Value>);
-type MapSnapshot = (Rc<RefCell<Vec<(Value, Value)>>>, Vec<(Value, Value)>);
-type ClassFieldsSnapshot = (
-    Rc<RefCell<Vec<RuntimeClassInstanceField>>>,
-    Vec<RuntimeClassInstanceField>,
-);
-type ModifierStackSnapshot = (
-    Rc<RefCell<Vec<RuntimeModifierEntry>>>,
-    Vec<RuntimeModifierEntry>,
-    Rc<RefCell<u64>>,
-    u64,
-);
-type SubscriptionSnapshot = (
-    Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
-    Vec<RuntimeSubscriptionEntry>,
-    Rc<RefCell<u64>>,
-    u64,
-);
-
-struct ScopeSnapshot {
-    env: Env,
-    values: HashMap<String, Binding>,
-    type_aliases: HashMap<String, TypeName>,
-    extension_methods: HashMap<String, Vec<RuntimeExtensionMethod>>,
-    module_imports: Vec<Env>,
-    module_name: Option<String>,
-}
-
-struct EnvTransaction {
-    scopes: Vec<ScopeSnapshot>,
-    arrays: Vec<ArraySnapshot>,
-    maps: Vec<MapSnapshot>,
-    class_fields: Vec<ClassFieldsSnapshot>,
-    modifier_stacks: Vec<ModifierStackSnapshot>,
-    subscriptions: Vec<SubscriptionSnapshot>,
-}
-
-struct TransactionCollector {
-    seen_scopes: HashSet<usize>,
-    seen_arrays: HashSet<usize>,
-    seen_maps: HashSet<usize>,
-    seen_class_fields: HashSet<usize>,
-    seen_modifier_stacks: HashSet<usize>,
-    seen_subscriptions: HashSet<usize>,
-    scopes: Vec<ScopeSnapshot>,
-    arrays: Vec<ArraySnapshot>,
-    maps: Vec<MapSnapshot>,
-    class_fields: Vec<ClassFieldsSnapshot>,
-    modifier_stacks: Vec<ModifierStackSnapshot>,
-    subscriptions: Vec<SubscriptionSnapshot>,
-}
-
-impl EnvTransaction {
-    fn capture(env: &Env) -> Self {
-        let mut collector = TransactionCollector::new();
-        collector.collect_env(env);
-        Self {
-            scopes: collector.scopes,
-            arrays: collector.arrays,
-            maps: collector.maps,
-            class_fields: collector.class_fields,
-            modifier_stacks: collector.modifier_stacks,
-            subscriptions: collector.subscriptions,
-        }
-    }
-
-    fn restore(self) {
-        for (items, snapshot) in self.arrays {
-            *items.borrow_mut() = snapshot;
-        }
-        for (entries, snapshot) in self.maps {
-            *entries.borrow_mut() = snapshot;
-        }
-        for (fields, snapshot) in self.class_fields {
-            *fields.borrow_mut() = snapshot;
-        }
-        for (entries, entries_snapshot, next_order, next_order_snapshot) in self.modifier_stacks {
-            *entries.borrow_mut() = entries_snapshot;
-            *next_order.borrow_mut() = next_order_snapshot;
-        }
-        for (subscribers, subscribers_snapshot, next_id, next_id_snapshot) in self.subscriptions {
-            *subscribers.borrow_mut() = subscribers_snapshot;
-            *next_id.borrow_mut() = next_id_snapshot;
-        }
-        for snapshot in self.scopes {
-            let mut scope = snapshot.env.0.borrow_mut();
-            scope.values = snapshot.values;
-            scope.type_aliases = snapshot.type_aliases;
-            scope.extension_methods = snapshot.extension_methods;
-            scope.module_imports = snapshot.module_imports;
-            scope.module_name = snapshot.module_name;
-        }
-    }
-}
-
-impl TransactionCollector {
-    fn new() -> Self {
-        Self {
-            seen_scopes: HashSet::new(),
-            seen_arrays: HashSet::new(),
-            seen_maps: HashSet::new(),
-            seen_class_fields: HashSet::new(),
-            seen_modifier_stacks: HashSet::new(),
-            seen_subscriptions: HashSet::new(),
-            scopes: Vec::new(),
-            arrays: Vec::new(),
-            maps: Vec::new(),
-            class_fields: Vec::new(),
-            modifier_stacks: Vec::new(),
-            subscriptions: Vec::new(),
-        }
-    }
-
-    fn collect_env(&mut self, env: &Env) {
-        let id = Rc::as_ptr(&env.0) as usize;
-        if !self.seen_scopes.insert(id) {
-            return;
-        }
-
-        let scope = env.0.borrow();
-        let values = scope.values.clone();
-        let type_aliases = scope.type_aliases.clone();
-        let extension_methods = scope.extension_methods.clone();
-        let module_imports = scope.module_imports.clone();
-        let module_name = scope.module_name.clone();
-        let parent = scope.parent.clone();
-        drop(scope);
-
-        self.scopes.push(ScopeSnapshot {
-            env: env.clone(),
-            values: values.clone(),
-            type_aliases,
-            extension_methods: extension_methods.clone(),
-            module_imports: module_imports.clone(),
-            module_name,
-        });
-
-        for binding in values.values() {
-            self.collect_value(&binding.value);
-        }
-        for methods in extension_methods.values() {
-            for method in methods {
-                self.collect_env(&method.closure);
-            }
-        }
-        for module in &module_imports {
-            self.collect_env(module);
-        }
-        if let Some(parent) = parent {
-            self.collect_env(&parent);
-        }
-    }
-
-    fn collect_value(&mut self, value: &Value) {
-        match value {
-            Value::StructType { fields, .. } => {
-                for field in fields {
-                    if let Some(default) = &field.default {
-                        self.collect_value(default);
-                    }
-                }
-            }
-            Value::StructInstance { fields, .. } => {
-                for (_, value) in fields {
-                    self.collect_value(value);
-                }
-            }
-            Value::ClassType {
-                fields,
-                methods,
-                blocks,
-                ..
-            } => {
-                self.collect_runtime_class_fields(fields);
-                self.collect_runtime_class_methods(methods);
-                for block in blocks {
-                    self.collect_env(&block.closure);
-                    if let Some(super_type) = &block.super_type {
-                        self.collect_value(super_type);
-                    }
-                    self.collect_runtime_extension_methods(&block.extension_methods);
-                }
-            }
-            Value::InterfaceType {
-                fields, methods, ..
-            } => {
-                self.collect_runtime_class_fields(fields);
-                self.collect_runtime_class_methods(methods);
-            }
-            Value::ClassInstance {
-                fields, methods, ..
-            } => {
-                self.collect_class_instance_fields(fields);
-                self.collect_runtime_class_methods(methods);
-            }
-            Value::Array(items) => {
-                let id = Rc::as_ptr(items) as usize;
-                if self.seen_arrays.insert(id) {
-                    let snapshot = items.borrow().clone();
-                    for item in &snapshot {
-                        self.collect_value(item);
-                    }
-                    self.arrays.push((items.clone(), snapshot));
-                }
-            }
-            Value::Map(entries) => {
-                let id = Rc::as_ptr(entries) as usize;
-                if self.seen_maps.insert(id) {
-                    let snapshot = entries.borrow().clone();
-                    for (key, value) in &snapshot {
-                        self.collect_value(key);
-                        self.collect_value(value);
-                    }
-                    self.maps.push((entries.clone(), snapshot));
-                }
-            }
-            Value::Tuple(items) => {
-                for item in items {
-                    self.collect_value(item);
-                }
-            }
-            Value::Option(Some(value)) => self.collect_value(value),
-            Value::Result { value, .. } => self.collect_value(value),
-            Value::Subscribable {
-                subscribers,
-                next_subscriber_id,
-                ..
-            }
-            | Value::Listenable {
-                subscribers,
-                next_subscriber_id,
-                ..
-            } => self.collect_subscriptions(subscribers, next_subscriber_id),
-            Value::SubscriptionCancelHandle { subscribers, .. } => {
-                let next_subscriber_id = Rc::new(RefCell::new(0));
-                self.collect_subscriptions(subscribers, &next_subscriber_id);
-            }
-            Value::Generator { values, .. } => {
-                let snapshot = values.borrow().clone();
-                for item in &snapshot {
-                    self.collect_value(item);
-                }
-            }
-            Value::ClassifiableSubset(items) => {
-                let snapshot = items.borrow().clone();
-                for item in &snapshot {
-                    self.collect_value(item);
-                }
-            }
-            Value::Modifier { .. } => {}
-            Value::ModifierStack {
-                entries,
-                next_order,
-                ..
-            } => {
-                self.collect_modifier_stack(entries, next_order);
-            }
-            Value::ModifierCancelHandle { entries, .. } => {
-                let next_order = Rc::new(RefCell::new(0));
-                self.collect_modifier_stack(entries, &next_order);
-            }
-            Value::ParametricType { closure, .. } | Value::Function { closure, .. } => {
-                self.collect_env(closure)
-            }
-            Value::Overload(overloads) => {
-                for overload in overloads {
-                    self.collect_value(overload);
-                }
-            }
-            Value::BoundMethod {
-                closure,
-                super_type,
-                extension_methods,
-                fields,
-                methods,
-                ..
-            } => {
-                self.collect_env(closure);
-                if let Some(super_type) = super_type {
-                    self.collect_value(super_type);
-                }
-                self.collect_runtime_extension_methods(extension_methods);
-                self.collect_class_instance_fields(fields);
-                self.collect_runtime_class_methods(methods);
-            }
-            Value::NativeModifierMethod { receiver, .. } => self.collect_value(receiver),
-            Value::NativeCancelMethod { entries, .. } => {
-                let next_order = Rc::new(RefCell::new(0));
-                self.collect_modifier_stack(entries, &next_order);
-            }
-            Value::NativeSubscribableMethod {
-                subscribers,
-                next_subscriber_id,
-                ..
-            } => self.collect_subscriptions(subscribers, next_subscriber_id),
-            Value::NativeSubscriptionCancelMethod { subscribers, .. } => {
-                let next_subscriber_id = Rc::new(RefCell::new(0));
-                self.collect_subscriptions(subscribers, &next_subscriber_id);
-            }
-            Value::Module { env, .. } => self.collect_env(env),
-            Value::Int(_)
-            | Value::Float(_)
-            | Value::Rational(_)
-            | Value::Number(_)
-            | Value::Char(_)
-            | Value::Char32(_)
-            | Value::Bool(_)
-            | Value::String(_)
-            | Value::Diagnostic(_)
-            | Value::External
-            | Value::None
-            | Value::Pending
-            | Value::Suspended(_)
-            | Value::Session
-            | Value::Range { .. }
-            | Value::EnumType { .. }
-            | Value::EnumValue { .. }
-            | Value::Event { .. }
-            | Value::Awaitable { .. }
-            | Value::Signalable { .. }
-            | Value::Task(_)
-            | Value::CastableSubtype(_)
-            | Value::ConcreteSubtype(_)
-            | Value::Option(None)
-            | Value::NativeFunction { .. }
-            | Value::NativeResultMethod { .. }
-            | Value::NativeEventMethod { .. }
-            | Value::NativeTaskMethod { .. } => {}
-        }
-    }
-
-    fn collect_runtime_class_fields(&mut self, fields: &[RuntimeClassField]) {
-        for field in fields {
-            if let Some(default) = &field.default {
-                self.collect_value(default);
-            }
-        }
-    }
-
-    fn collect_class_instance_fields(
-        &mut self,
-        fields: &Rc<RefCell<Vec<RuntimeClassInstanceField>>>,
-    ) {
-        let id = Rc::as_ptr(fields) as usize;
-        if self.seen_class_fields.insert(id) {
-            let snapshot = fields.borrow().clone();
-            for field in &snapshot {
-                self.collect_value(&field.value);
-            }
-            self.class_fields.push((fields.clone(), snapshot));
-        }
-    }
-
-    fn collect_modifier_stack(
-        &mut self,
-        entries: &Rc<RefCell<Vec<RuntimeModifierEntry>>>,
-        next_order: &Rc<RefCell<u64>>,
-    ) {
-        let id = Rc::as_ptr(entries) as usize;
-        if self.seen_modifier_stacks.insert(id) {
-            let snapshot = entries.borrow().clone();
-            for entry in &snapshot {
-                self.collect_value(&entry.modifier);
-            }
-            self.modifier_stacks.push((
-                entries.clone(),
-                snapshot,
-                next_order.clone(),
-                *next_order.borrow(),
-            ));
-        }
-    }
-
-    fn collect_subscriptions(
-        &mut self,
-        subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
-        next_subscriber_id: &Rc<RefCell<u64>>,
-    ) {
-        let id = Rc::as_ptr(subscribers) as usize;
-        if self.seen_subscriptions.insert(id) {
-            let snapshot = subscribers.borrow().clone();
-            for entry in &snapshot {
-                self.collect_value(&entry.callback);
-            }
-            self.subscriptions.push((
-                subscribers.clone(),
-                snapshot,
-                next_subscriber_id.clone(),
-                *next_subscriber_id.borrow(),
-            ));
-        }
-    }
-
-    fn collect_runtime_class_methods(&mut self, methods: &[RuntimeClassMethod]) {
-        for method in methods {
-            self.collect_env(&method.closure);
-            if let Some(super_type) = &method.super_type {
-                self.collect_value(super_type);
-            }
-            self.collect_runtime_extension_methods(&method.extension_methods);
-        }
-    }
-
-    fn collect_runtime_extension_methods(&mut self, methods: &[RuntimeExtensionMethod]) {
-        for method in methods {
-            self.collect_env(&method.closure);
-        }
-    }
-}
-
-impl Env {
-    fn new() -> Self {
-        Self(Rc::new(RefCell::new(Scope {
-            values: HashMap::new(),
-            type_aliases: HashMap::new(),
-            extension_methods: HashMap::new(),
-            module_imports: Vec::new(),
-            module_name: None,
-            parent: None,
-        })))
-    }
-
-    fn child(parent: &Env) -> Self {
-        let module_name = parent.0.borrow().module_name.clone();
-        Self(Rc::new(RefCell::new(Scope {
-            values: HashMap::new(),
-            type_aliases: HashMap::new(),
-            extension_methods: HashMap::new(),
-            module_imports: Vec::new(),
-            module_name,
-            parent: Some(parent.clone()),
-        })))
-    }
-
-    fn module_name(&self) -> Option<String> {
-        self.0.borrow().module_name.clone()
-    }
-
-    fn qualified_module_name(&self, name: &str) -> String {
-        self.0
-            .borrow()
-            .parent
-            .as_ref()
-            .and_then(Env::module_name)
-            .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"))
-    }
-
-    fn qualify_module_scope(&self, module_name: &str) {
-        let nested_modules = {
-            let mut scope = self.0.borrow_mut();
-            scope.module_name = Some(module_name.to_string());
-            for methods in scope.extension_methods.values_mut() {
-                for method in methods {
-                    method.module_name = Some(module_name.to_string());
-                }
-            }
-            scope
-                .values
-                .iter()
-                .filter_map(|(name, binding)| match &binding.value {
-                    Value::Module { env, .. } => Some((name.clone(), env.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        for (name, env) in nested_modules {
-            env.qualify_module_scope(&format!("{module_name}.{name}"));
-        }
-    }
-
-    fn define(&self, name: impl Into<String>, value: Value, mutable: bool) {
-        self.0.borrow_mut().values.insert(
-            name.into(),
-            Binding {
-                value: value_copy(&value),
-                mutable,
-            },
-        );
-    }
-
-    fn define_function(&self, name: impl Into<String>, value: Value) {
-        let name = name.into();
-        let mut scope = self.0.borrow_mut();
-        if let Some(binding) = scope.values.get_mut(&name) {
-            match &mut binding.value {
-                Value::Function { .. } => {
-                    let previous = value_copy(&binding.value);
-                    binding.value = Value::Overload(vec![previous, value_copy(&value)]);
-                    binding.mutable = false;
-                    return;
-                }
-                Value::Overload(overloads) => {
-                    overloads.push(value_copy(&value));
-                    binding.mutable = false;
-                    return;
-                }
-                _ => {}
-            }
-        }
-        scope.values.insert(
-            name,
-            Binding {
-                value: value_copy(&value),
-                mutable: false,
-            },
-        );
-    }
-
-    fn define_type_alias(&self, name: impl Into<String>, target: TypeName) {
-        self.0.borrow_mut().type_aliases.insert(name.into(), target);
-    }
-
-    fn define_extension_method(&self, name: String, method: RuntimeExtensionMethod) {
-        self.0
-            .borrow_mut()
-            .extension_methods
-            .entry(name)
-            .or_default()
-            .push(method);
-    }
-
-    fn import_module(&self, module_env: Env) {
-        self.0.borrow_mut().module_imports.push(module_env);
-    }
-
-    fn get_type_alias(&self, name: &str) -> Option<TypeName> {
-        if name.contains('.')
-            && let Some(target) = self.get_qualified_type_alias(name)
-        {
-            return Some(target);
-        }
-
-        let scope = self.0.borrow();
-        if let Some(target) = scope.type_aliases.get(name) {
-            return Some(target.clone());
-        }
-        scope
-            .parent
-            .as_ref()
-            .and_then(|parent| parent.get_type_alias(name))
-    }
-
-    fn get_qualified_type_alias(&self, name: &str) -> Option<TypeName> {
-        let mut parts = name.split('.');
-        let first = parts.next()?;
-        let Value::Module {
-            env: mut module_env,
-            ..
-        } = self.get(first)?
-        else {
-            return None;
-        };
-        let remaining = parts.collect::<Vec<_>>();
-        let (&last, modules) = remaining.split_last()?;
-        for part in modules {
-            let Value::Module { env, .. } = module_env.get_local(part)? else {
-                return None;
-            };
-            module_env = env;
-        }
-        module_env.get_local_type_alias(last)
-    }
-
-    fn get_local_type_alias(&self, name: &str) -> Option<TypeName> {
-        self.0.borrow().type_aliases.get(name).cloned()
-    }
-
-    fn resolve_type_name(&self, type_name: &TypeName) -> TypeName {
-        self.resolve_type_name_inner(type_name, &mut Vec::new())
-    }
-
-    fn resolve_type_name_inner(
-        &self,
-        type_name: &TypeName,
-        visiting: &mut Vec<String>,
-    ) -> TypeName {
-        match type_name {
-            TypeName::Array(item) => TypeName::Array(
-                item.as_deref()
-                    .map(|item| Box::new(self.resolve_type_name_inner(item, visiting))),
-            ),
-            TypeName::Map(key, value) => TypeName::Map(
-                Box::new(self.resolve_type_name_inner(key, visiting)),
-                Box::new(self.resolve_type_name_inner(value, visiting)),
-            ),
-            TypeName::WeakMap(key, value) => TypeName::WeakMap(
-                Box::new(self.resolve_type_name_inner(key, visiting)),
-                Box::new(self.resolve_type_name_inner(value, visiting)),
-            ),
-            TypeName::Tuple(items) => TypeName::Tuple(
-                items
-                    .iter()
-                    .map(|item| self.resolve_type_name_inner(item, visiting))
-                    .collect(),
-            ),
-            TypeName::Option(item) => {
-                TypeName::Option(Box::new(self.resolve_type_name_inner(item, visiting)))
-            }
-            TypeName::FunctionSignature {
-                params,
-                effects,
-                return_type,
-            } => TypeName::FunctionSignature {
-                params: params
-                    .iter()
-                    .map(|param| self.resolve_type_name_inner(param, visiting))
-                    .collect(),
-                effects: effects.clone(),
-                return_type: Box::new(self.resolve_type_name_inner(return_type, visiting)),
-            },
-            TypeName::Applied { name, args } => TypeName::Applied {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|arg| self.resolve_type_name_inner(arg, visiting))
-                    .collect(),
-            },
-            TypeName::Named(name) => {
-                if visiting.iter().any(|item| item == name) {
-                    return type_name.clone();
-                }
-                let Some(target) = self.get_type_alias(name) else {
-                    return type_name.clone();
-                };
-                visiting.push(name.clone());
-                let resolved = self.resolve_type_name_inner(&target, visiting);
-                visiting.pop();
-                resolved
-            }
-            TypeName::Int
-            | TypeName::Float
-            | TypeName::Rational
-            | TypeName::Number
-            | TypeName::Bool
-            | TypeName::String
-            | TypeName::Message
-            | TypeName::Char
-            | TypeName::Char8
-            | TypeName::Char32
-            | TypeName::None
-            | TypeName::Any
-            | TypeName::Comparable
-            | TypeName::Function => type_name.clone(),
-        }
-    }
-
-    fn assign(&self, name: &str, mut value: Value, span: Span) -> Result<(), VerseError> {
-        let mut scope = self.0.borrow_mut();
-        if let Some(binding) = scope.values.get_mut(name) {
-            if !binding.mutable {
-                return Err(VerseError::runtime_at(
-                    format!("cannot assign to immutable binding `{name}`"),
-                    span,
-                ));
-            }
-            if matches!(&binding.value, Value::Option(_)) && matches!(&value, Value::Bool(false)) {
-                value = Value::Option(None);
-            }
-            if matches!(&binding.value, Value::Array(_)) && matches!(&value, Value::Tuple(_)) {
-                value = tuple_value_to_array(value);
-            }
-            binding.value = value_copy(&value);
-            return Ok(());
-        }
-
-        let parent = scope.parent.clone();
-        drop(scope);
-
-        if let Some(parent) = parent {
-            parent.assign(name, value, span)
-        } else {
-            Err(VerseError::runtime_at(
-                format!("undefined name `{name}`"),
-                span,
-            ))
-        }
-    }
-
-    fn get(&self, name: &str) -> Option<Value> {
-        let scope = self.0.borrow();
-        if let Some(binding) = scope.values.get(name) {
-            return Some(value_copy(&binding.value));
-        }
-        for module in scope.module_imports.iter().rev() {
-            if let Some(value) = module.get_local(name) {
-                return Some(value);
-            }
-        }
-        scope.parent.as_ref().and_then(|parent| parent.get(name))
-    }
-
-    fn get_qualified_path(&self, name: &str) -> Option<Value> {
-        let mut parts = name.split('.');
-        let first = parts.next()?;
-        let Some(mut value) = self.get(first) else {
-            return self.get(name);
-        };
-        let mut qualified = first.to_string();
-        let mut has_qualifier = false;
-        for part in parts {
-            let Value::Module { env, .. } = value else {
-                return None;
-            };
-            value = env.get_local(part)?;
-            qualified.push('.');
-            qualified.push_str(part);
-            has_qualifier = true;
-        }
-        Some(if has_qualifier {
-            qualify_runtime_named_value(value, &qualified)
-        } else {
-            value
-        })
-    }
-
-    fn get_local(&self, name: &str) -> Option<Value> {
-        self.0
-            .borrow()
-            .values
-            .get(name)
-            .map(|binding| value_copy(&binding.value))
-    }
-
-    fn get_extension_methods(&self, name: &str) -> Vec<RuntimeExtensionMethod> {
-        let scope = self.0.borrow();
-        let mut methods = scope
-            .extension_methods
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        for module in scope.module_imports.iter().rev() {
-            methods.extend(module.get_local_extension_methods(name));
-        }
-        let parent = scope.parent.clone();
-        drop(scope);
-
-        if let Some(parent) = parent {
-            methods.extend(parent.get_extension_methods(name));
-        }
-
-        methods
-    }
-
-    fn get_local_extension_methods(&self, name: &str) -> Vec<RuntimeExtensionMethod> {
-        self.0
-            .borrow()
-            .extension_methods
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
-    }
-}
-
 enum Flow {
     Value(Value),
     Return(Value),
@@ -10626,342 +9667,6 @@ fn event_value(payload: Option<TypeName>) -> Value {
     Value::Event {
         payload,
         waiters: Rc::new(RefCell::new(Vec::new())),
-    }
-}
-
-impl RuntimeSuspension {
-    fn unresumable() -> Self {
-        Self {
-            wait: RuntimeWait::None,
-            resume: Rc::new(|_, _| Ok(Flow::Pending(RuntimeSuspension::unresumable()))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn event(waiters: Rc<RefCell<Vec<Rc<RuntimeTask>>>>) -> Self {
-        Self {
-            wait: RuntimeWait::Event(waiters),
-            resume: Rc::new(|_, value| Ok(Flow::Value(value))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn sleep_next_tick(scheduler: Rc<RuntimeScheduler>) -> Self {
-        Self {
-            wait: RuntimeWait::SleepNextTick(scheduler),
-            resume: Rc::new(|_, _| Ok(Flow::Value(Value::None))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn sleep_until(scheduler: Rc<RuntimeScheduler>, deadline: Instant) -> Self {
-        Self {
-            wait: RuntimeWait::SleepUntil(scheduler, deadline),
-            resume: Rc::new(|_, _| Ok(Flow::Value(Value::None))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn task(task: Rc<RuntimeTask>) -> Self {
-        Self {
-            wait: RuntimeWait::Task(task),
-            resume: Rc::new(|_, value| Ok(Flow::Value(value))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn structured_tasks(wait: Rc<RefCell<StructuredTaskWait>>) -> Self {
-        Self {
-            wait: RuntimeWait::StructuredTasks(wait),
-            resume: Rc::new(|_, value| Ok(Flow::Value(value))),
-            cancel: Rc::new(|_| Ok(())),
-        }
-    }
-
-    fn map(
-        self,
-        continuation: impl Fn(&Interpreter, Flow) -> Result<Flow, VerseError> + 'static,
-    ) -> Self {
-        let wait = self.wait.clone();
-        let resume = self.resume.clone();
-        let cancel = self.cancel.clone();
-        Self {
-            wait,
-            resume: Rc::new(move |interpreter, value| {
-                let flow = resume(interpreter, value)?;
-                continuation(interpreter, flow)
-            }),
-            cancel,
-        }
-    }
-
-    fn on_cancel(self, cleanup: impl Fn(&Interpreter) -> Result<(), VerseError> + 'static) -> Self {
-        let wait = self.wait.clone();
-        let resume = self.resume.clone();
-        let cancel = self.cancel.clone();
-        Self {
-            wait,
-            resume,
-            cancel: Rc::new(move |interpreter| {
-                cancel(interpreter)?;
-                cleanup(interpreter)
-            }),
-        }
-    }
-
-    fn register_task(&self, task: Rc<RuntimeTask>) {
-        match &self.wait {
-            RuntimeWait::None => {}
-            RuntimeWait::Event(waiters) => waiters.borrow_mut().push(task),
-            RuntimeWait::SleepNextTick(scheduler) => scheduler.schedule_next_tick(task),
-            RuntimeWait::SleepUntil(scheduler, deadline) => {
-                scheduler.schedule_until(*deadline, task)
-            }
-            RuntimeWait::Task(awaited) => awaited
-                .awaiters
-                .borrow_mut()
-                .push(RuntimeTaskAwaiter::Task(task)),
-            RuntimeWait::StructuredTasks(wait) => {
-                let mut wait = wait.borrow_mut();
-                if wait.registered {
-                    return;
-                }
-                wait.registered = true;
-                for (branch_index, awaited) in &wait.tasks {
-                    awaited
-                        .awaiters
-                        .borrow_mut()
-                        .push(RuntimeTaskAwaiter::Structured {
-                            task: task.clone(),
-                            branch_index: *branch_index,
-                        });
-                }
-            }
-        }
-    }
-
-    fn cancel(&self, interpreter: &Interpreter) -> Result<(), VerseError> {
-        if let RuntimeWait::StructuredTasks(wait) = &self.wait {
-            let tasks = wait
-                .borrow()
-                .tasks
-                .iter()
-                .map(|(_, task)| task.clone())
-                .collect::<Vec<_>>();
-            for task in tasks {
-                task.cancel_silently(interpreter)?;
-            }
-        }
-        (self.cancel)(interpreter)
-    }
-}
-
-impl RuntimeTask {
-    fn new_running() -> Rc<Self> {
-        Rc::new(Self {
-            state: RefCell::new(RuntimeTaskState::Running),
-            awaiters: RefCell::new(Vec::new()),
-            scoped_children: RefCell::new(Vec::new()),
-        })
-    }
-
-    fn set_from_flow(self: &Rc<Self>, flow: Flow, interpreter: Option<&Interpreter>) {
-        match flow {
-            Flow::Value(value) | Flow::Return(value) => {
-                self.complete_with_value(value, interpreter);
-            }
-            Flow::Break => {
-                let error = VerseError::runtime("`break` escaped spawned task");
-                self.complete_with_error(error, interpreter);
-            }
-            Flow::Pending(suspension) => {
-                self.cleanup_scoped_children();
-                *self.state.borrow_mut() = RuntimeTaskState::Suspended(suspension.clone());
-                suspension.register_task(self.clone());
-            }
-        }
-    }
-
-    fn complete_with_value(self: &Rc<Self>, value: Value, interpreter: Option<&Interpreter>) {
-        if let Some(interpreter) = interpreter
-            && let Err(error) = self.cancel_scoped_children(interpreter)
-        {
-            self.complete_with_error(error, Some(interpreter));
-            return;
-        }
-        *self.state.borrow_mut() = RuntimeTaskState::Complete(Ok(value.clone()));
-        self.resume_awaiters(Ok(value), interpreter);
-    }
-
-    fn complete_with_error(self: &Rc<Self>, error: VerseError, interpreter: Option<&Interpreter>) {
-        let mut error = error;
-        if let Some(interpreter) = interpreter
-            && let Err(cancel_error) = self.cancel_scoped_children(interpreter)
-        {
-            error = cancel_error;
-        }
-        *self.state.borrow_mut() = RuntimeTaskState::Complete(Err(error.clone()));
-        self.resume_awaiters(Err(error), interpreter);
-    }
-
-    fn cancel_silently(&self, interpreter: &Interpreter) -> Result<(), VerseError> {
-        let suspension = {
-            let mut state = self.state.borrow_mut();
-            match &*state {
-                RuntimeTaskState::Complete(_) => None,
-                RuntimeTaskState::Suspended(suspension) => {
-                    let suspension = suspension.clone();
-                    *state =
-                        RuntimeTaskState::Complete(Err(VerseError::runtime("task was canceled")));
-                    Some(suspension)
-                }
-                RuntimeTaskState::Running => {
-                    *state =
-                        RuntimeTaskState::Complete(Err(VerseError::runtime("task was canceled")));
-                    None
-                }
-            }
-        };
-        self.awaiters.borrow_mut().clear();
-        if let Some(suspension) = suspension {
-            suspension.cancel(interpreter)?;
-        }
-        self.cancel_scoped_children(interpreter)?;
-        Ok(())
-    }
-
-    fn track_scoped_child(&self, task: Rc<RuntimeTask>) {
-        if task.is_complete() {
-            return;
-        }
-        let mut children = self.scoped_children.borrow_mut();
-        if children.iter().any(|existing| Rc::ptr_eq(existing, &task)) {
-            return;
-        }
-        children.push(task);
-    }
-
-    fn cleanup_scoped_children(&self) {
-        self.scoped_children
-            .borrow_mut()
-            .retain(|task| !task.is_complete());
-    }
-
-    fn cancel_scoped_children(&self, interpreter: &Interpreter) -> Result<(), VerseError> {
-        let children = std::mem::take(&mut *self.scoped_children.borrow_mut());
-        for child in children {
-            if !child.is_complete() {
-                child.cancel_silently(interpreter)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn is_complete(&self) -> bool {
-        matches!(&*self.state.borrow(), RuntimeTaskState::Complete(_))
-    }
-
-    fn is_suspended(&self) -> bool {
-        matches!(&*self.state.borrow(), RuntimeTaskState::Suspended(_))
-    }
-
-    fn resume(self: &Rc<Self>, interpreter: &Interpreter, value: Value) {
-        let suspension = {
-            let mut state = self.state.borrow_mut();
-            match std::mem::replace(&mut *state, RuntimeTaskState::Running) {
-                RuntimeTaskState::Suspended(suspension) => suspension,
-                other => {
-                    *state = other;
-                    return;
-                }
-            }
-        };
-
-        match interpreter
-            .eval_with_task_context(self.clone(), || (suspension.resume)(interpreter, value))
-        {
-            Ok(flow) => self.set_from_flow(flow, Some(interpreter)),
-            Err(error) => self.complete_with_error(error, Some(interpreter)),
-        }
-    }
-
-    fn resume_awaiters(
-        self: &Rc<Self>,
-        result: Result<Value, VerseError>,
-        interpreter: Option<&Interpreter>,
-    ) {
-        let awaiters = std::mem::take(&mut *self.awaiters.borrow_mut());
-        let Some(interpreter) = interpreter else {
-            return;
-        };
-        for awaiter in awaiters {
-            match &result {
-                Ok(value) => awaiter.resume(interpreter, value_copy(value)),
-                Err(error) => awaiter.complete_with_error(error.clone(), Some(interpreter)),
-            }
-        }
-    }
-
-    fn resume_from_task_result(self: &Rc<Self>, interpreter: &Interpreter, value: Value) {
-        let suspension = {
-            let mut state = self.state.borrow_mut();
-            match std::mem::replace(&mut *state, RuntimeTaskState::Running) {
-                RuntimeTaskState::Suspended(suspension) => suspension,
-                other => {
-                    *state = other;
-                    return;
-                }
-            }
-        };
-
-        let flow = interpreter
-            .eval_with_task_context(self.clone(), || (suspension.resume)(interpreter, value));
-        match flow {
-            Ok(flow) => self.set_from_flow(flow, Some(interpreter)),
-            Err(error) => self.complete_with_error(error, Some(interpreter)),
-        }
-    }
-
-    fn await_result(&self) -> Result<Option<Value>, VerseError> {
-        match &*self.state.borrow() {
-            RuntimeTaskState::Complete(Ok(value)) => Ok(Some(value_copy(value))),
-            RuntimeTaskState::Complete(Err(error)) => Err(error.clone()),
-            RuntimeTaskState::Suspended(_) | RuntimeTaskState::Running => Ok(None),
-        }
-    }
-
-    fn matches_payload_type(&self, payload: &TypeName, env: &Env) -> bool {
-        match &*self.state.borrow() {
-            RuntimeTaskState::Complete(Ok(value)) => {
-                runtime_value_matches_type_name(value, payload, env)
-            }
-            RuntimeTaskState::Complete(Err(_)) => false,
-            RuntimeTaskState::Suspended(_) | RuntimeTaskState::Running => true,
-        }
-    }
-}
-
-impl RuntimeTaskAwaiter {
-    fn resume(&self, interpreter: &Interpreter, value: Value) {
-        match self {
-            RuntimeTaskAwaiter::Task(task) => {
-                task.resume_from_task_result(interpreter, value);
-            }
-            RuntimeTaskAwaiter::Structured { task, branch_index } => {
-                task.resume_from_task_result(
-                    interpreter,
-                    structured_task_result_value(*branch_index, value),
-                );
-            }
-        }
-    }
-
-    fn complete_with_error(&self, error: VerseError, interpreter: Option<&Interpreter>) {
-        match self {
-            RuntimeTaskAwaiter::Task(task) | RuntimeTaskAwaiter::Structured { task, .. } => {
-                task.complete_with_error(error, interpreter);
-            }
-        }
     }
 }
 
@@ -11678,8 +10383,6 @@ fn runtime_type_name_for_value(value: &Value, env: &Env) -> Option<TypeName> {
         Value::Int(_) => Some(TypeName::Int),
         Value::Float(_) => Some(TypeName::Float),
         Value::Rational(_) => Some(TypeName::Rational),
-        Value::Number(number) if number.fract() == 0.0 => Some(TypeName::Int),
-        Value::Number(_) => Some(TypeName::Number),
         Value::Bool(_) => Some(TypeName::Bool),
         Value::String(_) => Some(TypeName::String),
         Value::Diagnostic(_) => Some(TypeName::Named("diagnostic".to_string())),
@@ -11896,9 +10599,9 @@ fn runtime_type_match_score(
 
     match (&resolved, value) {
         (TypeName::Int, Value::Int(_))
+        | (TypeName::IntRange { .. }, Value::Int(_))
         | (TypeName::Float, Value::Float(_))
         | (TypeName::Rational, Value::Rational(_))
-        | (TypeName::Number, Value::Number(_))
         | (TypeName::Bool, Value::Bool(_))
         | (TypeName::String, Value::String(_))
         | (TypeName::Message, Value::String(_))
@@ -11918,10 +10621,13 @@ fn runtime_value_matches_type_name(value: &Value, type_name: &TypeName, env: &En
         TypeName::Any => true,
         TypeName::Comparable => runtime_value_is_comparable(value),
         TypeName::Int => runtime_value_is_int(value),
-        TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_) | Value::Number(_)),
-        TypeName::Rational => {
-            matches!(value, Value::Int(_) | Value::Rational(_) | Value::Number(_))
-        }
+        TypeName::IntRange { min, max } => match value {
+            Value::Int(value) => min <= value && value <= max,
+            Value::External => true,
+            _ => false,
+        },
+        TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
+        TypeName::Rational => matches!(value, Value::Int(_) | Value::Rational(_)),
         TypeName::Number => runtime_number(value).is_some(),
         TypeName::Bool => matches!(value, Value::Bool(_)),
         TypeName::String => match value {
@@ -12185,7 +10891,6 @@ fn runtime_type_names_assignable(actual: &TypeName, expected: &TypeName) -> bool
 fn runtime_value_is_int(value: &Value) -> bool {
     match value {
         Value::Int(_) => true,
-        Value::Number(number) => number.fract() == 0.0,
         Value::Float(_) | Value::Rational(_) => false,
         _ => false,
     }
@@ -12200,7 +10905,6 @@ fn runtime_value_is_comparable(value: &Value) -> bool {
         Value::Int(_)
         | Value::Float(_)
         | Value::Rational(_)
-        | Value::Number(_)
         | Value::Char(_)
         | Value::Char32(_)
         | Value::Bool(_)
@@ -12501,6 +11205,7 @@ fn render_runtime_type_name(type_name: &TypeName) -> String {
         TypeName::None => "void".to_string(),
         TypeName::Any => "any".to_string(),
         TypeName::Comparable => "comparable".to_string(),
+        TypeName::IntRange { min, max } => format!("int_range({min},{max})"),
         TypeName::Array(None) => "array".to_string(),
         TypeName::Array(Some(item)) => format!("[]{}", render_runtime_type_name(item)),
         TypeName::Map(key, value) => format!(
@@ -12681,10 +11386,7 @@ fn coerce_value_to_type_name(env: &Env, type_name: &TypeName, value: Value) -> V
 }
 
 fn coerce_int_value(value: Value) -> Value {
-    match value {
-        Value::Number(number) if number.fract() == 0.0 => Value::Int(number as i64),
-        other => other,
-    }
+    value
 }
 
 fn coerce_float_value(value: Value) -> Value {
@@ -12697,9 +11399,6 @@ fn coerce_float_value(value: Value) -> Value {
 fn coerce_rational_value(value: Value) -> Value {
     match value {
         Value::Int(value) => Value::Rational(RationalValue::from_int(value)),
-        Value::Number(number) if number.fract() == 0.0 => {
-            Value::Rational(RationalValue::from_int(number as i64))
-        }
         other => other,
     }
 }
@@ -12787,7 +11486,6 @@ fn value_copy(value: &Value) -> Value {
         Value::Int(value) => Value::Int(*value),
         Value::Float(value) => Value::Float(*value),
         Value::Rational(value) => Value::Rational(*value),
-        Value::Number(value) => Value::Number(*value),
         Value::Char(value) => Value::Char(*value),
         Value::Char32(value) => Value::Char32(*value),
         Value::Bool(value) => Value::Bool(*value),
@@ -13228,52 +11926,6 @@ fn tuple_type_name(type_name: &TypeName) -> Option<&[TypeName]> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum RuntimeNumber {
-    Int(i64),
-    Float(f64),
-    Rational(RationalValue),
-    Number(f64),
-}
-
-fn runtime_number(value: &Value) -> Option<RuntimeNumber> {
-    match value {
-        Value::Int(value) => Some(RuntimeNumber::Int(*value)),
-        Value::Float(value) => Some(RuntimeNumber::Float(*value)),
-        Value::Rational(value) => Some(RuntimeNumber::Rational(*value)),
-        Value::Number(value) => Some(RuntimeNumber::Number(*value)),
-        _ => None,
-    }
-}
-
-fn runtime_number_to_f64(value: RuntimeNumber) -> f64 {
-    match value {
-        RuntimeNumber::Int(value) => value as f64,
-        RuntimeNumber::Float(value) | RuntimeNumber::Number(value) => value,
-        RuntimeNumber::Rational(value) => value.to_f64(),
-    }
-}
-
-fn runtime_number_to_rational(value: RuntimeNumber) -> Option<RationalValue> {
-    match value {
-        RuntimeNumber::Int(value) => Some(RationalValue::from_int(value)),
-        RuntimeNumber::Rational(value) => Some(value),
-        RuntimeNumber::Float(_) | RuntimeNumber::Number(_) => None,
-    }
-}
-
-fn numeric_values_equal(left: &Value, right: &Value) -> Option<bool> {
-    let left = runtime_number(left)?;
-    let right = runtime_number(right)?;
-    if let (Some(left), Some(right)) = (
-        runtime_number_to_rational(left),
-        runtime_number_to_rational(right),
-    ) {
-        return Some(left == right);
-    }
-    Some(runtime_number_to_f64(left) == runtime_number_to_f64(right))
-}
-
 fn positive_value(value: Value, span: Span) -> Result<Value, VerseError> {
     if runtime_number(&value).is_some() {
         Ok(value)
@@ -13296,7 +11948,6 @@ fn negate_value(value: Value, span: Span) -> Result<Value, VerseError> {
             -value.numerator,
             value.denominator,
         ))),
-        Some(RuntimeNumber::Number(value)) => Ok(Value::Number(-value)),
         None => Err(VerseError::runtime_at(
             format!("unary `-` expected number, got {value}"),
             span,
@@ -13381,13 +12032,10 @@ fn eval_binary_values(
         BinaryOp::Multiply => multiply_values(left, right, span),
         BinaryOp::Divide => divide_values(left, right, span),
         BinaryOp::Remainder => {
-            let divisor = expect_number(&right, "`%` right operand", span)?;
-            if divisor == 0.0 {
+            if numeric_value_is_zero(&right, "`%` right operand", span)? {
                 return Err(VerseError::runtime_at("remainder by zero", span));
             }
-            Ok(Value::Number(
-                expect_number(&left, "`%` left operand", span)? % divisor,
-            ))
+            remainder_values(left, right, span)
         }
         BinaryOp::Range => {
             let start = expect_integer(&left, "range start", span)?;
@@ -13446,6 +12094,28 @@ fn divide_values(left: Value, right: Value, span: Span) -> Result<Value, VerseEr
     numeric_binary_value(left, right, RuntimeNumberOp::Divide, span)
 }
 
+fn remainder_values(left: Value, right: Value, span: Span) -> Result<Value, VerseError> {
+    let Some(left_number) = runtime_number(&left) else {
+        return Err(VerseError::runtime_at(
+            format!("left operand expected number, got {left}"),
+            span,
+        ));
+    };
+    let Some(right_number) = runtime_number(&right) else {
+        return Err(VerseError::runtime_at(
+            format!("right operand expected number, got {right}"),
+            span,
+        ));
+    };
+
+    match (left_number, right_number) {
+        (RuntimeNumber::Int(left), RuntimeNumber::Int(right)) => Ok(Value::Int(left % right)),
+        (left, right) => Ok(Value::Float(
+            runtime_number_to_f64(left) % runtime_number_to_f64(right),
+        )),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RuntimeNumberOp {
     Add,
@@ -13484,17 +12154,6 @@ fn numeric_binary_value(
         (RuntimeNumber::Float(_), _) | (_, RuntimeNumber::Float(_))
     ) {
         return Ok(Value::Float(apply_float_number_op(
-            runtime_number_to_f64(left_number),
-            runtime_number_to_f64(right_number),
-            op,
-        )));
-    }
-
-    if matches!(
-        (left_number, right_number),
-        (RuntimeNumber::Number(_), _) | (_, RuntimeNumber::Number(_))
-    ) {
-        return Ok(Value::Number(apply_float_number_op(
             runtime_number_to_f64(left_number),
             runtime_number_to_f64(right_number),
             op,
@@ -13682,18 +12341,10 @@ fn clamp_alpha(value: f64) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
-fn rational_or_int(value: RationalValue) -> Value {
-    if value.is_integer() {
-        Value::Int(value.numerator)
-    } else {
-        Value::Rational(value)
-    }
-}
-
 fn numeric_value_is_zero(value: &Value, context: &str, span: Span) -> Result<bool, VerseError> {
     match runtime_number(value) {
         Some(RuntimeNumber::Int(value)) => Ok(value == 0),
-        Some(RuntimeNumber::Float(value) | RuntimeNumber::Number(value)) => Ok(value == 0.0),
+        Some(RuntimeNumber::Float(value)) => Ok(value == 0.0),
         Some(RuntimeNumber::Rational(value)) => Ok(value.numerator == 0),
         None => Err(VerseError::runtime_at(
             format!("{context} expected number, got {value}"),
@@ -13746,14 +12397,6 @@ fn expect_integer(value: &Value, context: &str, span: Span) -> Result<i64, Verse
 fn expect_index_integer(value: &Value, context: &str, span: Span) -> Result<i64, VerseError> {
     match value {
         Value::Int(value) => Ok(*value),
-        Value::Number(value)
-            if value.is_finite()
-                && value.fract() == 0.0
-                && *value >= i64::MIN as f64
-                && *value <= i64::MAX as f64 =>
-        {
-            Ok(*value as i64)
-        }
         _ => Err(VerseError::runtime_at(
             format!("{context} expected int, got {value}"),
             span,
@@ -14292,9 +12935,7 @@ fn eval_number_method_failable(
                 ));
             }
             let finite = match runtime_number(&receiver) {
-                Some(RuntimeNumber::Float(value) | RuntimeNumber::Number(value)) => {
-                    value.is_finite()
-                }
+                Some(RuntimeNumber::Float(value)) => value.is_finite(),
                 Some(RuntimeNumber::Int(_) | RuntimeNumber::Rational(_)) => true,
                 None => false,
             };
@@ -14491,7 +13132,7 @@ fn player_map_value_size_inner(value: &Value, depth: usize) -> Option<usize> {
     }
 
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Number(_) => Some(8),
+        Value::Int(_) | Value::Float(_) => Some(8),
         Value::Rational(_) => Some(16),
         Value::Char(_) => Some(1),
         Value::Char32(_) => Some(4),
@@ -15253,7 +13894,7 @@ fn native_get_seconds_since_epoch(
     let seconds = CURRENT_EPOCH_SECONDS
         .with(|current| *current.borrow())
         .map_or_else(|| current_unix_epoch_seconds(span), Ok)?;
-    Ok(NativeResult::Value(Value::Number(seconds)))
+    Ok(NativeResult::Value(Value::Float(seconds)))
 }
 
 fn native_get_random_float(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
@@ -15511,7 +14152,7 @@ fn native_get_simulation_elapsed_time(
             .elapsed()
             .as_secs_f64()
     });
-    Ok(NativeResult::Value(Value::Number(seconds)))
+    Ok(NativeResult::Value(Value::Float(seconds)))
 }
 
 fn native_sleep(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
@@ -15621,7 +14262,7 @@ fn native_to_string(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseE
         .expect("native arity checked before ToString");
     let text = match value {
         Value::Int(value) => value.to_string(),
-        Value::Float(value) | Value::Number(value) => Value::Float(value).to_string(),
+        Value::Float(value) => Value::Float(value).to_string(),
         Value::String(value) => value,
         Value::Array(items) => {
             char_array_to_string(items.borrow().as_slice()).ok_or_else(|| {
@@ -15922,9 +14563,7 @@ fn native_abs(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> 
                 .checked_abs()
                 .ok_or_else(|| VerseError::runtime_at("`Abs` integer overflow", span))?,
         ))),
-        Some(RuntimeNumber::Float(value) | RuntimeNumber::Number(value)) => {
-            Ok(NativeResult::Value(Value::Float(value.abs())))
-        }
+        Some(RuntimeNumber::Float(value)) => Ok(NativeResult::Value(Value::Float(value.abs()))),
         Some(RuntimeNumber::Rational(_)) => Err(VerseError::runtime_at(
             "`Abs` expected `int` or `float`, got rational",
             span,
@@ -16112,10 +14751,10 @@ fn native_arccos(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseErro
 
 fn native_arctan(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     match args.as_slice() {
-        [value] => Ok(NativeResult::Value(Value::Number(
+        [value] => Ok(NativeResult::Value(Value::Float(
             expect_number(value, "`ArcTan` value", span)?.atan(),
         ))),
-        [y, x] => Ok(NativeResult::Value(Value::Number(
+        [y, x] => Ok(NativeResult::Value(Value::Float(
             expect_number(y, "`ArcTan` Y", span)?.atan2(expect_number(x, "`ArcTan` X", span)?),
         ))),
         _ => Err(VerseError::runtime_at(
@@ -16151,7 +14790,7 @@ fn native_artanh(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseErro
 
 fn native_pow(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [base, exponent]: [Value; 2] = args.try_into().expect("arity checked by caller");
-    Ok(NativeResult::Value(Value::Number(
+    Ok(NativeResult::Value(Value::Float(
         expect_number(&base, "`Pow` A", span)?.powf(expect_number(&exponent, "`Pow` B", span)?),
     )))
 }
@@ -16166,7 +14805,7 @@ fn native_ln(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
 
 fn native_log(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [base, value]: [Value; 2] = args.try_into().expect("arity checked by caller");
-    Ok(NativeResult::Value(Value::Number(
+    Ok(NativeResult::Value(Value::Float(
         expect_number(&value, "`Log` X", span)?.log(expect_number(&base, "`Log` B", span)?),
     )))
 }
@@ -16181,7 +14820,7 @@ fn native_sgn(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> 
         } else {
             0
         }))),
-        Some(RuntimeNumber::Float(value) | RuntimeNumber::Number(value)) => {
+        Some(RuntimeNumber::Float(value)) => {
             Ok(NativeResult::Value(Value::Float(if value.is_nan() {
                 f64::NAN
             } else if value > 0.0 {
@@ -16222,9 +14861,9 @@ fn native_unary_number(
     operation: fn(f64) -> f64,
 ) -> Result<NativeResult, VerseError> {
     let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
-    Ok(NativeResult::Value(Value::Number(operation(
-        expect_number(&value, context, span)?,
-    ))))
+    Ok(NativeResult::Value(Value::Float(operation(expect_number(
+        &value, context, span,
+    )?))))
 }
 
 fn round_ties_even(value: f64) -> f64 {

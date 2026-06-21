@@ -6,7 +6,18 @@ use common::*;
 
 #[test]
 fn evaluates_arithmetic_with_precedence() {
-    assert_eq!(eval("1 + 2 * 3"), Value::Number(7.0));
+    assert_eq!(eval("1 + 2 * 3"), Value::Int(7));
+}
+
+#[test]
+fn preserves_i64_max_integer_precision() {
+    let source = "9223372036854775807 + 0";
+
+    assert_eq!(eval(source), Value::Int(i64::MAX));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
 }
 
 #[test]
@@ -66,7 +77,7 @@ Interpolated:int = if (Value := Round[Lerp(To := 44.0, From := 40.0, Parameter :
 Clamped + Interpolated
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -81,7 +92,7 @@ MaxNaN := if ((Max(1.0, NaN)).IsFinite[]). 0 else. 22
 MinNaN + MaxNaN
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -100,7 +111,7 @@ TwoNaNs := if (TwoNaNClamp.IsFinite[]). 0 else. 38
 ValueNaNHigh + BoundNaNHigh + TwoNaNs
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -183,7 +194,7 @@ CapturedValue := if (Value := Captured?). Value else. 0
 ModFailure + QuotientFailure + CapturedValue
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -198,7 +209,7 @@ FloorValue := if (Value := Floor[1.8]). Value else. 0
 Abs(-5) + Min(10, 3) + Max(7, 9) + CeilValue + FloorValue + if (PiFloat > 3.0 and PiFloat < 4.0). 22 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -217,7 +228,7 @@ CapturedValue := if (Value := Captured?). Value else. 0
 CeilSuccess + FloorSuccess + CeilFailure + FloorFailure + CapturedValue
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -234,7 +245,7 @@ RoundFailure := if (Value := Round[Inf]). Value else. 2
 Rounded + Truncated + IntFailure + RoundFailure
 "#;
 
-    assert_eq!(eval(source), Value::Number(44.0));
+    assert_eq!(eval(source), Value::Int(44));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -248,7 +259,7 @@ RoundOrZero(Value:float):int = if (Rounded := Round[Value]). Rounded else. 0
 RoundOrZero(Sqrt(81)) + RoundOrZero(Sin(0)) + RoundOrZero(Cos(0)) + RoundOrZero(Tan(0)) + RoundOrZero(ArcSin(0)) + RoundOrZero(ArcCos(1)) + RoundOrZero(ArcTan(0)) + RoundOrZero(ArcTan(0, 0)) + RoundOrZero(Sinh(0)) + RoundOrZero(Cosh(0)) + RoundOrZero(Tanh(0)) + RoundOrZero(ArSinh(0)) + RoundOrZero(ArCosh(1)) + RoundOrZero(ArTanh(0)) + RoundOrZero(Exp(0)) + RoundOrZero(Ln(1)) + RoundOrZero(Log(2, 8)) + RoundOrZero(Pow(2, 5)) + Sgn(-3) + Sgn(0) + Sgn(4)
 "#;
 
-    assert_eq!(eval(source), Value::Number(47.0));
+    assert_eq!(eval(source), Value::Int(47));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -265,7 +276,7 @@ NaNFlag := if (NaNSign.IsFinite[]). 0 else. 44
 IntSign + (if (Value := Round[FloatSign]). Value else. 0) + NaNFlag
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -305,7 +316,7 @@ TrigNaN := if (Value := Sin(Inf).IsFinite[]). Value else. 0
 Finite + Infinite + NotNumber + TrigNaN
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Float
@@ -320,7 +331,7 @@ Far := if ((0.2).IsAlmostZero[0.02]). 0 else. 2
 Close + Far
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -335,7 +346,7 @@ Far := if (IsAlmostEqual[1.0, 1.2, 0.02]). 0 else. 2
 Close + Far
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -460,7 +471,7 @@ fn rejects_numeric_function_argument_type_mismatch() {
 
 #[test]
 fn evaluates_unary_positive_operator() {
-    assert_eq!(eval("+42"), Value::Number(42.0));
+    assert_eq!(eval("+42"), Value::Int(42));
     assert_eq!(check_source("+42").expect("source should check"), Type::Int);
 }
 
@@ -478,7 +489,7 @@ Half:rational = if (Value := 1 / 2). Value else. 0
 Ceil(Half) + Floor(Half)
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -492,7 +503,7 @@ Value:rational = if (Result := 7 / 3). Result else. 0
 Floor(Value) * 10 + Ceil(Value)
 "#;
 
-    assert_eq!(eval(source), Value::Number(23.0));
+    assert_eq!(eval(source), Value::Int(23));
     assert_eq!(
         check_source("if (Value := 7 / 3). Value else. 0").expect("source should check"),
         Type::Rational
@@ -527,7 +538,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -601,7 +612,7 @@ set Total /= 3
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(50.0));
+    assert_eq!(eval(source), Value::Int(50));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Rational
@@ -684,7 +695,7 @@ Scores:[rational]int = map{Half => 42}
 if (Value := Scores[Equivalent]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -719,7 +730,7 @@ Third := if (Value := Zero?). Floor(Value) else. -5
 First + Hit + Second + Third
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

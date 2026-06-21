@@ -56,7 +56,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -73,7 +73,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -95,7 +95,7 @@ Values := (10, 20, 30)
 Sum(1, 2, 3) + Sum((4, 5)) + Sum(Values) + Sum(6)
 "#;
 
-    assert_eq!(eval(source), Value::Number(81.0));
+    assert_eq!(eval(source), Value::Int(81));
 }
 
 #[test]
@@ -125,7 +125,7 @@ xs := array{10, 20, 30}
 xs.Length + xs[1]
 "#;
 
-    assert_eq!(eval(source), Value::Number(23.0));
+    assert_eq!(eval(source), Value::Int(23));
 }
 
 #[test]
@@ -160,7 +160,7 @@ set total += xs[0] + xs[1] + xs[2]
 total
 "#;
 
-    assert_eq!(eval(source), Value::Number(44.0));
+    assert_eq!(eval(source), Value::Int(44));
 }
 
 #[test]
@@ -198,7 +198,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(2199.0));
+    assert_eq!(eval(source), Value::Int(2199));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -214,7 +214,7 @@ set Values += (4, 5)
 Values.Length + Values[4]
 "#;
 
-    assert_eq!(eval(source), Value::Number(10.0));
+    assert_eq!(eval(source), Value::Int(10));
 }
 
 #[test]
@@ -243,7 +243,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(229.0));
+    assert_eq!(eval(source), Value::Int(229));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -266,7 +266,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(13.0));
+    assert_eq!(eval(source), Value::Int(13));
 }
 
 #[test]
@@ -301,7 +301,7 @@ set Total += PatternReplaced.Length
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(245.0));
+    assert_eq!(eval(source), Value::Int(245));
 }
 
 #[test]
@@ -340,7 +340,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(8.0));
+    assert_eq!(eval(source), Value::Int(8));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -365,7 +365,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(8.0));
+    assert_eq!(eval(source), Value::Int(8));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -401,7 +401,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(2290.0));
+    assert_eq!(eval(source), Value::Int(2290));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -480,7 +480,7 @@ set Total += InsertMiss
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(184.0));
+    assert_eq!(eval(source), Value::Int(184));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -548,7 +548,7 @@ Named:[]int = Concatenate(Arrays := array{array{9}, array{10}})
 Values.Length + Values[4] + Nested.Length + Nested[2] + Named[1]
 "#;
 
-    assert_eq!(eval(source), Value::Number(31.0));
+    assert_eq!(eval(source), Value::Int(31));
 }
 
 #[test]
@@ -574,7 +574,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(20.0));
+    assert_eq!(eval(source), Value::Int(20));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -589,7 +589,7 @@ Value:int = if (Item := Values[0]). Item else. 0
 Value
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -660,7 +660,7 @@ for (Index -> Value : Values) {
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(63.0));
+    assert_eq!(eval(source), Value::Int(63));
 }
 
 #[test]
@@ -695,7 +695,7 @@ Text := "abc"
 Values.Length() * 100 + Scores.Length() * 10 + Text.Length()
 "#;
 
-    assert_eq!(eval(source), Value::Number(323.0));
+    assert_eq!(eval(source), Value::Int(323));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -760,7 +760,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(192.0));
+    assert_eq!(eval(source), Value::Int(192));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -781,7 +781,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -801,7 +801,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -818,7 +818,7 @@ Third := if (Value := Values[2]?). Value else. 1
 First + Second + Third
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -837,7 +837,7 @@ ReplaceEmpty := if (Value := Replaced[0]?). Value else. 1
 InsertEmpty + InsertFull + ReplaceEmpty
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

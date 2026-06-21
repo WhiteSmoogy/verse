@@ -10,7 +10,7 @@ use crate::parser::parse_source;
 use crate::token::Span;
 
 pub fn load_project_source(path: impl AsRef<Path>) -> Result<String, VerseError> {
-    ProjectLoader::new(path.as_ref())?.load()
+    SourceProject::from_path(path.as_ref())?.load_source()
 }
 
 pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
@@ -23,6 +23,69 @@ pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
     check_source(&source)?;
     let mut interpreter = Interpreter::new();
     interpreter.eval_source(&source)
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceProject {
+    pub root: PathBuf,
+    pub entry: PathBuf,
+    pub package: Option<String>,
+}
+
+impl SourceProject {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, VerseError> {
+        let path = path.as_ref();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "vproject")
+        {
+            return Self::from_manifest(path);
+        }
+
+        if let Some(manifest) = find_manifest_for_entry(path)? {
+            let mut project = Self::from_manifest(&manifest)?;
+            project.entry = absolute_from(&project.root, path);
+            return Ok(project);
+        }
+
+        let entry = path.to_path_buf();
+        let root = entry
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Ok(Self {
+            root,
+            entry,
+            package: None,
+        })
+    }
+
+    pub fn from_manifest(path: impl AsRef<Path>) -> Result<Self, VerseError> {
+        let path = path.as_ref();
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let source = read_source_file(path)?;
+        let manifest = parse_project_manifest(&source, path)?;
+        let entry = manifest
+            .entry
+            .unwrap_or_else(|| PathBuf::from("main.verse"));
+        Ok(Self {
+            entry: absolute_from(&root, &entry),
+            root,
+            package: manifest.package,
+        })
+    }
+
+    pub fn load_source(&self) -> Result<String, VerseError> {
+        ProjectLoader::new(self.clone()).load()
+    }
+}
+
+struct ProjectManifest {
+    entry: Option<PathBuf>,
+    package: Option<String>,
 }
 
 struct ProjectLoader {
@@ -39,19 +102,91 @@ struct ModuleText {
     imports: Vec<String>,
 }
 
+fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, VerseError> {
+    let mut manifest = ProjectManifest {
+        entry: None,
+        package: None,
+    };
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=').or_else(|| trimmed.split_once(':')) else {
+            return Err(VerseError::parse(
+                format!(
+                    "invalid project manifest line {} in {}",
+                    index + 1,
+                    path.display()
+                ),
+                Span::new(0, 0, index + 1, 1),
+            ));
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"');
+        match key {
+            "entry" => manifest.entry = Some(PathBuf::from(value)),
+            "package" => manifest.package = Some(value.to_string()),
+            _ => {
+                return Err(VerseError::parse(
+                    format!("unknown project manifest key `{key}` in {}", path.display()),
+                    Span::new(0, 0, index + 1, 1),
+                ));
+            }
+        }
+    }
+
+    Ok(manifest)
+}
+
+fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> {
+    let mut dir = entry
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    loop {
+        let manifests = read_dir_entries(&dir)?
+            .into_iter()
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "vproject")
+            })
+            .collect::<Vec<_>>();
+        if manifests.len() > 1 {
+            return Err(VerseError::parse(
+                format!("multiple `.vproject` manifests found in {}", dir.display()),
+                Span::new(0, 0, 1, 1),
+            ));
+        }
+        if let Some(manifest) = manifests.into_iter().next() {
+            return Ok(Some(manifest));
+        }
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
+}
+
+fn absolute_from(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
 impl ProjectLoader {
-    fn new(entry: &Path) -> Result<Self, VerseError> {
-        let entry = entry.to_path_buf();
-        let root = entry
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        Ok(Self {
-            root,
-            entry,
+    fn new(project: SourceProject) -> Self {
+        Self {
+            root: project.root,
+            entry: project.entry,
             loaded: HashSet::new(),
             sources: Vec::new(),
-        })
+        }
     }
 
     fn load(mut self) -> Result<String, VerseError> {

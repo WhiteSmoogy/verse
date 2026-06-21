@@ -389,6 +389,10 @@ pub enum TypeName {
     None,
     Any,
     Comparable,
+    IntRange {
+        min: i64,
+        max: i64,
+    },
     Array(Option<Box<TypeName>>),
     Map(Box<TypeName>, Box<TypeName>),
     WeakMap(Box<TypeName>, Box<TypeName>),

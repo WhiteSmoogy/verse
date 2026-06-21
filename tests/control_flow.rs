@@ -14,7 +14,7 @@ Result:int = block:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -62,7 +62,7 @@ Result:int = profile("Finding a number"):
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -78,7 +78,7 @@ Result:int = profile(Description):
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(1.0));
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -123,7 +123,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -140,7 +140,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -153,7 +153,7 @@ fn evaluates_if_dot_blocks() {
 if (false?). 0 else. 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -213,23 +213,22 @@ Scale(?Value := 1)
 }
 
 #[test]
-fn rejects_unreachable_statement_after_break() {
-    let error = check_source(
+fn warns_unreachable_statement_after_break() {
+    assert_check_warning(
         r#"
 Bad():void =
     loop:
         break
         Value:int = 1
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(error.to_string().contains("unreachable code after `break`"));
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after `break`",
+    );
 }
 
 #[test]
-fn rejects_unreachable_statement_after_never_if_initializer() {
-    let error = check_source(
+fn warns_unreachable_statement_after_never_if_initializer() {
+    assert_check_warning(
         r#"
 Bad(Ready:logic):int = {
     Value:int = if (Ready?) {
@@ -240,13 +239,8 @@ Bad(Ready:logic):int = {
     42
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
@@ -330,7 +324,7 @@ loop {
 total
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
 }
 
 #[test]
@@ -344,7 +338,7 @@ loop:
 I
 "#;
 
-    assert_eq!(eval(source), Value::Number(3.0));
+    assert_eq!(eval(source), Value::Int(3));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -361,7 +355,7 @@ loop:
 I
 "#;
 
-    assert_eq!(eval(source), Value::Number(3.0));
+    assert_eq!(eval(source), Value::Int(3));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -402,7 +396,7 @@ Result:int = WithCleanup()
 Result + if (CleanupLog = "D"). 0 else. 100
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -503,7 +497,7 @@ for (i := 1..5) {
 total
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
 }
 
 #[test]
@@ -516,7 +510,7 @@ for (I : 1..3) {
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(6.0));
+    assert_eq!(eval(source), Value::Int(6));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -565,7 +559,7 @@ Doubled:[]int = for (I := 1..5):
 if (Value := Doubled[4]). Doubled.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -581,7 +575,7 @@ Doubled:[]int = for (I := 1..5) {
 if (Value := Doubled[4]). Doubled.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -595,7 +589,7 @@ Doubled:[]int = for (I := 1..5). I * 2
 if (Value := Doubled[4]). Doubled.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -610,7 +604,7 @@ Doubled:[]int = for (X := 1..5, Y := X * 2):
 if (Value := Doubled[4]). Doubled.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -625,7 +619,7 @@ Values:[]int = for (X := 1..5, X <> 3):
 if (Value := Values[2]). Values.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(8.0));
+    assert_eq!(eval(source), Value::Int(8));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -644,7 +638,7 @@ do:
 if (Value := Values[2]). Values.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(12.0));
+    assert_eq!(eval(source), Value::Int(12));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -662,7 +656,7 @@ do:
 if (Value := Pairs[5]). Pairs.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(29.0));
+    assert_eq!(eval(source), Value::Int(29));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -693,7 +687,7 @@ for (item : array{2, 4, 8}) {
 total
 "#;
 
-    assert_eq!(eval(source), Value::Number(14.0));
+    assert_eq!(eval(source), Value::Int(14));
 }
 
 #[test]

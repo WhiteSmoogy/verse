@@ -3234,6 +3234,28 @@ impl Parser {
         }
 
         if let TokenKind::Ident(name) = &token.kind
+            && name == "int_range"
+            && self.match_lparen()
+        {
+            let (min, min_span) = self.consume_int_range_bound("expected int_range minimum")?;
+            if !self.match_comma() {
+                return Err(self.error_at_current("expected `,` after int_range minimum"));
+            }
+            let (max, max_span) = self.consume_int_range_bound("expected int_range maximum")?;
+            let close_span = self.consume_rparen("expected `)` after int_range maximum")?;
+            if min > max {
+                return Err(VerseError::parse(
+                    "int_range minimum cannot be greater than maximum",
+                    min_span.through(max_span),
+                ));
+            }
+            return Ok(TypeAnnotation {
+                name: TypeName::IntRange { min, max },
+                span: token.span.through(close_span),
+            });
+        }
+
+        if let TokenKind::Ident(name) = &token.kind
             && name == "type"
             && self.match_lbrace()
         {
@@ -3266,6 +3288,46 @@ impl Parser {
             name,
             span: token.span.through(end_span),
         })
+    }
+
+    fn consume_int_range_bound(&mut self, message: &str) -> Result<(i64, Span), VerseError> {
+        let minus_span = self.match_minus().then(|| self.previous_span());
+        let token = self.advance().clone();
+        let TokenKind::Number {
+            value: NumberLiteral::Int(value),
+            kind: NumberKind::Int,
+        } = token.kind
+        else {
+            return Err(VerseError::parse(message, token.span));
+        };
+
+        let span = minus_span
+            .map(|minus_span| minus_span.through(token.span))
+            .unwrap_or(token.span);
+        let signed = if minus_span.is_some() {
+            let min_magnitude = i128::from(i64::MAX) + 1;
+            if value > min_magnitude {
+                return Err(VerseError::parse(
+                    format!("integer literal `-{value}` is outside the 64-bit signed range"),
+                    span,
+                ));
+            }
+            if value == min_magnitude {
+                i64::MIN
+            } else {
+                -(value as i64)
+            }
+        } else {
+            if value > i128::from(i64::MAX) {
+                return Err(VerseError::parse(
+                    format!("integer literal `{value}` is outside the 64-bit signed range"),
+                    span,
+                ));
+            }
+            value as i64
+        };
+
+        Ok((signed, span))
     }
 
     fn finish_parametric_type_args(&mut self) -> Result<(Vec<TypeName>, Span), VerseError> {
@@ -3674,6 +3736,9 @@ impl Parser {
             Some(TokenKind::Ident(name)) if name == "weak_map" => {
                 matches!(self.kind_at(index + 1), Some(TokenKind::LParen))
             }
+            Some(TokenKind::Ident(name)) if name == "int_range" => {
+                matches!(self.kind_at(index + 1), Some(TokenKind::LParen))
+            }
             Some(TokenKind::Ident(name)) if name == "type" => {
                 matches!(self.kind_at(index + 1), Some(TokenKind::LBrace))
             }
@@ -3947,6 +4012,24 @@ impl Parser {
             return index + 1;
         }
 
+        if matches!(self.kind_at(index), Some(TokenKind::Ident(name)) if name == "int_range")
+            && matches!(self.kind_at(index + 1), Some(TokenKind::LParen))
+        {
+            let Some(min_end) = self.skip_int_range_bound_at(index + 2) else {
+                return index + 1;
+            };
+            if !matches!(self.kind_at(min_end), Some(TokenKind::Comma)) {
+                return index + 1;
+            }
+            let Some(max_end) = self.skip_int_range_bound_at(min_end + 1) else {
+                return index + 1;
+            };
+            if matches!(self.kind_at(max_end), Some(TokenKind::RParen)) {
+                return max_end + 1;
+            }
+            return index + 1;
+        }
+
         if matches!(self.kind_at(index), Some(TokenKind::Ident(name)) if name == "type")
             && matches!(self.kind_at(index + 1), Some(TokenKind::LBrace))
             && let Some(close_index) = self.find_matching_delimiter_at(index + 1)
@@ -3962,6 +4045,22 @@ impl Parser {
         }
 
         self.skip_parametric_type_args_after_name_at(end)
+    }
+
+    fn skip_int_range_bound_at(&self, index: usize) -> Option<usize> {
+        let index = if matches!(self.kind_at(index), Some(TokenKind::Minus)) {
+            index + 1
+        } else {
+            index
+        };
+        matches!(
+            self.kind_at(index),
+            Some(TokenKind::Number {
+                value: NumberLiteral::Int(_),
+                kind: NumberKind::Int
+            })
+        )
+        .then_some(index + 1)
     }
 
     fn skip_parametric_type_args_after_name_at(&self, end: usize) -> usize {

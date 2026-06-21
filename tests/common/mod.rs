@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use verse_rs::{
-    Interpreter, Type, Value, check_project_file, check_source, parse_source, run_project_file,
+    DiagnosticCode, DiagnosticSeverity, Effect, EffectSet, IntRange, Interpreter, SourceProject,
+    Type, TypeVariable, Value, check_project_file, check_source, check_source_with_diagnostics,
+    check_source_with_recovery, generate_digest, generate_project_digest, parse_source,
+    run_project_file,
 };
 
 pub fn eval(source: &str) -> Value {
@@ -18,6 +21,18 @@ pub fn assert_failable_context_error(source: &str) {
         error
             .to_string()
             .contains("failable expression must be used in a failure context")
+    );
+}
+pub fn assert_check_warning(source: &str, code: DiagnosticCode, message: &str) {
+    let result = check_source_with_diagnostics(source).expect("source should check");
+    assert!(
+        result.warnings.iter().any(|warning| {
+            warning.code == code
+                && warning.severity == DiagnosticSeverity::Warning
+                && warning.message.contains(message)
+        }),
+        "expected warning {code} containing `{message}`, got {:?}",
+        result.warnings
     );
 }
 pub fn function_shape(value_type: Type) -> (Option<usize>, Vec<String>, Option<Vec<Type>>, Type) {

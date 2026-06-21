@@ -14,7 +14,7 @@ x := 10
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
 }
 
 #[test]
@@ -24,7 +24,7 @@ Answer<public>:int = 42
 Answer
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -224,7 +224,7 @@ if (Set.Contains[TagType]). 0 else. 42
         check_source(source).expect("source should check"),
         Type::Int
     );
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -243,7 +243,7 @@ Any + All
         check_source(source).expect("source should check"),
         Type::Int
     );
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -288,7 +288,7 @@ thing := class(taggable):
 record{}.Value + thing{}.Value + thing{}.Score
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -356,5 +356,5 @@ if (Truth) {
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }

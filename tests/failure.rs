@@ -17,7 +17,7 @@ if (profile("Lookup"):
 ). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -33,7 +33,7 @@ Negated := if (not (0 > 0)). 2 else. 0
 Both + Either + Negated
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -49,7 +49,7 @@ LeftSucceeds := if (1 = 1 or Values[0] = 1). 2 else. 0
 LeftFails + LeftSucceeds
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -74,7 +74,7 @@ Observed := if ({
 Observed + Hits
 "#;
 
-    assert_eq!(eval(source), Value::Number(20.0));
+    assert_eq!(eval(source), Value::Int(20));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -95,7 +95,7 @@ Observed := if (not {
 Observed + Hits
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -112,7 +112,7 @@ LessFails := if (Value := 3 < 0). Value else. 19
 Greater + Equal + NotEqual + LessFails
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -127,7 +127,7 @@ OrValue := if (Value := 0 > 1 or 2 = 2). Value else. 0
 AndValue + OrValue
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -181,7 +181,7 @@ Pick(Value:int)<decides><transacts>:int = Value
 if (Value := Pick[42]). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -201,7 +201,7 @@ Captured:?int = option{Pick[1]}
 Found + Missing + if (Value := Captured?). Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -218,7 +218,7 @@ Second := if (Check[false]). 0 else. 2
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -356,7 +356,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -380,7 +380,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -462,7 +462,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -521,7 +521,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -555,7 +555,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -574,7 +574,7 @@ else:
     42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -594,7 +594,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -615,7 +615,7 @@ else:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -634,7 +634,7 @@ else:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -658,7 +658,7 @@ else:
         42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -679,7 +679,7 @@ else:
 Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -750,7 +750,7 @@ else:
         0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -772,7 +772,7 @@ else:
     Total + 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -826,7 +826,7 @@ else:
         0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -855,7 +855,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -880,8 +880,8 @@ Value
 }
 
 #[test]
-fn rejects_unreachable_failure_clause_after_never_expression() {
-    let error = check_source(
+fn warns_unreachable_failure_clause_after_never_expression() {
+    assert_check_warning(
         r#"
 Halt()<computes> = Err("fatal")
 if:
@@ -892,13 +892,8 @@ then:
 else:
     0
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
@@ -910,7 +905,7 @@ Set:classifiable_subset(tag) = MakeClassifiableSubset(array{})
 if (Set.Contains[TagType]). 0 else. 42
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -939,7 +934,7 @@ else:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -993,7 +988,7 @@ Values:[]int = for (X := 1..3, Keep()?):
 if (Value := Values[2]). Values.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(6.0));
+    assert_eq!(eval(source), Value::Int(6));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1028,7 +1023,7 @@ Values:[]int = for (X := 1..2, Y := Current()):
 if (Value := Values[1]). Values.Length + Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(6.0));
+    assert_eq!(eval(source), Value::Int(6));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1071,7 +1066,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(5.0));
+    assert_eq!(eval(source), Value::Int(5));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1103,7 +1098,7 @@ Bad:int = if (AllMatch[array{true, false}, array{true, true}]). 100 else. 2
 Good + Bad
 "#;
 
-    assert_eq!(eval(source), Value::Number(3.0));
+    assert_eq!(eval(source), Value::Int(3));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1128,7 +1123,7 @@ else:
 Result * 10 + Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(0.0));
+    assert_eq!(eval(source), Value::Int(0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1160,7 +1155,7 @@ Second := if (false?). 0 else. 2
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

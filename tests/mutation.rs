@@ -15,7 +15,7 @@ Bump()<writes>:int =
 Bump()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -38,7 +38,7 @@ ReplaceFirst()<writes>:int =
 ReplaceFirst()
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -118,7 +118,7 @@ else:
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -201,7 +201,7 @@ Gun.Reload()
 Gun.Ammo
 "#;
 
-    assert_eq!(eval(source), Value::Number(15.0));
+    assert_eq!(eval(source), Value::Int(15));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -254,7 +254,7 @@ set Total += 2
 Initial + Total
 "#;
 
-    assert_eq!(eval(source), Value::Number(82.0));
+    assert_eq!(eval(source), Value::Int(82));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -319,7 +319,7 @@ set Item.Value -= 8
 if (Value := Values[0]). Value + Item.Value else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(32.0));
+    assert_eq!(eval(source), Value::Int(32));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

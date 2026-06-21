@@ -17,7 +17,7 @@ if (Facing = direction.East) {
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -37,7 +37,7 @@ if (Current = direction.East) {
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -55,7 +55,7 @@ if (Policy = text_overflow_policy.Ellipsis) {
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -78,7 +78,7 @@ Start + if (StateStart = game_state.Start) {
 }
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -94,7 +94,7 @@ case (Value):
     keyword_enum.Regular => 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -133,8 +133,8 @@ GetDayType(day.Monday)
 }
 
 #[test]
-fn rejects_unreachable_statement_after_exhaustive_never_case_expression() {
-    let error = check_source(
+fn warns_unreachable_statement_after_exhaustive_never_case_expression() {
+    assert_check_warning(
         r#"
 state := enum{On, Off}
 
@@ -145,13 +145,8 @@ Bad(State:state):int = {
     42
 }
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("unreachable code after never-returning expression")
+        DiagnosticCode::UnreachableCode,
+        "unreachable code after never-returning expression",
     );
 }
 
@@ -227,7 +222,7 @@ CharCase:int =
 IntCase + LogicCase + StringCase + CharCase
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -248,7 +243,7 @@ Missing:?int = option{
 if (Value := Matched?, not Missing?). Value + 2 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -265,7 +260,7 @@ Pick(Value:int)<decides><transacts>:int =
 if (Result := Pick[7]). Result else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -306,7 +301,7 @@ IsPlaying(Value:state):logic = if (Value = state.Playing). true else. false
 if (PausedID := StateID[state.Paused]). PausedID + if (IsPlaying(state.Playing)) { 40 } else { 0 } else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -345,8 +340,8 @@ case (weapon.Sword):
 }
 
 #[test]
-fn rejects_duplicate_enum_case_arm() {
-    let error = check_source(
+fn warns_duplicate_enum_case_arm() {
+    assert_check_warning(
         r#"
 day := enum:
     Monday
@@ -355,15 +350,14 @@ case (day.Monday):
     day.Monday => 1
     day.Monday => 2
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(error.to_string().contains("duplicate case"));
+        DiagnosticCode::UnreachableCode,
+        "duplicate case",
+    );
 }
 
 #[test]
-fn rejects_case_arm_after_wildcard() {
-    let error = check_source(
+fn warns_case_arm_after_wildcard() {
+    assert_check_warning(
         r#"
 day := enum:
     Monday
@@ -373,10 +367,9 @@ case (day.Monday):
     _ => 0
     day.Monday => 1
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(error.to_string().contains("after wildcard"));
+        DiagnosticCode::UnreachableCode,
+        "after wildcard",
+    );
 }
 
 #[test]
@@ -393,18 +386,17 @@ case (1):
 }
 
 #[test]
-fn rejects_duplicate_scalar_case_arm() {
-    let error = check_source(
+fn warns_duplicate_scalar_case_arm() {
+    assert_check_warning(
         r#"
 case (1):
     1 => 42
     1 => 0
     _ => -1
 "#,
-    )
-    .expect_err("source should fail");
-
-    assert!(error.to_string().contains("duplicate case"));
+        DiagnosticCode::UnreachableCode,
+        "duplicate case",
+    );
 }
 
 #[test]
@@ -420,7 +412,7 @@ case (status.Active):
     @ignore_unreachable _ => -1
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

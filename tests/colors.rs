@@ -30,7 +30,7 @@ Pale:color = MakeColorFromSRGBValues(219, 112, 147)
 if (NamedColors.AliceBlue = Alice and NamedColors.Hotpink = Hot and NamedColors.PaleVioletred = Pale and NamedColors.DarkSlateGrey = NamedColors.DarkSlateGray). 42 else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -106,7 +106,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

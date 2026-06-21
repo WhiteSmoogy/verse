@@ -242,7 +242,7 @@ ShuffledValue := if (Value := Shuffled[0]). Value else. 0
 FixedInt + Rounded + ShuffledValue + Bounds
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -261,7 +261,7 @@ ShuffledValue := if (Value := Shuffled[0]). Value else. 0
 FixedInt + Rounded + ShuffledValue
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -434,7 +434,7 @@ fn evaluates_get_seconds_since_epoch_function() {
     let source = "GetSecondsSinceEpoch()";
     let value = eval(source);
 
-    assert!(matches!(value, Value::Number(seconds) if seconds > 0.0));
+    assert!(matches!(value, Value::Float(seconds) if seconds > 0.0));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Float
@@ -491,7 +491,7 @@ else:
     0
 "#;
 
-    assert_eq!(eval(source), Value::Number(2629.0));
+    assert_eq!(eval(source), Value::Int(2629));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

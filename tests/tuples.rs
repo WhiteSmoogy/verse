@@ -51,7 +51,7 @@ Args := (40, 2)
 Add(Args)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
 }
 
 #[test]
@@ -62,7 +62,7 @@ Args := (10, 20)
 Add(40, 2) + Add(Args)
 "#;
 
-    assert_eq!(eval(source), Value::Number(72.0));
+    assert_eq!(eval(source), Value::Int(72));
 }
 
 #[test]
@@ -74,7 +74,7 @@ Args := (1, Pair, 4)
 Add(1, Pair, 4) + Add(Args)
 "#;
 
-    assert_eq!(eval(source), Value::Number(20.0));
+    assert_eq!(eval(source), Value::Int(20));
 }
 
 #[test]
@@ -87,7 +87,7 @@ Args := (1, Middle, 5)
 Sum(1, Middle, 5) + Sum(Args)
 "#;
 
-    assert_eq!(eval(source), Value::Number(30.0));
+    assert_eq!(eval(source), Value::Int(30));
 }
 
 #[test]
@@ -97,7 +97,7 @@ Add((Left:int, ?Right:int = 2)):int = Left + Right
 Add(40) + Add(40, ?Right := 1) + Add((20, 22))
 "#;
 
-    assert_eq!(eval(source), Value::Number(125.0));
+    assert_eq!(eval(source), Value::Int(125));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -112,7 +112,7 @@ Pick((Value:string, ?Bonus:int = 2)):int = Bonus + 100
 Pick(40) + Pick("text", ?Bonus := 1)
 "#;
 
-    assert_eq!(eval(source), Value::Number(143.0));
+    assert_eq!(eval(source), Value::Int(143));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -223,7 +223,7 @@ Index:int = 1
 Pair(0) + Pair(Index)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -239,7 +239,7 @@ Index := if (Value := Values.Find[20]). Value else. 0
 Pair(0) + Pair(Index)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -281,7 +281,7 @@ Pair := MakePair()
 Pair(0) + Pair(1)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -296,7 +296,7 @@ Pair:pair_type = (40, 2)
 Pair(0) + Pair(1)
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -382,7 +382,7 @@ Maybe:?tuple(int, string) = option{
 if (Pair := Maybe?). Pair(0) + ToString(Pair(1)).Length else. 0
 "#;
 
-    assert_eq!(eval(source), Value::Number(43.0));
+    assert_eq!(eval(source), Value::Int(43));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -398,7 +398,7 @@ Second := if (Value := Pair(1)?). Value else. 0
 First + Second
 "#;
 
-    assert_eq!(eval(source), Value::Number(42.0));
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

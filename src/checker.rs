@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, ArchetypeLet, AssignOp, BinaryOp, CallArg, CaseArm,
@@ -8,191 +7,82 @@ use crate::ast::{
     StructField, TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::colors::NAMED_COLORS;
-use crate::error::VerseError;
+use crate::desugar::desugar_program;
+use crate::error::{Diagnostic, DiagnosticCode, VerseError};
+use crate::ir::TypedProgram;
 use crate::parser::parse_source;
 use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 
+mod classes;
+use classes::{
+    AccessLevel, AggregateKind, ClassMethodInfo, ExtensionMethodInfo, InterfaceInfo,
+    StructFieldInfo, StructInfo,
+};
+
+mod effects;
+pub use effects::{Effect, EffectSet};
+use effects::{
+    call_allowed_capabilities, call_required_capabilities, effect_call_error,
+    ensure_callable_in_failure_context, function_effects_are_assignable, has_effect,
+    has_explicit_call_effect_specifier, has_no_rollback_effect,
+    validate_function_effect_combination,
+};
+
+mod functions;
+use functions::{
+    class_is_subtype_of, collect_function_type_params, extension_method_has_qualifier,
+    function_signatures_conflict, function_signatures_match_exactly, infer_function_type_params,
+    inherited_method_duplicate_index, inherited_method_override_index, method_binding_types,
+    method_group_type, method_has_qualifier, method_qualifiers_conflict,
+    method_signatures_conflict, positional_call_args, push_distinct_local_method_info,
+    substitute_type_params, type_contains_type_param,
+};
+
+mod modules;
+use modules::{ModuleInfo, ParametricTypeInfo, TypeAliasInfo};
+
+mod scopes;
+use scopes::Symbol;
+
+mod types;
+pub use types::{IntRange, ParamSpec, Type};
+
+mod type_variables;
+pub use type_variables::{TypeVariable, TypeVariableBounds};
+
 pub fn check_source(source: &str) -> Result<Type, VerseError> {
+    Ok(check_source_with_diagnostics(source)?.value_type)
+}
+
+pub fn check_source_with_diagnostics(source: &str) -> Result<CheckResult, VerseError> {
+    let typed_program = check_source_to_typed_program(source)?;
+    Ok(CheckResult {
+        value_type: typed_program.value_type,
+        warnings: typed_program.warnings,
+    })
+}
+
+pub fn check_source_to_typed_program(source: &str) -> Result<TypedProgram, VerseError> {
     let program = parse_source(source)?;
-    Checker::new().check_program(&program)
+    Checker::new().check_program_to_typed_program(&program)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Type {
-    Int,
-    Float,
-    Rational,
-    Number,
-    Bool,
-    String,
-    Message,
-    Char,
-    Char8,
-    Char32,
-    None,
-    Any,
-    Comparable,
-    Unknown,
-    Never,
-    Range,
-    Enum(String),
-    EnumType(String),
-    Struct(String),
-    StructType(String),
-    Class(String),
-    ClassType(String),
-    Interface(String),
-    InterfaceType(String),
-    Module(String),
-    Param(String, TypeParamConstraint),
-    ParametricType {
-        name: String,
-        params: Vec<String>,
-        kind: ParametricTypeKind,
-    },
-    Array(Box<Type>),
-    Map(Box<Type>, Box<Type>),
-    WeakMap(Box<Type>, Box<Type>),
-    Tuple(Vec<Type>),
-    Option(Box<Type>),
-    Result(Box<Type>, Box<Type>),
-    Event(Option<Box<Type>>),
-    Task(Box<Type>),
-    Generator(Option<Box<Type>>),
-    CastableSubtype(Box<Type>),
-    ConcreteSubtype(Box<Type>),
-    ClassifiableSubset(Box<Type>),
-    Modifier(Box<Type>),
-    ModifierStack(Box<Type>),
-    Awaitable(Option<Box<Type>>),
-    Signalable(Box<Type>),
-    Subscribable(Option<Box<Type>>),
-    Listenable(Option<Box<Type>>),
-    Function {
-        arity: Option<usize>,
-        arity_range: Option<(usize, usize)>,
-        effects: Vec<String>,
-        param_types: Option<Vec<Type>>,
-        param_specs: Option<Vec<ParamSpec>>,
-        return_type: Box<Type>,
-    },
-    Overload(Vec<Type>),
+pub fn check_source_with_recovery(source: &str) -> Result<RecoveredCheckResult, VerseError> {
+    let program = parse_source(source)?;
+    Ok(Checker::new().check_program_with_recovery(&program))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParamSpec {
-    name: String,
-    value_type: Type,
-    named: bool,
-    has_default: bool,
-    tuple_items: Option<Vec<ParamSpec>>,
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub value_type: Type,
+    pub warnings: Vec<Diagnostic>,
 }
 
-impl fmt::Display for Type {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Int => write!(formatter, "int"),
-            Self::Float => write!(formatter, "float"),
-            Self::Rational => write!(formatter, "rational"),
-            Self::Number => write!(formatter, "number"),
-            Self::Bool => write!(formatter, "bool"),
-            Self::String => write!(formatter, "string"),
-            Self::Message => write!(formatter, "message"),
-            Self::Char => write!(formatter, "char"),
-            Self::Char8 => write!(formatter, "char8"),
-            Self::Char32 => write!(formatter, "char32"),
-            Self::None => write!(formatter, "none"),
-            Self::Any => write!(formatter, "any"),
-            Self::Comparable => write!(formatter, "comparable"),
-            Self::Unknown => write!(formatter, "unknown"),
-            Self::Never => write!(formatter, "never"),
-            Self::Range => write!(formatter, "range"),
-            Self::Enum(name) => write!(formatter, "{name}"),
-            Self::EnumType(name) => write!(formatter, "enum<{name}>"),
-            Self::Struct(name) => write!(formatter, "{name}"),
-            Self::StructType(name) => write!(formatter, "struct<{name}>"),
-            Self::Class(name) => write!(formatter, "{name}"),
-            Self::ClassType(name) => write!(formatter, "class<{name}>"),
-            Self::Interface(name) => write!(formatter, "{name}"),
-            Self::InterfaceType(name) => write!(formatter, "interface<{name}>"),
-            Self::Module(name) => write!(formatter, "module<{name}>"),
-            Self::Param(name, _) => write!(formatter, "{name}"),
-            Self::ParametricType { name, params, .. } => {
-                write!(formatter, "parametric_type<{name}/{}>", params.len())
-            }
-            Self::Array(item) => write!(formatter, "array<{item}>"),
-            Self::Map(key, value) => write!(formatter, "map<{key}, {value}>"),
-            Self::WeakMap(key, value) => write!(formatter, "weak_map<{key}, {value}>"),
-            Self::Tuple(items) => {
-                let rendered = items
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(formatter, "tuple({rendered})")
-            }
-            Self::Option(item) => write!(formatter, "?{item}"),
-            Self::Result(success, error) => write!(formatter, "result({success},{error})"),
-            Self::Event(Some(payload)) => write!(formatter, "event({payload})"),
-            Self::Event(None) => write!(formatter, "event()"),
-            Self::Task(payload) => write!(formatter, "task({payload})"),
-            Self::Generator(Some(item)) => write!(formatter, "generator({item})"),
-            Self::Generator(None) => write!(formatter, "generator()"),
-            Self::CastableSubtype(item) => write!(formatter, "castable_subtype({item})"),
-            Self::ConcreteSubtype(item) => write!(formatter, "concrete_subtype({item})"),
-            Self::ClassifiableSubset(item) => write!(formatter, "classifiable_subset({item})"),
-            Self::Modifier(item) => write!(formatter, "modifier({item})"),
-            Self::ModifierStack(item) => write!(formatter, "modifier_stack({item})"),
-            Self::Awaitable(Some(payload)) => write!(formatter, "awaitable({payload})"),
-            Self::Awaitable(None) => write!(formatter, "awaitable()"),
-            Self::Signalable(payload) => write!(formatter, "signalable({payload})"),
-            Self::Subscribable(Some(payload)) => write!(formatter, "subscribable({payload})"),
-            Self::Subscribable(None) => write!(formatter, "subscribable()"),
-            Self::Listenable(Some(payload)) => write!(formatter, "listenable({payload})"),
-            Self::Listenable(None) => write!(formatter, "listenable()"),
-            Self::Function {
-                arity,
-                arity_range,
-                effects,
-                return_type,
-                ..
-            } => {
-                if let Some(arity) = arity {
-                    write!(
-                        formatter,
-                        "function/{arity}{} -> {return_type}",
-                        render_effects(effects)
-                    )
-                } else if let Some((min, max)) = arity_range {
-                    write!(
-                        formatter,
-                        "function/{min}..={max}{} -> {return_type}",
-                        render_effects(effects)
-                    )
-                } else {
-                    write!(
-                        formatter,
-                        "function/*{} -> {return_type}",
-                        render_effects(effects)
-                    )
-                }
-            }
-            Self::Overload(overloads) => {
-                let rendered = overloads
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                write!(formatter, "overload({rendered})")
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct Symbol {
-    value_type: Type,
-    mutable: bool,
+#[derive(Debug, Clone)]
+pub struct RecoveredCheckResult {
+    pub value_type: Type,
+    pub errors: Vec<Diagnostic>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 #[derive(Clone)]
@@ -202,106 +92,11 @@ struct EnumInfo {
     persistable: bool,
 }
 
-#[derive(Clone)]
-struct StructInfo {
-    kind: AggregateKind,
-    base: Option<String>,
-    interfaces: Vec<String>,
-    unique: bool,
-    abstract_class: bool,
-    epic_internal_class: bool,
-    final_class: bool,
-    concrete: bool,
-    castable: bool,
-    persistable: bool,
-    computes: bool,
-    fields: Vec<StructFieldInfo>,
-    methods: Vec<ClassMethodInfo>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AggregateKind {
-    Struct,
-    Class,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParametricTypeKind {
     Struct,
     Class,
     Interface,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AccessLevel {
-    Public,
-    Internal,
-    Protected,
-    Private,
-}
-
-#[derive(Clone)]
-struct StructFieldInfo {
-    name: String,
-    value_type: Type,
-    has_default: bool,
-    mutable: bool,
-    final_member: bool,
-    access: AccessLevel,
-    mutation_access: AccessLevel,
-    owner: Option<String>,
-    span: Span,
-}
-
-#[derive(Clone)]
-struct ClassMethodInfo {
-    qualifier: Option<String>,
-    name: String,
-    value_type: Type,
-    final_member: bool,
-    abstract_member: bool,
-    access: AccessLevel,
-    owner: Option<String>,
-    span: Span,
-}
-
-#[derive(Clone)]
-struct InterfaceInfo {
-    parents: Vec<String>,
-    fields: Vec<StructFieldInfo>,
-    methods: Vec<ClassMethodInfo>,
-}
-
-#[derive(Clone)]
-struct ExtensionMethodInfo {
-    receiver_type: Type,
-    method_type: Type,
-    module_name: Option<String>,
-    access: AccessLevel,
-    span: Span,
-}
-
-#[derive(Clone)]
-struct TypeAliasInfo {
-    target: TypeAnnotation,
-    span: Span,
-    module_path: Vec<String>,
-}
-
-#[derive(Clone)]
-struct ParametricTypeInfo {
-    params: Vec<TypeParam>,
-    expr: Expr,
-    kind: ParametricTypeKind,
-    module_path: Vec<String>,
-    span: Span,
-}
-
-#[derive(Clone)]
-struct ModuleInfo {
-    members: HashMap<String, Type>,
-    member_access: HashMap<String, AccessLevel>,
-    imports: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -334,11 +129,13 @@ struct ClassDefinitionParts<'a> {
     blocks: &'a [ClassBlock],
 }
 
+#[derive(Clone)]
 struct AsyncExprMarker {
     function_depth: usize,
     seen: bool,
 }
 
+#[derive(Clone)]
 pub struct Checker {
     scopes: Vec<HashMap<String, Symbol>>,
     scope_imports: Vec<Vec<String>>,
@@ -367,6 +164,9 @@ pub struct Checker {
     suppressed_async_expr_markers: usize,
     class_context: Vec<String>,
     class_member_shadow_names: Vec<HashSet<String>>,
+    errors: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
+    recovering: bool,
 }
 
 impl Checker {
@@ -945,24 +745,123 @@ impl Checker {
             suppressed_async_expr_markers: 0,
             class_context: Vec::new(),
             class_member_shadow_names: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            recovering: false,
         }
     }
 
-    pub fn check_program(mut self, program: &Program) -> Result<Type, VerseError> {
-        self.predeclare_top_level_modules(program);
-        self.predeclare_top_level_module_member_access(program)?;
-        self.predeclare_top_level_enums(program);
-        self.predeclare_top_level_aggregate_names(program);
-        self.predeclare_top_level_aggregate_values(program)?;
-        self.predeclare_top_level_parametric_types(program)?;
+    pub fn check_program(self, program: &Program) -> Result<Type, VerseError> {
+        Ok(self.check_program_with_diagnostics(program)?.value_type)
+    }
+
+    pub fn check_program_with_diagnostics(
+        self,
+        program: &Program,
+    ) -> Result<CheckResult, VerseError> {
+        let typed_program = self.check_program_to_typed_program(program)?;
+        Ok(CheckResult {
+            value_type: typed_program.value_type,
+            warnings: typed_program.warnings,
+        })
+    }
+
+    pub fn check_program_to_typed_program(
+        mut self,
+        program: &Program,
+    ) -> Result<TypedProgram, VerseError> {
+        self.recovering = false;
+        let program = desugar_program(program);
+        self.predeclare_top_level_modules(&program);
+        self.predeclare_top_level_module_member_access(&program)?;
+        self.predeclare_top_level_enums(&program);
+        self.predeclare_top_level_aggregate_names(&program);
+        self.predeclare_top_level_aggregate_values(&program)?;
+        self.predeclare_top_level_parametric_types(&program)?;
         self.predeclare_using_imports_recursive(&program.statements)?;
-        self.predeclare_top_level_type_aliases(program)?;
+        self.predeclare_top_level_type_aliases(&program)?;
         self.predeclare_extension_methods_in_current_scope(&program.statements)?;
-        self.predeclare_top_level_functions(program)?;
-        self.define_top_level_interface_members(program)?;
-        self.define_top_level_aggregate_members(program)?;
+        self.predeclare_top_level_functions(&program)?;
+        self.define_top_level_interface_members(&program)?;
+        self.define_top_level_aggregate_members(&program)?;
         self.validate_function_overloads_in_current_scope()?;
-        self.check_statements(&program.statements)
+        let value_type = self.check_statements(&program.statements)?;
+        Ok(TypedProgram {
+            program,
+            value_type,
+            warnings: self.warnings,
+        })
+    }
+
+    pub fn check_program_with_recovery(mut self, program: &Program) -> RecoveredCheckResult {
+        self.recovering = true;
+        let program = desugar_program(program);
+        self.predeclare_top_level_modules(&program);
+        self.run_recovering_pass(|checker| {
+            checker.predeclare_top_level_module_member_access(&program)
+        });
+        self.predeclare_top_level_enums(&program);
+        self.predeclare_top_level_aggregate_names(&program);
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_aggregate_values(&program));
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_parametric_types(&program));
+        self.run_recovering_pass(|checker| {
+            checker.predeclare_using_imports_recursive(&program.statements)
+        });
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_type_aliases(&program));
+        self.run_recovering_pass(|checker| {
+            checker.predeclare_extension_methods_in_current_scope(&program.statements)
+        });
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_functions(&program));
+        self.run_recovering_pass(|checker| checker.define_top_level_interface_members(&program));
+        self.run_recovering_pass(|checker| checker.define_top_level_aggregate_members(&program));
+        self.run_recovering_pass(|checker| checker.validate_function_overloads_in_current_scope());
+        let value_type =
+            self.run_recovering_type_pass(|checker| checker.check_statements(&program.statements));
+        RecoveredCheckResult {
+            value_type,
+            errors: self.errors,
+            warnings: self.warnings,
+        }
+    }
+
+    fn run_recovering_pass(&mut self, pass: impl FnOnce(&mut Self) -> Result<(), VerseError>) {
+        let snapshot = self.clone();
+        if let Err(error) = pass(self) {
+            *self = snapshot;
+            self.record_error(error);
+        }
+    }
+
+    fn run_recovering_type_pass(
+        &mut self,
+        pass: impl FnOnce(&mut Self) -> Result<Type, VerseError>,
+    ) -> Type {
+        let snapshot = self.clone();
+        match pass(self) {
+            Ok(value_type) => value_type,
+            Err(error) => {
+                *self = snapshot;
+                self.record_error(error);
+                Type::Unknown
+            }
+        }
+    }
+
+    fn record_error(&mut self, error: VerseError) {
+        self.errors.push(error.diagnostic().clone());
+    }
+
+    fn warn_at(&mut self, code: DiagnosticCode, message: impl Into<String>, span: Span) {
+        self.warnings
+            .push(Diagnostic::warning(code, message, Some(span)));
+    }
+
+    fn warn_unreachable(&mut self, message: impl Into<String>, span: Span) {
+        self.warn_at(DiagnosticCode::UnreachableCode, message, span);
+    }
+
+    fn warn_empty_block(&mut self, span: Span) {
+        self.warn_at(DiagnosticCode::EmptyBlock, "empty block", span);
     }
 
     fn predeclare_top_level_module_member_access(
@@ -1396,6 +1295,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.resolve_type_alias_target(item, span, visiting)?,
                 None => Type::Unknown,
@@ -1798,6 +1698,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name(item, span)?,
                 None => Type::Unknown,
@@ -1900,6 +1801,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name_for_assignability(item)?,
                 None => Type::Unknown,
@@ -4321,9 +4223,27 @@ impl Checker {
 
         for statement in statements {
             if let Some((message, span)) = unreachable_after {
-                return Err(VerseError::check_at(message, span.through(statement.span)));
+                last = Type::Never;
+                self.warn_unreachable(message, span.through(statement.span));
+                break;
             }
-            last = self.check_stmt(statement)?;
+            let statement_snapshot = if self.recovering {
+                Some(self.clone())
+            } else {
+                None
+            };
+            last = match self.check_stmt(statement) {
+                Ok(value_type) => value_type,
+                Err(error) => {
+                    let Some(snapshot) = statement_snapshot else {
+                        return Err(error);
+                    };
+                    *self = snapshot;
+                    self.record_error(error);
+                    self.recover_failed_statement_binding(statement);
+                    Type::Unknown
+                }
+            };
             if last == Type::Never || self.statement_never_completes(statement) {
                 unreachable_after =
                     Some((unreachable_statement_message(statement), statement.span));
@@ -4331,6 +4251,25 @@ impl Checker {
         }
 
         Ok(last)
+    }
+
+    fn recover_failed_statement_binding(&mut self, statement: &Stmt) {
+        match &statement.kind {
+            StmtKind::Let { name, .. } => self.define_recovered_binding(name, false),
+            StmtKind::Var { name, .. } => self.define_recovered_binding(name, true),
+            _ => {}
+        }
+    }
+
+    fn define_recovered_binding(&mut self, name: &str, mutable: bool) {
+        let current = self
+            .scopes
+            .last_mut()
+            .expect("checker should always have a scope");
+        current.entry(name.to_string()).or_insert(Symbol {
+            value_type: Type::Unknown,
+            mutable,
+        });
     }
 
     fn check_stmt(&mut self, statement: &Stmt) -> Result<Type, VerseError> {
@@ -5162,6 +5101,9 @@ impl Checker {
                 Ok(value_type)
             }
             ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => {
+                if statements.is_empty() {
+                    self.warn_empty_block(expr.span);
+                }
                 self.push_scope();
                 let result = self.check_statements(statements);
                 self.pop_scope();
@@ -7510,6 +7452,9 @@ impl Checker {
                 self.check_failure_binary(left, *op, right)
             }
             ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => {
+                if statements.is_empty() {
+                    self.warn_empty_block(expr.span);
+                }
                 self.push_scope();
                 let result = self.check_failure_statements(statements);
                 self.pop_scope();
@@ -7547,7 +7492,9 @@ impl Checker {
 
         for statement in statements {
             if let Some((message, span)) = unreachable_after {
-                return Err(VerseError::check_at(message, span.through(statement.span)));
+                last = Type::Never;
+                self.warn_unreachable(message, span.through(statement.span));
+                break;
             }
             last = match &statement.kind {
                 StmtKind::Let {
@@ -8161,10 +8108,8 @@ impl Checker {
         for arm in arms {
             let unreachable_after_wildcard = saw_wildcard;
             if unreachable_after_wildcard && !arm.ignore_unreachable {
-                return Err(VerseError::check_at(
-                    "case after wildcard is unreachable",
-                    arm.span,
-                ));
+                self.warn_unreachable("case after wildcard is unreachable", arm.span);
+                continue;
             }
 
             match &arm.pattern {
@@ -8195,10 +8140,11 @@ impl Checker {
 
                     let duplicate = covered.iter().any(|existing| existing == variant);
                     if duplicate && !arm.ignore_unreachable {
-                        return Err(VerseError::check_at(
+                        self.warn_unreachable(
                             format!("duplicate case `{enum_name}.{variant}` is unreachable"),
                             pattern.span,
-                        ));
+                        );
+                        continue;
                     }
                     if !duplicate && !unreachable_after_wildcard {
                         covered.push(variant.to_string());
@@ -8254,10 +8200,8 @@ impl Checker {
         for arm in arms {
             let unreachable_after_wildcard = saw_wildcard;
             if unreachable_after_wildcard && !arm.ignore_unreachable {
-                return Err(VerseError::check_at(
-                    "case after wildcard is unreachable",
-                    arm.span,
-                ));
+                self.warn_unreachable("case after wildcard is unreachable", arm.span);
+                continue;
             }
 
             match &arm.pattern {
@@ -8282,10 +8226,8 @@ impl Checker {
                         })?;
                     let duplicate = covered.iter().any(|existing| existing == &constant);
                     if duplicate && !arm.ignore_unreachable {
-                        return Err(VerseError::check_at(
-                            "duplicate case is unreachable",
-                            pattern.span,
-                        ));
+                        self.warn_unreachable("duplicate case is unreachable", pattern.span);
+                        continue;
                     }
                     if !duplicate && !unreachable_after_wildcard {
                         covered.push(constant);
@@ -8334,10 +8276,8 @@ impl Checker {
         let mut saw_wildcard = false;
         for arm in arms {
             if saw_wildcard && !arm.ignore_unreachable {
-                return Err(VerseError::check_at(
-                    "case after wildcard is unreachable",
-                    arm.span,
-                ));
+                self.warn_unreachable("case after wildcard is unreachable", arm.span);
+                continue;
             }
             match &arm.pattern {
                 CasePattern::Wildcard { .. } => saw_wildcard = true,
@@ -8587,6 +8527,12 @@ impl Checker {
         actual: &Type,
         expr: &Expr,
     ) -> Result<bool, VerseError> {
+        if let Type::IntRange(range) = expected
+            && let Some(value) = expr_int_literal_value(expr)
+        {
+            return Ok(range.contains(value));
+        }
+
         if is_empty_option_literal(expected, expr) {
             return Ok(true);
         }
@@ -8648,6 +8594,8 @@ impl Checker {
                 .is_some_and(|supertype| self.is_assignable(expected, &supertype))
             || matches!(expected, Type::Comparable)
                 && ensure_comparable_key(actual, &self.struct_types, Span::new(0, 0, 0, 0)).is_ok()
+            || matches!((expected, actual), (Type::Int, Type::IntRange(_)))
+            || matches!((expected, actual), (Type::IntRange(expected), Type::IntRange(actual)) if expected.contains_range(*actual))
             || matches!(expected, Type::Number) && is_numeric_type(actual)
             || matches!((expected, actual), (Type::Rational, Type::Int))
             || matches!((expected, actual), (Type::Float, Type::Int))
@@ -8809,6 +8757,7 @@ impl Checker {
     fn is_persistable_type(&self, value_type: &Type) -> bool {
         match value_type {
             Type::Int
+            | Type::IntRange(_)
             | Type::Float
             | Type::Rational
             | Type::Number
@@ -10465,15 +10414,6 @@ impl Default for Checker {
     }
 }
 
-impl Symbol {
-    fn immutable(value_type: Type) -> Self {
-        Self {
-            value_type,
-            mutable: false,
-        }
-    }
-}
-
 fn call_arg_expr(arg: &CallArg) -> &Expr {
     match arg {
         CallArg::Positional(expr) => expr,
@@ -10570,767 +10510,6 @@ fn class_definition_diagnostic_span(
         .or_else(|| extension_methods.first().map(|method| method.span))
         .or_else(|| blocks.first().map(|block| block.span))
         .unwrap_or_else(|| Span::new(0, 0, 1, 1))
-}
-
-fn method_binding_types(methods: &[ClassMethodInfo]) -> Vec<(String, Type)> {
-    let mut grouped: Vec<(String, Vec<Type>)> = Vec::new();
-    for method in methods {
-        if let Some((_, overloads)) = grouped.iter_mut().find(|(name, _)| name == &method.name) {
-            overloads.push(method.value_type.clone());
-        } else {
-            grouped.push((method.name.clone(), vec![method.value_type.clone()]));
-        }
-    }
-
-    grouped
-        .into_iter()
-        .map(|(name, overloads)| {
-            let value_type = match overloads.as_slice() {
-                [single] => single.clone(),
-                _ => Type::Overload(overloads),
-            };
-            (name, value_type)
-        })
-        .collect()
-}
-
-fn method_group_type<'a>(methods: impl IntoIterator<Item = &'a ClassMethodInfo>) -> Option<Type> {
-    let overloads = methods
-        .into_iter()
-        .map(|method| method.value_type.clone())
-        .collect::<Vec<_>>();
-    match overloads.as_slice() {
-        [] => None,
-        [single] => Some(single.clone()),
-        _ => Some(Type::Overload(overloads)),
-    }
-}
-
-fn qualifier_matches(stored: &str, requested: &str) -> bool {
-    stored == requested
-        || stored.rsplit('.').next() == Some(requested)
-        || requested.rsplit('.').next() == Some(stored)
-}
-
-fn method_has_qualifier(method: &ClassMethodInfo, qualifier: &str) -> bool {
-    method
-        .qualifier
-        .as_deref()
-        .is_some_and(|stored| qualifier_matches(stored, qualifier))
-}
-
-fn extension_method_has_qualifier(method: &ExtensionMethodInfo, qualifier: &str) -> bool {
-    method
-        .module_name
-        .as_deref()
-        .is_some_and(|stored| qualifier_matches(stored, qualifier))
-}
-
-fn method_qualifiers_conflict(left: &ClassMethodInfo, right: &ClassMethodInfo) -> bool {
-    match (left.qualifier.as_deref(), right.qualifier.as_deref()) {
-        (Some(left), Some(right)) => qualifier_matches(left, right),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn method_signatures_conflict(
-    left: &ClassMethodInfo,
-    right: &ClassMethodInfo,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    left.name == right.name
-        && function_signatures_conflict(&left.value_type, &right.value_type, struct_types)
-}
-
-fn inherited_method_override_index(
-    inherited_methods: &[ClassMethodInfo],
-    method: &ClassMethodInfo,
-    struct_types: &HashMap<String, StructInfo>,
-) -> Result<Option<usize>, VerseError> {
-    let candidates = inherited_methods
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            method_signatures_conflict(candidate, method, struct_types).then_some(index)
-        })
-        .collect::<Vec<_>>();
-
-    if method.qualifier.is_some() {
-        return Ok(candidates
-            .into_iter()
-            .find(|index| method_qualifiers_conflict(&inherited_methods[*index], method)));
-    }
-
-    if let Some(index) = candidates
-        .iter()
-        .copied()
-        .find(|index| method_qualifiers_conflict(&inherited_methods[*index], method))
-    {
-        return Ok(Some(index));
-    }
-
-    match candidates.as_slice() {
-        [] => Ok(None),
-        [index] => Ok(Some(*index)),
-        _ => Err(VerseError::check_at(
-            format!(
-                "method `{}` override is ambiguous; use a qualified method name",
-                method.name
-            ),
-            method.span,
-        )),
-    }
-}
-
-fn inherited_method_duplicate_index(
-    inherited_methods: &[ClassMethodInfo],
-    method: &ClassMethodInfo,
-    struct_types: &HashMap<String, StructInfo>,
-) -> Option<usize> {
-    inherited_methods.iter().position(|candidate| {
-        method_signatures_conflict(candidate, method, struct_types)
-            && (method.qualifier.is_none() || method_qualifiers_conflict(candidate, method))
-    })
-}
-
-fn push_distinct_local_method_info(
-    infos: &mut Vec<ClassMethodInfo>,
-    info: ClassMethodInfo,
-    aggregate_kind: &str,
-    struct_types: &HashMap<String, StructInfo>,
-) -> Result<(), VerseError> {
-    if infos.iter().any(|existing| {
-        existing.name == info.name
-            && method_qualifiers_conflict(existing, &info)
-            && function_signatures_conflict(&existing.value_type, &info.value_type, struct_types)
-    }) {
-        return Err(VerseError::check_at(
-            format!("duplicate {aggregate_kind} method overload `{}`", info.name),
-            info.span,
-        ));
-    }
-    infos.push(info);
-    Ok(())
-}
-
-fn function_signatures_match_exactly(left: &Type, right: &Type) -> bool {
-    let (
-        Type::Function {
-            arity: left_arity,
-            arity_range: left_arity_range,
-            param_types: left_param_types,
-            param_specs: left_param_specs,
-            ..
-        },
-        Type::Function {
-            arity: right_arity,
-            arity_range: right_arity_range,
-            param_types: right_param_types,
-            param_specs: right_param_specs,
-            ..
-        },
-    ) = (left, right)
-    else {
-        return false;
-    };
-
-    left_arity == right_arity
-        && left_arity_range == right_arity_range
-        && left_param_types == right_param_types
-        && exact_param_specs_key(left_param_specs.as_deref())
-            == exact_param_specs_key(right_param_specs.as_deref())
-}
-
-fn exact_param_specs_key(specs: Option<&[ParamSpec]>) -> Option<Vec<(bool, String, Type)>> {
-    let specs = specs?;
-    let mut key = specs
-        .iter()
-        .map(|spec| {
-            (
-                spec.named,
-                if spec.named {
-                    spec.name.clone()
-                } else {
-                    String::new()
-                },
-                spec.value_type.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    if key.iter().all(|(named, _, _)| *named) {
-        key.sort_by(|left, right| left.1.cmp(&right.1));
-    }
-    Some(key)
-}
-
-fn function_signatures_conflict(
-    left: &Type,
-    right: &Type,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    let (
-        Type::Function {
-            arity: left_arity,
-            arity_range: left_arity_range,
-            param_types: left_param_types,
-            param_specs: left_param_specs,
-            ..
-        },
-        Type::Function {
-            arity: right_arity,
-            arity_range: right_arity_range,
-            param_types: right_param_types,
-            param_specs: right_param_specs,
-            ..
-        },
-    ) = (left, right)
-    else {
-        return false;
-    };
-
-    if left_arity_range != right_arity_range {
-        return false;
-    }
-
-    if let (Some(left_specs), Some(right_specs)) =
-        (left_param_specs.as_deref(), right_param_specs.as_deref())
-    {
-        return param_specs_overlap(left_specs, right_specs, struct_types);
-    }
-
-    left_arity == right_arity
-        && param_type_lists_overlap(
-            left_param_types.as_deref(),
-            right_param_types.as_deref(),
-            struct_types,
-        )
-}
-
-fn param_specs_overlap(
-    left: &[ParamSpec],
-    right: &[ParamSpec],
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    if param_specs_overlap_direct(left, right, struct_types) {
-        return true;
-    }
-
-    let left_variants = expanded_single_tuple_param_spec_variants(left);
-    let right_variants = expanded_single_tuple_param_spec_variants(right);
-
-    for left_variant in &left_variants {
-        if param_specs_overlap_direct(left_variant, right, struct_types) {
-            return true;
-        }
-        for right_variant in &right_variants {
-            if param_specs_overlap_direct(left_variant, right_variant, struct_types) {
-                return true;
-            }
-        }
-    }
-
-    right_variants
-        .iter()
-        .any(|right_variant| param_specs_overlap_direct(left, right_variant, struct_types))
-}
-
-fn expanded_single_tuple_param_spec_variants(specs: &[ParamSpec]) -> Vec<Vec<ParamSpec>> {
-    let [single] = specs else {
-        return Vec::new();
-    };
-    let Some(items) = &single.tuple_items else {
-        return Vec::new();
-    };
-
-    let mut variants = vec![items.clone()];
-    variants.extend(expanded_single_tuple_param_spec_variants(items));
-    variants
-}
-
-fn param_specs_overlap_direct(
-    left: &[ParamSpec],
-    right: &[ParamSpec],
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    let left_positional = left
-        .iter()
-        .filter(|spec| !spec.named)
-        .map(|spec| &spec.value_type)
-        .collect::<Vec<_>>();
-    let right_positional = right
-        .iter()
-        .filter(|spec| !spec.named)
-        .map(|spec| &spec.value_type)
-        .collect::<Vec<_>>();
-
-    if !param_type_slices_overlap(&left_positional, &right_positional, struct_types) {
-        return false;
-    }
-
-    let left_named = left.iter().filter(|spec| spec.named).collect::<Vec<_>>();
-    let right_named = right.iter().filter(|spec| spec.named).collect::<Vec<_>>();
-
-    required_named_params_are_accepted_by(&left_named, &right_named, struct_types)
-        && required_named_params_are_accepted_by(&right_named, &left_named, struct_types)
-}
-
-fn required_named_params_are_accepted_by(
-    required_source: &[&ParamSpec],
-    target: &[&ParamSpec],
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    required_source
-        .iter()
-        .filter(|spec| !spec.has_default)
-        .all(|required| {
-            target
-                .iter()
-                .find(|candidate| candidate.name == required.name)
-                .is_some_and(|candidate| {
-                    types_not_distinct(&required.value_type, &candidate.value_type, struct_types)
-                })
-        })
-}
-
-fn param_type_lists_overlap(
-    left: Option<&[Type]>,
-    right: Option<&[Type]>,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            let left_refs = left.iter().collect::<Vec<_>>();
-            let right_refs = right.iter().collect::<Vec<_>>();
-            param_type_slices_overlap(&left_refs, &right_refs, struct_types)
-        }
-        _ => true,
-    }
-}
-
-fn param_type_slices_overlap(
-    left: &[&Type],
-    right: &[&Type],
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    if left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| types_not_distinct(left, right, struct_types))
-    {
-        return true;
-    }
-
-    if let [single] = left
-        && single_param_overlaps_sequence(single, right, struct_types)
-    {
-        return true;
-    }
-
-    if let [single] = right {
-        return single_param_overlaps_sequence(single, left, struct_types);
-    }
-
-    false
-}
-
-fn single_param_overlaps_sequence(
-    single: &Type,
-    sequence: &[&Type],
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    match single {
-        Type::Tuple(items) if items.len() == sequence.len() => items
-            .iter()
-            .zip(sequence)
-            .all(|(item, sequence_type)| types_not_distinct(item, sequence_type, struct_types)),
-        _ => false,
-    }
-}
-
-fn types_not_distinct(
-    left: &Type,
-    right: &Type,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (left, right) {
-        (Type::Any | Type::Unknown, _) | (_, Type::Any | Type::Unknown) => true,
-        (Type::None, _) | (_, Type::None) => true,
-        (Type::Option(_), Type::Bool) | (Type::Bool, Type::Option(_)) => true,
-        (Type::Array(_), Type::Map(_, _) | Type::WeakMap(_, _))
-        | (Type::Map(_, _) | Type::WeakMap(_, _), Type::Array(_)) => true,
-        (Type::Function { .. }, Type::Array(_) | Type::Map(_, _) | Type::WeakMap(_, _))
-        | (Type::Array(_) | Type::Map(_, _) | Type::WeakMap(_, _), Type::Function { .. }) => true,
-        (Type::Function { .. }, Type::Function { .. }) => true,
-        (Type::Interface(_), Type::Class(_)) | (Type::Class(_), Type::Interface(_)) => true,
-        (Type::Class(left), Type::Class(right)) => {
-            class_types_not_distinct(left, right, struct_types)
-        }
-        (Type::Tuple(items), Type::Array(item)) | (Type::Array(item), Type::Tuple(items)) => items
-            .iter()
-            .any(|tuple_item| types_not_distinct(tuple_item, item, struct_types)),
-        (Type::Tuple(items), Type::Map(key, value))
-        | (Type::Map(key, value), Type::Tuple(items)) => {
-            matches!(key.as_ref(), Type::Int)
-                && items
-                    .iter()
-                    .any(|tuple_item| types_not_distinct(tuple_item, value, struct_types))
-        }
-        (Type::Tuple(items), Type::Option(item)) | (Type::Option(item), Type::Tuple(items)) => {
-            matches!(items.as_slice(), [single] if types_not_distinct(single, item, struct_types))
-        }
-        _ => false,
-    }
-}
-
-fn class_types_not_distinct(
-    left: &str,
-    right: &str,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    left == right
-        || class_is_subtype_of(left, right, struct_types)
-        || class_is_subtype_of(right, left, struct_types)
-}
-
-fn class_is_subtype_of(
-    child: &str,
-    parent: &str,
-    struct_types: &HashMap<String, StructInfo>,
-) -> bool {
-    let mut current = Some(child);
-    while let Some(name) = current {
-        if name == parent {
-            return true;
-        }
-        current = struct_types.get(name).and_then(|info| info.base.as_deref());
-    }
-    false
-}
-
-fn positional_call_args(args: &[Expr]) -> Vec<CallArg> {
-    args.iter().cloned().map(CallArg::Positional).collect()
-}
-
-fn infer_function_type_params(
-    param_types: Option<&[Type]>,
-    arg_types: &[Type],
-) -> Option<HashMap<String, Type>> {
-    let param_types = param_types?;
-    if param_types.len() != arg_types.len() {
-        return Some(HashMap::new());
-    }
-    let mut inferred = HashMap::new();
-    for (param_type, arg_type) in param_types.iter().zip(arg_types) {
-        infer_type_params_from_type(param_type, arg_type, &mut inferred)?;
-    }
-    Some(inferred)
-}
-
-fn infer_type_params_from_type(
-    pattern: &Type,
-    actual: &Type,
-    inferred: &mut HashMap<String, Type>,
-) -> Option<()> {
-    match (pattern, actual) {
-        (Type::Param(name, _), actual) => {
-            if inferred.contains_key(name) {
-                Some(())
-            } else {
-                inferred.insert(name.clone(), actual.clone());
-                Some(())
-            }
-        }
-        (Type::Array(pattern), Type::Array(actual)) => {
-            infer_type_params_from_type(pattern, actual, inferred)
-        }
-        (Type::Map(pattern_key, pattern_value), Type::Map(actual_key, actual_value))
-        | (Type::WeakMap(pattern_key, pattern_value), Type::WeakMap(actual_key, actual_value)) => {
-            infer_type_params_from_type(pattern_key, actual_key, inferred)?;
-            infer_type_params_from_type(pattern_value, actual_value, inferred)
-        }
-        (Type::Tuple(pattern_items), Type::Tuple(actual_items))
-            if pattern_items.len() == actual_items.len() =>
-        {
-            for (pattern, actual) in pattern_items.iter().zip(actual_items) {
-                infer_type_params_from_type(pattern, actual, inferred)?;
-            }
-            Some(())
-        }
-        (Type::Option(pattern), Type::Option(actual))
-        | (Type::Task(pattern), Type::Task(actual))
-        | (Type::CastableSubtype(pattern), Type::CastableSubtype(actual))
-        | (Type::ConcreteSubtype(pattern), Type::ConcreteSubtype(actual))
-        | (Type::ClassifiableSubset(pattern), Type::ClassifiableSubset(actual))
-        | (Type::Modifier(pattern), Type::Modifier(actual))
-        | (Type::ModifierStack(pattern), Type::ModifierStack(actual))
-        | (Type::Signalable(pattern), Type::Signalable(actual)) => {
-            infer_type_params_from_type(pattern, actual, inferred)
-        }
-        (
-            Type::Result(pattern_success, pattern_error),
-            Type::Result(actual_success, actual_error),
-        ) => {
-            infer_type_params_from_type(pattern_success, actual_success, inferred)?;
-            infer_type_params_from_type(pattern_error, actual_error, inferred)
-        }
-        (Type::Event(pattern), Type::Event(actual))
-        | (Type::Generator(pattern), Type::Generator(actual))
-        | (Type::Awaitable(pattern), Type::Awaitable(actual))
-        | (Type::Subscribable(pattern), Type::Subscribable(actual))
-        | (Type::Listenable(pattern), Type::Listenable(actual)) => match (pattern, actual) {
-            (Some(pattern), Some(actual)) => infer_type_params_from_type(pattern, actual, inferred),
-            _ => Some(()),
-        },
-        (
-            Type::Function {
-                param_types: pattern_params,
-                return_type: pattern_return,
-                ..
-            },
-            Type::Function {
-                param_types: actual_params,
-                return_type: actual_return,
-                ..
-            },
-        ) => {
-            if let (Some(pattern_params), Some(actual_params)) = (pattern_params, actual_params) {
-                if pattern_params.len() != actual_params.len() {
-                    return None;
-                }
-                for (pattern, actual) in pattern_params.iter().zip(actual_params) {
-                    infer_type_params_from_type(pattern, actual, inferred)?;
-                }
-            }
-            infer_type_params_from_type(pattern_return, actual_return, inferred)
-        }
-        _ => Some(()),
-    }
-}
-
-fn substitute_type_params(value_type: &Type, inferred: &HashMap<String, Type>) -> Type {
-    match value_type {
-        Type::Param(name, _) => inferred
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| value_type.clone()),
-        Type::Array(item) => Type::Array(Box::new(substitute_type_params(item, inferred))),
-        Type::Map(key, value) => Type::Map(
-            Box::new(substitute_type_params(key, inferred)),
-            Box::new(substitute_type_params(value, inferred)),
-        ),
-        Type::WeakMap(key, value) => Type::WeakMap(
-            Box::new(substitute_type_params(key, inferred)),
-            Box::new(substitute_type_params(value, inferred)),
-        ),
-        Type::Tuple(items) => Type::Tuple(
-            items
-                .iter()
-                .map(|item| substitute_type_params(item, inferred))
-                .collect(),
-        ),
-        Type::Option(item) => Type::Option(Box::new(substitute_type_params(item, inferred))),
-        Type::Result(success, error) => Type::Result(
-            Box::new(substitute_type_params(success, inferred)),
-            Box::new(substitute_type_params(error, inferred)),
-        ),
-        Type::Event(payload) => Type::Event(
-            payload
-                .as_deref()
-                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
-        ),
-        Type::Task(payload) => Type::Task(Box::new(substitute_type_params(payload, inferred))),
-        Type::Generator(payload) => Type::Generator(
-            payload
-                .as_deref()
-                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
-        ),
-        Type::CastableSubtype(item) => {
-            Type::CastableSubtype(Box::new(substitute_type_params(item, inferred)))
-        }
-        Type::ConcreteSubtype(item) => {
-            Type::ConcreteSubtype(Box::new(substitute_type_params(item, inferred)))
-        }
-        Type::ClassifiableSubset(item) => {
-            Type::ClassifiableSubset(Box::new(substitute_type_params(item, inferred)))
-        }
-        Type::Modifier(item) => Type::Modifier(Box::new(substitute_type_params(item, inferred))),
-        Type::ModifierStack(item) => {
-            Type::ModifierStack(Box::new(substitute_type_params(item, inferred)))
-        }
-        Type::Awaitable(payload) => Type::Awaitable(
-            payload
-                .as_deref()
-                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
-        ),
-        Type::Signalable(payload) => {
-            Type::Signalable(Box::new(substitute_type_params(payload, inferred)))
-        }
-        Type::Subscribable(payload) => Type::Subscribable(
-            payload
-                .as_deref()
-                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
-        ),
-        Type::Listenable(payload) => Type::Listenable(
-            payload
-                .as_deref()
-                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
-        ),
-        Type::Function {
-            arity,
-            arity_range,
-            effects,
-            param_types,
-            param_specs,
-            return_type,
-        } => Type::Function {
-            arity: *arity,
-            arity_range: *arity_range,
-            effects: effects.clone(),
-            param_types: param_types.as_ref().map(|params| {
-                params
-                    .iter()
-                    .map(|param| substitute_type_params(param, inferred))
-                    .collect()
-            }),
-            param_specs: param_specs.as_ref().map(|specs| {
-                specs
-                    .iter()
-                    .map(|spec| substitute_param_spec(spec, inferred))
-                    .collect()
-            }),
-            return_type: Box::new(substitute_type_params(return_type, inferred)),
-        },
-        Type::Overload(overloads) => Type::Overload(
-            overloads
-                .iter()
-                .map(|overload| substitute_type_params(overload, inferred))
-                .collect(),
-        ),
-        _ => value_type.clone(),
-    }
-}
-
-fn type_contains_type_param(value_type: &Type) -> bool {
-    match value_type {
-        Type::Param(_, _) => true,
-        Type::Array(item)
-        | Type::Option(item)
-        | Type::Task(item)
-        | Type::CastableSubtype(item)
-        | Type::ConcreteSubtype(item)
-        | Type::ClassifiableSubset(item)
-        | Type::Modifier(item)
-        | Type::ModifierStack(item)
-        | Type::Signalable(item) => type_contains_type_param(item),
-        Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
-            type_contains_type_param(key) || type_contains_type_param(value)
-        }
-        Type::Tuple(items) | Type::Overload(items) => items.iter().any(type_contains_type_param),
-        Type::Event(payload)
-        | Type::Generator(payload)
-        | Type::Awaitable(payload)
-        | Type::Subscribable(payload)
-        | Type::Listenable(payload) => payload.as_deref().is_some_and(type_contains_type_param),
-        Type::Function {
-            param_types,
-            param_specs,
-            return_type,
-            ..
-        } => {
-            param_types
-                .as_ref()
-                .is_some_and(|params| params.iter().any(type_contains_type_param))
-                || param_specs
-                    .as_ref()
-                    .is_some_and(|specs| specs.iter().any(param_spec_contains_type_param))
-                || type_contains_type_param(return_type)
-        }
-        Type::Int
-        | Type::Float
-        | Type::Rational
-        | Type::Number
-        | Type::Bool
-        | Type::String
-        | Type::Message
-        | Type::Char
-        | Type::Char8
-        | Type::Char32
-        | Type::None
-        | Type::Any
-        | Type::Comparable
-        | Type::Unknown
-        | Type::Never
-        | Type::Range
-        | Type::Enum(_)
-        | Type::EnumType(_)
-        | Type::Struct(_)
-        | Type::StructType(_)
-        | Type::Class(_)
-        | Type::ClassType(_)
-        | Type::Interface(_)
-        | Type::InterfaceType(_)
-        | Type::Module(_)
-        | Type::ParametricType { .. } => false,
-    }
-}
-
-fn param_spec_contains_type_param(spec: &ParamSpec) -> bool {
-    type_contains_type_param(&spec.value_type)
-        || spec
-            .tuple_items
-            .as_ref()
-            .is_some_and(|items| items.iter().any(param_spec_contains_type_param))
-}
-
-fn substitute_param_spec(spec: &ParamSpec, inferred: &HashMap<String, Type>) -> ParamSpec {
-    ParamSpec {
-        name: spec.name.clone(),
-        value_type: substitute_type_params(&spec.value_type, inferred),
-        named: spec.named,
-        has_default: spec.has_default,
-        tuple_items: spec.tuple_items.as_ref().map(|items| {
-            items
-                .iter()
-                .map(|item| substitute_param_spec(item, inferred))
-                .collect()
-        }),
-    }
-}
-
-fn collect_function_type_params(params: &[Param]) -> Result<Vec<TypeParam>, VerseError> {
-    let mut collected = Vec::new();
-    collect_function_type_params_inner(params, &mut collected)?;
-    Ok(collected)
-}
-
-fn collect_function_type_params_inner(
-    params: &[Param],
-    collected: &mut Vec<TypeParam>,
-) -> Result<(), VerseError> {
-    for param in params {
-        for type_param in &param.type_params {
-            if collected
-                .iter()
-                .any(|existing: &TypeParam| existing.name == type_param.name)
-            {
-                return Err(VerseError::check_at(
-                    format!("duplicate type parameter `{}`", type_param.name),
-                    type_param.span,
-                ));
-            }
-            collected.push(type_param.clone());
-        }
-        if let ParamPattern::Tuple(items) = &param.pattern {
-            collect_function_type_params_inner(items, collected)?;
-        }
-    }
-    Ok(())
 }
 
 fn enum_case_variant<'a>(expr: &'a Expr, enum_name: &str) -> Option<&'a str> {
@@ -11947,10 +11126,6 @@ fn aggregate_unqualified_name(aggregate_name: &str) -> &str {
         .map_or(uninstantiated, |(_, name)| name)
 }
 
-fn has_effect(effects: &[String], name: &str) -> bool {
-    effects.iter().any(|effect| effect == name)
-}
-
 fn is_access_specifier(specifier: &str) -> bool {
     matches!(specifier, "public" | "internal" | "protected" | "private")
 }
@@ -12000,267 +11175,6 @@ fn access_level_from_specifiers(
             Some("internal") | None => AccessLevel::Internal,
             Some(_) => unreachable!("filtered access specifiers"),
         },
-    )
-}
-
-fn ensure_callable_in_failure_context(effects: &[String], span: Span) -> Result<(), VerseError> {
-    if has_no_rollback_effect(effects) {
-        return Err(VerseError::check_at(
-            "function with `<no_rollback>` effect cannot be called in a failure context",
-            span,
-        ));
-    }
-
-    Ok(())
-}
-
-fn has_no_rollback_effect(effects: &[String]) -> bool {
-    if has_effect(effects, "no_rollback") {
-        return true;
-    }
-
-    ![
-        "transacts",
-        "varies",
-        "computes",
-        "converges",
-        "reads",
-        "writes",
-        "allocates",
-    ]
-    .into_iter()
-    .any(|effect| has_effect(effects, effect))
-}
-
-fn has_explicit_call_effect_specifier(effects: &[String]) -> bool {
-    [
-        "transacts",
-        "varies",
-        "computes",
-        "converges",
-        "reads",
-        "writes",
-        "allocates",
-    ]
-    .into_iter()
-    .any(|effect| has_effect(effects, effect))
-}
-
-fn call_allowed_capabilities(effects: &[String]) -> Vec<&'static str> {
-    let mut capabilities = Vec::new();
-
-    if has_effect(effects, "transacts") {
-        push_capability(&mut capabilities, "transacts");
-        push_capability(&mut capabilities, "varies");
-        push_capability(&mut capabilities, "reads");
-        push_capability(&mut capabilities, "writes");
-        push_capability(&mut capabilities, "allocates");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "varies") {
-        push_capability(&mut capabilities, "varies");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "computes") {
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "converges") {
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "reads") {
-        push_capability(&mut capabilities, "reads");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "writes") {
-        push_capability(&mut capabilities, "writes");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "allocates") {
-        push_capability(&mut capabilities, "allocates");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-
-    capabilities
-}
-
-fn call_required_capabilities(effects: &[String]) -> Vec<&'static str> {
-    let mut capabilities = Vec::new();
-
-    if has_effect(effects, "transacts") {
-        push_capability(&mut capabilities, "transacts");
-    } else if has_effect(effects, "varies") {
-        push_capability(&mut capabilities, "varies");
-    } else if has_effect(effects, "computes") {
-        push_capability(&mut capabilities, "computes");
-    } else if has_effect(effects, "converges") {
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "reads") {
-        push_capability(&mut capabilities, "reads");
-    }
-    if has_effect(effects, "writes") {
-        push_capability(&mut capabilities, "writes");
-    }
-    if has_effect(effects, "allocates") {
-        push_capability(&mut capabilities, "allocates");
-    }
-
-    capabilities
-}
-
-fn effect_call_error(caller_effects: &[String], required: &str, span: Span) -> VerseError {
-    VerseError::check_at(
-        format!(
-            "function with {} effect cannot call function requiring <{}> effect",
-            render_effect_set(caller_effects),
-            required
-        ),
-        span,
-    )
-}
-
-fn render_effect_set(effects: &[String]) -> String {
-    let rendered = effects
-        .iter()
-        .filter(|effect| is_function_effect_name(effect))
-        .map(|effect| format!("<{effect}>"))
-        .collect::<Vec<_>>();
-    if rendered.is_empty() {
-        "<no_rollback>".to_string()
-    } else {
-        rendered.join("")
-    }
-}
-
-fn function_effects_are_assignable(expected: &[String], actual: &[String]) -> bool {
-    if has_effect(expected, "decides") != has_effect(actual, "decides") {
-        return false;
-    }
-
-    let expected = effect_capabilities(expected);
-    let actual = effect_capabilities(actual);
-    actual
-        .iter()
-        .all(|capability| expected.iter().any(|expected| expected == capability))
-}
-
-fn effect_capabilities(effects: &[String]) -> Vec<&'static str> {
-    let mut capabilities = Vec::new();
-
-    if has_no_rollback_effect(effects) {
-        push_capability(&mut capabilities, "no_rollback");
-    }
-    if has_effect(effects, "transacts") {
-        push_capability(&mut capabilities, "transacts");
-        push_capability(&mut capabilities, "varies");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-        push_capability(&mut capabilities, "allocates");
-        push_capability(&mut capabilities, "reads");
-        push_capability(&mut capabilities, "writes");
-    }
-    if has_effect(effects, "varies") {
-        push_capability(&mut capabilities, "varies");
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "computes") {
-        push_capability(&mut capabilities, "computes");
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "converges") {
-        push_capability(&mut capabilities, "converges");
-    }
-    if has_effect(effects, "reads") {
-        push_capability(&mut capabilities, "reads");
-    }
-    if has_effect(effects, "writes") {
-        push_capability(&mut capabilities, "writes");
-    }
-    if has_effect(effects, "allocates") {
-        push_capability(&mut capabilities, "allocates");
-    }
-    if has_effect(effects, "suspends") {
-        push_capability(&mut capabilities, "suspends");
-    }
-
-    capabilities
-}
-
-fn push_capability(capabilities: &mut Vec<&'static str>, capability: &'static str) {
-    if !capabilities.iter().any(|existing| existing == &capability) {
-        capabilities.push(capability);
-    }
-}
-
-fn validate_function_effect_combination(effects: &[String], span: Span) -> Result<(), VerseError> {
-    let mut seen = Vec::new();
-    for effect in effects
-        .iter()
-        .filter(|effect| is_function_effect_name(effect))
-    {
-        if seen.iter().any(|seen_effect| seen_effect == effect) {
-            return Err(VerseError::check_at(
-                format!("duplicate function effect `<{effect}>`"),
-                span,
-            ));
-        }
-        seen.push(effect.as_str());
-    }
-
-    if has_effect(effects, "decides") && !has_effect(effects, "transacts") {
-        return Err(VerseError::check_at(
-            "function with `<decides>` must also have `<transacts>`",
-            span,
-        ));
-    }
-
-    if has_effect(effects, "constructor") && has_effect(effects, "suspends") {
-        return Err(VerseError::check_at(
-            "constructor functions cannot use `<suspends>`",
-            span,
-        ));
-    }
-
-    let exclusive = ["transacts", "varies", "computes", "converges"]
-        .into_iter()
-        .filter(|effect| has_effect(effects, effect))
-        .collect::<Vec<_>>();
-    if exclusive.len() > 1 {
-        return Err(VerseError::check_at(
-            format!(
-                "function exclusive effects cannot be combined: {}",
-                exclusive
-                    .into_iter()
-                    .map(|effect| format!("<{effect}>"))
-                    .collect::<Vec<_>>()
-                    .join("")
-            ),
-            span,
-        ));
-    }
-
-    Ok(())
-}
-
-fn is_function_effect_name(name: &str) -> bool {
-    matches!(
-        name,
-        "converges"
-            | "computes"
-            | "varies"
-            | "transacts"
-            | "suspends"
-            | "decides"
-            | "reads"
-            | "writes"
-            | "allocates"
     )
 }
 
@@ -13055,6 +11969,45 @@ fn is_empty_option_candidate(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::Bool(false))
 }
 
+fn expr_int_literal_value(expr: &Expr) -> Option<i64> {
+    match &expr.kind {
+        ExprKind::Number {
+            value: NumberLiteral::Int(value),
+            kind: NumberKind::Int,
+        } => int_literal_value_to_i64(*value, false),
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr,
+        } => match &expr.kind {
+            ExprKind::Number {
+                value: NumberLiteral::Int(value),
+                kind: NumberKind::Int,
+            } => int_literal_value_to_i64(*value, true),
+            _ => None,
+        },
+        ExprKind::Unary {
+            op: UnaryOp::Positive,
+            expr,
+        } => expr_int_literal_value(expr),
+        _ => None,
+    }
+}
+
+fn int_literal_value_to_i64(value: i128, negative: bool) -> Option<i64> {
+    if negative {
+        let min_magnitude = i128::from(i64::MAX) + 1;
+        if value > min_magnitude {
+            None
+        } else if value == min_magnitude {
+            Some(i64::MIN)
+        } else {
+            Some(-(value as i64))
+        }
+    } else {
+        (value <= i128::from(i64::MAX)).then_some(value as i64)
+    }
+}
+
 fn finalize_collection_item_type(
     current: &mut Type,
     pending_empty_options: &mut Vec<&Expr>,
@@ -13108,6 +12061,7 @@ fn is_persistable_type_name(
 ) -> bool {
     match value_type {
         Type::Int
+        | Type::IntRange(_)
         | Type::Float
         | Type::Rational
         | Type::Number
@@ -13166,9 +12120,13 @@ fn is_persistable_type_name(
 
 fn ensure_number_like(value_type: &Type, context: &str, span: Span) -> Result<(), VerseError> {
     match value_type {
-        Type::Int | Type::Float | Type::Rational | Type::Number | Type::Unknown | Type::Any => {
-            Ok(())
-        }
+        Type::Int
+        | Type::IntRange(_)
+        | Type::Float
+        | Type::Rational
+        | Type::Number
+        | Type::Unknown
+        | Type::Any => Ok(()),
         other => Err(VerseError::check_at(
             format!("{context} expected `number`, got `{other}`"),
             span,
@@ -13309,6 +12267,7 @@ fn ensure_equality_comparable_inner(
             Ok(())
         }
         Type::Int
+        | Type::IntRange(_)
         | Type::Float
         | Type::Rational
         | Type::Number
@@ -13471,6 +12430,7 @@ fn ensure_comparable_key_inner(
             Ok(())
         }
         Type::Int
+        | Type::IntRange(_)
         | Type::Float
         | Type::Rational
         | Type::Number
@@ -13648,7 +12608,7 @@ fn is_color_type(value_type: &Type) -> bool {
 fn is_numeric_type(value_type: &Type) -> bool {
     matches!(
         value_type,
-        Type::Int | Type::Float | Type::Rational | Type::Number
+        Type::Int | Type::IntRange(_) | Type::Float | Type::Rational | Type::Number
     )
 }
 
@@ -13656,7 +12616,7 @@ fn unify_numeric_types(left: &Type, right: &Type) -> Type {
     match (left, right) {
         (Type::Float, _) | (_, Type::Float) => Type::Float,
         (Type::Rational, _) | (_, Type::Rational) => Type::Rational,
-        (Type::Int, Type::Int) => Type::Int,
+        (Type::Int | Type::IntRange(_), Type::Int | Type::IntRange(_)) => Type::Int,
         _ => Type::Number,
     }
 }
@@ -13664,7 +12624,10 @@ fn unify_numeric_types(left: &Type, right: &Type) -> Type {
 fn divide_numeric_type(left: &Type, right: &Type) -> Type {
     match (left, right) {
         (Type::Float, _) | (_, Type::Float) => Type::Float,
-        (Type::Int | Type::Rational, Type::Int | Type::Rational) => Type::Rational,
+        (
+            Type::Int | Type::IntRange(_) | Type::Rational,
+            Type::Int | Type::IntRange(_) | Type::Rational,
+        ) => Type::Rational,
         _ => unify_numeric_types(left, right),
     }
 }
