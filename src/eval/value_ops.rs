@@ -1,33 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::{
-    CallValue, RuntimeClassField, RuntimeStructField, Value, qualify_runtime_interface_fields,
-    qualify_runtime_interface_methods,
-};
-
-pub(super) fn copy_values(values: &[Value]) -> Vec<Value> {
-    values.iter().map(value_copy).collect()
-}
-
-pub(super) fn copy_call_values(values: &[CallValue]) -> Vec<CallValue> {
-    values
-        .iter()
-        .map(|value| CallValue {
-            name: value.name.clone(),
-            optional: value.optional,
-            value: value_copy(&value.value),
-            span: value.span,
-        })
-        .collect()
-}
-
-pub(super) fn copy_map_entries(values: &[(Value, Value)]) -> Vec<(Value, Value)> {
-    values
-        .iter()
-        .map(|(key, value)| (value_copy(key), value_copy(value)))
-        .collect()
-}
+use super::{RuntimeClassField, RuntimeStructField, Value};
 
 pub(super) fn value_copy(value: &Value) -> Value {
     match value {
@@ -256,76 +230,5 @@ pub(super) fn value_copy(value: &Value) -> Value {
         | Value::NativeModifierMethod { .. }
         | Value::NativeCancelMethod { .. }
         | Value::NativeSubscriptionCancelMethod { .. } => value.clone(),
-    }
-}
-
-pub(super) fn qualify_runtime_named_value(value: Value, qualified_name: &str) -> Value {
-    match value {
-        Value::EnumType { variants, open, .. } => Value::EnumType {
-            name: qualified_name.to_string(),
-            variants,
-            open,
-        },
-        Value::StructType {
-            computes, fields, ..
-        } => Value::StructType {
-            name: qualified_name.to_string(),
-            computes,
-            fields,
-        },
-        Value::ClassType {
-            base,
-            interfaces,
-            unique,
-            abstract_class,
-            epic_internal_class,
-            final_class,
-            concrete,
-            castable,
-            fields,
-            methods,
-            blocks,
-            ..
-        } => Value::ClassType {
-            name: qualified_name.to_string(),
-            base,
-            interfaces,
-            unique,
-            abstract_class,
-            epic_internal_class,
-            final_class,
-            concrete,
-            castable,
-            fields,
-            methods,
-            blocks,
-        },
-        Value::InterfaceType {
-            parents,
-            fields,
-            methods,
-            ..
-        } => Value::InterfaceType {
-            name: qualified_name.to_string(),
-            parents,
-            fields: qualify_runtime_interface_fields(qualified_name, fields),
-            methods: qualify_runtime_interface_methods(qualified_name, methods),
-        },
-        Value::ParametricType {
-            params,
-            body,
-            closure,
-            ..
-        } => Value::ParametricType {
-            name: qualified_name.to_string(),
-            params,
-            body,
-            closure,
-        },
-        Value::Module { env, .. } => Value::Module {
-            name: qualified_name.to_string(),
-            env,
-        },
-        other => other,
     }
 }

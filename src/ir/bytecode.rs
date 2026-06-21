@@ -59,7 +59,7 @@ impl BytecodeProgram {
         &self.chunks[self.entry]
     }
 
-    pub fn uses_legacy_compatibility_instruction(&self) -> bool {
+    pub fn uses_runtime_fallback_instruction(&self) -> bool {
         false
     }
 
@@ -2109,7 +2109,6 @@ impl<'semantic> Lowerer<'semantic> {
                 state.last_value = state.none();
                 Ok(())
             }
-            _ => Err(UnsupportedBytecode),
         }
     }
 
@@ -4132,88 +4131,6 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
-    fn lower_call_set(
-        &mut self,
-        collection: &Expr,
-        index: &Expr,
-        expr: &Expr,
-        state: &mut ChunkState,
-        span: Span,
-    ) -> Result<(), UnsupportedBytecode> {
-        let container = self.lower_mutable_collection_value(collection, state)?;
-        let index = self.lower_expr(index, state)?;
-        let value_to_set = self.lower_expr(expr, state)?;
-        state.chunk.emit(Instruction::CallSet {
-            container,
-            index,
-            value_to_set,
-            span,
-        });
-        Ok(())
-    }
-
-    fn lower_compound_call_set(
-        &mut self,
-        collection: &Expr,
-        index: &Expr,
-        op: AssignOp,
-        expr: &Expr,
-        state: &mut ChunkState,
-        span: Span,
-    ) -> Result<(), UnsupportedBytecode> {
-        let container = self.lower_mutable_collection_value(collection, state)?;
-        let call_container = self.mutable_collection_read_value(collection, container, state);
-        let index = self.lower_expr(index, state)?;
-        let right_source = self.lower_expr(expr, state)?;
-        let left_dest = state.allocate_register(span);
-        state.chunk.emit(Instruction::Call {
-            dest: left_dest,
-            callee: call_container,
-            arguments: vec![index],
-            named_arguments: Vec::new(),
-            named_argument_values: Vec::new(),
-            callee_yields: false,
-            span,
-        });
-        let left_source = ValueOperand::Register(left_dest);
-        let value_dest = state.allocate_register(span);
-        let instruction = match op {
-            AssignOp::AddAssign => Instruction::Add {
-                dest: value_dest,
-                left_source,
-                right_source,
-                span,
-            },
-            AssignOp::SubAssign => Instruction::Sub {
-                dest: value_dest,
-                left_source,
-                right_source,
-                span,
-            },
-            AssignOp::MulAssign => Instruction::Mul {
-                dest: value_dest,
-                left_source,
-                right_source,
-                span,
-            },
-            AssignOp::DivAssign => Instruction::Div {
-                dest: value_dest,
-                left_source,
-                right_source,
-                span,
-            },
-            AssignOp::Assign => unreachable!("plain index assignment handled before compound"),
-        };
-        state.chunk.emit(instruction);
-        state.chunk.emit(Instruction::CallSet {
-            container,
-            index,
-            value_to_set: ValueOperand::Register(value_dest),
-            span,
-        });
-        Ok(())
-    }
-
     fn lower_mutable_collection_value(
         &mut self,
         collection: &Expr,
@@ -4755,79 +4672,6 @@ impl<'semantic> Lowerer<'semantic> {
         });
         self.emit_field_writebacks(&writebacks, state);
         Ok((value, failure_jumps))
-    }
-
-    fn lower_failable_call_set(
-        &mut self,
-        collection: &Expr,
-        index: &Expr,
-        op: AssignOp,
-        expr: &Expr,
-        state: &mut ChunkState,
-        span: Span,
-    ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
-        let container = self.lower_mutable_collection_value(collection, state)?;
-        let index = self.lower_expr(index, state)?;
-        let (right_source, mut failure_jumps) = self.lower_failable_expr(expr, state)?;
-        let value_to_set = match op {
-            AssignOp::Assign => right_source,
-            AssignOp::AddAssign
-            | AssignOp::SubAssign
-            | AssignOp::MulAssign
-            | AssignOp::DivAssign => {
-                let lookup_container =
-                    self.mutable_collection_read_value(collection, container, state);
-                let left_dest = state.allocate_register(span);
-                let left_leniency = state.allocate_register(span);
-                let lookup_failure = state.chunk.emit_jump(Instruction::ArrayIndexFastFail {
-                    dest: left_dest,
-                    leniency_indicator: left_leniency,
-                    array: lookup_container,
-                    index,
-                    on_failure: usize::MAX,
-                    span,
-                });
-                failure_jumps.push(lookup_failure);
-                let value_dest = state.allocate_register(span);
-                let left_source = ValueOperand::Register(left_dest);
-                let instruction = match op {
-                    AssignOp::AddAssign => Instruction::Add {
-                        dest: value_dest,
-                        left_source,
-                        right_source,
-                        span,
-                    },
-                    AssignOp::SubAssign => Instruction::Sub {
-                        dest: value_dest,
-                        left_source,
-                        right_source,
-                        span,
-                    },
-                    AssignOp::MulAssign => Instruction::Mul {
-                        dest: value_dest,
-                        left_source,
-                        right_source,
-                        span,
-                    },
-                    AssignOp::DivAssign => Instruction::Div {
-                        dest: value_dest,
-                        left_source,
-                        right_source,
-                        span,
-                    },
-                    AssignOp::Assign => unreachable!("plain index assignment handled above"),
-                };
-                state.chunk.emit(instruction);
-                ValueOperand::Register(value_dest)
-            }
-        };
-        state.chunk.emit(Instruction::CallSet {
-            container,
-            index,
-            value_to_set,
-            span,
-        });
-        Ok((value_to_set, failure_jumps))
     }
 
     fn lower_bool_expression_from_failable(
@@ -6680,16 +6524,6 @@ impl<'semantic> Lowerer<'semantic> {
             .map(|reverse_index| self.functions.len() - 1 - reverse_index)
     }
 
-    fn function_descriptor_index_by_arity(&self, name: &str, arity: usize) -> Option<usize> {
-        self.functions
-            .iter()
-            .rev()
-            .position(|descriptor| {
-                descriptor.name() == Some(name) && descriptor.params().len() == arity
-            })
-            .map(|reverse_index| self.functions.len() - 1 - reverse_index)
-    }
-
     fn select_function_descriptor_for_call(&self, name: &str, args: &[CallArg]) -> Option<usize> {
         self.functions
             .iter()
@@ -6842,7 +6676,7 @@ impl<'semantic> Lowerer<'semantic> {
                 *flat_index += 1;
                 Some(())
             }
-            ParamPattern::Tuple(items) => {
+            ParamPattern::Tuple(_) => {
                 let Type::Tuple(actual_items) = actual else {
                     return None;
                 };

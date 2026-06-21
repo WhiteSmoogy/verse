@@ -31,55 +31,6 @@ fn expect_string_index(value: &Value, span: Span) -> Result<usize, VerseError> {
     Ok(index as usize)
 }
 
-pub(super) fn string_index_value(
-    text: &str,
-    index: &Value,
-    span: Span,
-) -> Result<Value, VerseError> {
-    let index = expect_string_index(index, span)?;
-    text.as_bytes()
-        .get(index)
-        .map(|byte| Value::Char(char::from(*byte)))
-        .ok_or_else(|| {
-            VerseError::runtime_at(
-                format!(
-                    "string index {index} out of bounds for length {}",
-                    text.len()
-                ),
-                span,
-            )
-        })
-}
-
-pub(super) fn string_index_value_failable(
-    text: &str,
-    index: &Value,
-    span: Span,
-) -> Result<Option<Value>, VerseError> {
-    let index = expect_string_index(index, span)?;
-    Ok(text
-        .as_bytes()
-        .get(index)
-        .map(|byte| Value::Char(char::from(*byte))))
-}
-
-pub(super) fn replace_string_byte(
-    text: String,
-    index: &Value,
-    value: Value,
-    span: Span,
-) -> Result<String, VerseError> {
-    let length = text.len();
-    let Some(updated) = replace_string_byte_at(text, index, value, span)? else {
-        let index = expect_string_index(index, span)?;
-        return Err(VerseError::runtime_at(
-            format!("string index {index} out of bounds for length {length}"),
-            span,
-        ));
-    };
-    Ok(updated)
-}
-
 pub(crate) fn replace_string_byte_failable(
     text: String,
     index: &Value,
@@ -110,16 +61,6 @@ fn replace_string_byte_at(
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| VerseError::runtime_at("string slot assignment produced invalid UTF-8", span))
-}
-
-pub(super) fn dedupe_runtime_strings(items: Vec<String>) -> Vec<String> {
-    let mut deduped = Vec::new();
-    for item in items {
-        if !deduped.contains(&item) {
-            deduped.push(item);
-        }
-    }
-    deduped
 }
 
 pub(super) fn string_value_to_char_array(value: Value) -> Value {

@@ -18,17 +18,6 @@ pub(crate) fn char_array_to_string(items: &[Value]) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-pub(crate) fn expect_profile_description(value: &Value, span: Span) -> Result<(), VerseError> {
-    match value {
-        Value::String(_) => Ok(()),
-        Value::Array(items) if char_array_to_string(items.borrow().as_slice()).is_some() => Ok(()),
-        other => Err(VerseError::runtime_at(
-            format!("profile description expected `string`, got {other}"),
-            span,
-        )),
-    }
-}
-
 pub(crate) fn expect_color_value(value: &Value, span: Span) -> Result<(), VerseError> {
     if matches!(
         value,

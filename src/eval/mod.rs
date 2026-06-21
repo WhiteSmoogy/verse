@@ -1,26 +1,16 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rand::seq::SliceRandom;
 use rand::{Rng, rngs::OsRng};
 
-use crate::ast::{
-    ArchetypeConstructorCall, ArchetypeEntry, AssignOp, BinaryOp, CallArg, CaseArm, CasePattern,
-    ClassBlock, ClassMethod, ConcurrentOp, Expr, ExprKind, ExtensionMethod, ForBinding, ForClause,
-    InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind, StructField,
-    TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
-};
+use crate::ast::{Expr, Param, TypeName, TypeParam};
 use crate::error::VerseError;
-use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
+use crate::token::Span;
 
 mod builtins;
-use builtins::{
-    builtin_interface_types, color_alpha_struct_type, color_struct_type, locale_struct_type,
-    named_colors_module, runtime_modifier_method, session_environment_enum_type,
-};
 mod bytecode;
 pub(crate) use bytecode::{
     bytecode_call_native_cancel_method, bytecode_call_native_event_method,
@@ -41,32 +31,18 @@ pub use numeric::RationalValue;
 pub(crate) use numeric::rational_or_int;
 use numeric::{RuntimeNumber, numeric_values_equal, runtime_number, runtime_number_to_rational};
 mod scalar_ops;
-use scalar_ops::{
-    RuntimeNumberOp, add_values, divide_values, eval_binary_values, expect_bool, expect_index,
-    expect_index_integer, expect_integer, expect_number, expect_tuple_index, multiply_values,
-    negate_value, numeric_value_is_zero, positive_value, remainder_values, subtract_values,
-};
-mod failure;
-use failure::{has_runtime_effect, is_comparison_binary_op, is_failable_condition_expr};
+use scalar_ops::{RuntimeNumberOp, expect_index_integer, expect_integer, expect_number};
 mod player_map;
 use player_map::{PLAYER_MAP_RECORD_LIMIT_BYTES, player_map_value_size};
-mod scope;
-pub use scope::Env;
-use scope::EnvTransaction;
 mod string_ops;
 pub(crate) use string_ops::replace_string_byte_failable;
-use string_ops::{
-    dedupe_runtime_strings, replace_string_byte, string_char_values, string_equals_char_array,
-    string_index_value, string_index_value_failable, string_value_to_char_array,
-};
+use string_ops::{string_char_values, string_equals_char_array, string_value_to_char_array};
 mod task;
 pub use task::{RuntimeSuspension, RuntimeTask};
 mod value_ops;
-use value_ops::{
-    copy_call_values, copy_map_entries, copy_values, qualify_runtime_named_value, value_copy,
-};
+use value_ops::value_copy;
 mod validation;
-use validation::{char_array_to_string, expect_color_value, expect_profile_description};
+use validation::{char_array_to_string, expect_color_value};
 
 type NativeFn = fn(Vec<Value>, Span) -> Result<NativeResult, VerseError>;
 
@@ -80,6 +56,9 @@ pub enum NativeResult {
     Failure(&'static str),
 }
 
+#[derive(Clone, Default)]
+pub struct Env;
+
 pub(crate) fn with_stable_runtime_epoch<T>(
     body: impl FnOnce() -> Result<T, VerseError>,
 ) -> Result<T, VerseError> {
@@ -92,46 +71,6 @@ pub(crate) fn with_stable_runtime_epoch<T>(
         seconds.replace(previous_epoch_seconds);
     });
     result
-}
-
-fn event_value(payload: Option<TypeName>) -> Value {
-    Value::Event {
-        payload,
-        waiters: Rc::new(RefCell::new(Vec::new())),
-    }
-}
-
-struct StructuredSyncState {
-    values: Vec<Option<Value>>,
-    remaining: usize,
-}
-
-struct StructuredFirstState {
-    tasks: Vec<(usize, Rc<RuntimeTask>)>,
-    cancel_losers: bool,
-    completed: bool,
-}
-
-struct ForIterationState {
-    clauses: Vec<ForClause>,
-    index: usize,
-    body: Expr,
-    env: Env,
-    results: Rc<RefCell<Vec<Value>>>,
-    bindings: Vec<Vec<(String, Value)>>,
-}
-
-struct ForClauseState {
-    clauses: Vec<ForClause>,
-    index: usize,
-    body: Expr,
-    env: Env,
-    results: Rc<RefCell<Vec<Value>>>,
-}
-
-enum FailureEval {
-    Ready(Option<Value>),
-    Pending(RuntimeSuspension),
 }
 
 #[derive(Clone)]
@@ -333,16 +272,16 @@ pub struct RuntimeStructField {
 
 #[derive(Clone, PartialEq)]
 pub struct RuntimeClassField {
-    name: String,
-    mutable: bool,
-    final_member: bool,
-    access: RuntimeAccessLevel,
-    owner: Option<String>,
-    default: Option<Value>,
+    pub name: String,
+    pub mutable: bool,
+    pub final_member: bool,
+    pub access: RuntimeAccessLevel,
+    pub owner: Option<String>,
+    pub default: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RuntimeAccessLevel {
+pub enum RuntimeAccessLevel {
     Public,
     Internal,
     Protected,
@@ -357,33 +296,27 @@ pub struct RuntimeClassInstanceField {
 }
 
 #[derive(Clone)]
-struct RuntimeDataMemberDefaultContext {
-    aggregate_name: String,
-    field_name: String,
-}
-
-#[derive(Clone)]
 pub struct RuntimeClassMethod {
-    qualifier: Option<String>,
-    name: String,
-    final_member: bool,
-    params: Vec<Param>,
-    effects: Vec<String>,
-    body: Option<Box<Expr>>,
-    closure: Env,
-    super_type: Option<Box<Value>>,
-    extension_methods: Rc<Vec<RuntimeExtensionMethod>>,
+    pub qualifier: Option<String>,
+    pub name: String,
+    pub final_member: bool,
+    pub params: Vec<Param>,
+    pub effects: Vec<String>,
+    pub body: Option<Box<Expr>>,
+    pub closure: Env,
+    pub super_type: Option<Box<Value>>,
+    pub extension_methods: Rc<Vec<RuntimeExtensionMethod>>,
 }
 
 #[derive(Clone)]
 pub struct RuntimeExtensionMethod {
-    name: String,
-    module_name: Option<String>,
-    receiver: Param,
-    params: Vec<Param>,
-    effects: Vec<String>,
-    body: Box<Expr>,
-    closure: Env,
+    pub name: String,
+    pub module_name: Option<String>,
+    pub receiver: Param,
+    pub params: Vec<Param>,
+    pub effects: Vec<String>,
+    pub body: Box<Expr>,
+    pub closure: Env,
 }
 
 #[derive(Clone, PartialEq)]
@@ -396,45 +329,16 @@ pub struct RuntimeModifierEntry {
 
 #[derive(Clone)]
 pub struct RuntimeSubscriptionEntry {
-    id: u64,
-    callback: Value,
+    pub id: u64,
+    pub callback: Value,
 }
 
 #[derive(Clone)]
 pub struct RuntimeClassBlock {
-    body: Box<Expr>,
-    closure: Env,
-    super_type: Option<Box<Value>>,
-    extension_methods: Rc<Vec<RuntimeExtensionMethod>>,
-}
-
-struct RuntimeClassMembers {
-    methods: Vec<RuntimeClassMethod>,
-    blocks: Vec<RuntimeClassBlock>,
-}
-
-struct RuntimeClassDefinitionParts<'a> {
-    specifiers: &'a [String],
-    base: Option<&'a TypeAnnotation>,
-    interfaces: &'a [TypeAnnotation],
-    fields: &'a [StructField],
-    methods: &'a [ClassMethod],
-    extension_methods: &'a [ExtensionMethod],
-    blocks: &'a [ClassBlock],
-}
-
-struct RuntimeParametricTypeTemplate<'a> {
-    name: &'a str,
-    params: &'a [TypeParam],
-    body: &'a Expr,
-    closure: &'a Env,
-}
-
-struct EvaluatedArchetypeField {
-    name: String,
-    value: Value,
-    span: Span,
-    explicit: bool,
+    pub body: Box<Expr>,
+    pub closure: Env,
+    pub super_type: Option<Box<Value>>,
+    pub extension_methods: Rc<Vec<RuntimeExtensionMethod>>,
 }
 
 impl PartialEq for Value {
@@ -873,808 +777,6 @@ fn rendered_call_argument_name(name: &str, optional: bool) -> String {
         name.to_string()
     }
 }
-fn runtime_type_name_for_value(value: &Value, env: &Env) -> Option<TypeName> {
-    match value {
-        Value::Int(_) => Some(TypeName::Int),
-        Value::Float(_) => Some(TypeName::Float),
-        Value::Rational(_) => Some(TypeName::Rational),
-        Value::Bool(_) => Some(TypeName::Bool),
-        Value::String(_) => Some(TypeName::String),
-        Value::Diagnostic(_) => Some(TypeName::Named("diagnostic".to_string())),
-        Value::None => Some(TypeName::None),
-        Value::Char(_) => Some(TypeName::Char),
-        Value::Char32(_) => Some(TypeName::Char32),
-        Value::Range { .. } => Some(TypeName::Named("range".to_string())),
-        Value::EnumValue { enum_name, .. } => Some(TypeName::Named(enum_name.clone())),
-        Value::StructInstance { struct_name, .. } => Some(TypeName::Named(struct_name.clone())),
-        Value::ClassInstance { class_name, .. } => Some(TypeName::Named(class_name.clone())),
-        Value::EnumType { name, .. }
-        | Value::StructType { name, .. }
-        | Value::ClassType { name, .. }
-        | Value::InterfaceType { name, .. } => Some(TypeName::Named(name.clone())),
-        Value::Array(items) => runtime_array_item_type_name(items.borrow().as_slice(), env)
-            .map(|item| TypeName::Array(Some(Box::new(item)))),
-        Value::Map(entries) => runtime_map_type_name(entries.borrow().as_slice(), env),
-        Value::Tuple(items) => items
-            .iter()
-            .map(|item| runtime_type_name_for_value(item, env))
-            .collect::<Option<Vec<_>>>()
-            .map(TypeName::Tuple),
-        Value::Option(Some(value)) => {
-            runtime_type_name_for_value(value, env).map(|item| TypeName::Option(Box::new(item)))
-        }
-        Value::Option(None) => None,
-        Value::Function { .. }
-        | Value::BoundMethod { .. }
-        | Value::NativeFunction { .. }
-        | Value::NativeArrayMethod { .. } => Some(TypeName::Function),
-        Value::Task(_) => None,
-        Value::Event { payload, .. } => Some(TypeName::Applied {
-            name: "event".to_string(),
-            args: payload.iter().cloned().collect(),
-        }),
-        Value::Awaitable { payload } => Some(TypeName::Applied {
-            name: "awaitable".to_string(),
-            args: payload.iter().cloned().collect(),
-        }),
-        Value::Signalable { payload } => Some(TypeName::Applied {
-            name: "signalable".to_string(),
-            args: vec![payload.clone()],
-        }),
-        Value::Subscribable { payload, .. } => Some(TypeName::Applied {
-            name: "subscribable".to_string(),
-            args: payload.iter().cloned().collect(),
-        }),
-        Value::Listenable { payload, .. } => Some(TypeName::Applied {
-            name: "listenable".to_string(),
-            args: payload.iter().cloned().collect(),
-        }),
-        Value::Generator { item_type, .. } => Some(TypeName::Applied {
-            name: "generator".to_string(),
-            args: item_type.iter().cloned().collect(),
-        }),
-        Value::CastableSubtype(item) => Some(TypeName::Applied {
-            name: "castable_subtype".to_string(),
-            args: vec![item.clone()],
-        }),
-        Value::ConcreteSubtype(item) => Some(TypeName::Applied {
-            name: "concrete_subtype".to_string(),
-            args: vec![item.clone()],
-        }),
-        Value::ClassifiableSubset(_) => None,
-        Value::Modifier { item_type } => Some(TypeName::Applied {
-            name: "modifier".to_string(),
-            args: vec![item_type.clone()],
-        }),
-        Value::ModifierStack { item_type, .. } => Some(TypeName::Applied {
-            name: "modifier_stack".to_string(),
-            args: vec![item_type.clone()],
-        }),
-        Value::Result { succeeded, value } => {
-            let item = runtime_type_name_for_value(value, env)?;
-            Some(TypeName::Applied {
-                name: "result".to_string(),
-                args: if *succeeded {
-                    vec![item, TypeName::Any]
-                } else {
-                    vec![TypeName::Any, item]
-                },
-            })
-        }
-        Value::Module { name, .. } => Some(TypeName::Named(name.clone())),
-        Value::Session => Some(TypeName::Named("session".to_string())),
-        Value::External
-        | Value::Overload(_)
-        | Value::Pending
-        | Value::Suspended(_)
-        | Value::NativeResultMethod { .. }
-        | Value::NativeEventMethod { .. }
-        | Value::NativeSubscribableMethod { .. }
-        | Value::NativeTaskMethod { .. }
-        | Value::NativeModifierMethod { .. }
-        | Value::NativeCancelMethod { .. }
-        | Value::NativeSubscriptionCancelMethod { .. }
-        | Value::ParametricType { .. }
-        | Value::ModifierCancelHandle { .. }
-        | Value::SubscriptionCancelHandle { .. } => None,
-    }
-}
-
-fn runtime_array_item_type_name(items: &[Value], env: &Env) -> Option<TypeName> {
-    let mut inferred: Option<TypeName> = None;
-    for item in items {
-        let item_type = runtime_type_name_for_value(item, env)?;
-        inferred = Some(match inferred {
-            Some(current) => merge_runtime_type_names(&current, &item_type, env)?,
-            None => item_type,
-        });
-    }
-    inferred
-}
-
-fn runtime_map_type_name(entries: &[(Value, Value)], env: &Env) -> Option<TypeName> {
-    let mut key_type: Option<TypeName> = None;
-    let mut value_type: Option<TypeName> = None;
-    for (key, value) in entries {
-        let next_key = runtime_type_name_for_value(key, env)?;
-        let next_value = runtime_type_name_for_value(value, env)?;
-        key_type = Some(match key_type {
-            Some(current) => merge_runtime_type_names(&current, &next_key, env)?,
-            None => next_key,
-        });
-        value_type = Some(match value_type {
-            Some(current) => merge_runtime_type_names(&current, &next_value, env)?,
-            None => next_value,
-        });
-    }
-    Some(TypeName::Map(Box::new(key_type?), Box::new(value_type?)))
-}
-
-fn merge_runtime_type_names(current: &TypeName, next: &TypeName, env: &Env) -> Option<TypeName> {
-    if current == next {
-        return Some(current.clone());
-    }
-    if runtime_type_names_assignable(next, current) {
-        return Some(current.clone());
-    }
-    if runtime_type_names_assignable(current, next) {
-        return Some(next.clone());
-    }
-    if let (TypeName::Named(left), TypeName::Named(right)) = (current, next) {
-        if runtime_class_is_subtype(left, right, env)
-            || runtime_interface_is_subtype(left, right, env)
-        {
-            return Some(next.clone());
-        }
-        if runtime_class_is_subtype(right, left, env)
-            || runtime_interface_is_subtype(right, left, env)
-        {
-            return Some(current.clone());
-        }
-    }
-    None
-}
-
-fn runtime_type_name_satisfies_constraint(
-    actual: &TypeName,
-    value: &Value,
-    expected: &TypeName,
-    env: &Env,
-) -> bool {
-    match expected {
-        TypeName::Any => true,
-        TypeName::Comparable => runtime_value_is_comparable(value),
-        _ if runtime_type_names_assignable(actual, expected) => true,
-        TypeName::Named(expected_name) => match actual {
-            TypeName::Named(actual_name) => {
-                runtime_class_is_subtype(actual_name, expected_name, env)
-                    || runtime_class_implements_interface(actual_name, expected_name, env)
-                    || runtime_interface_is_subtype(actual_name, expected_name, env)
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-fn should_coerce_class_type_for_annotation(env: &Env, annotation: Option<&TypeAnnotation>) -> bool {
-    annotation.is_some_and(|annotation| {
-        matches!(
-            env.resolve_type_name(&annotation.name),
-            TypeName::Applied { name, args }
-                if matches!(name.as_str(), "castable_subtype" | "concrete_subtype")
-                    && args.len() == 1
-        )
-    })
-}
-
-fn runtime_value_matches_annotation(
-    value: &Value,
-    annotation: Option<&TypeAnnotation>,
-    env: &Env,
-) -> bool {
-    let Some(annotation) = annotation else {
-        return true;
-    };
-    let resolved = env.resolve_type_name(&annotation.name);
-    runtime_value_matches_type_name(value, &resolved, env)
-}
-
-fn runtime_type_match_score(
-    value: &Value,
-    annotation: Option<&TypeAnnotation>,
-    env: &Env,
-) -> Option<usize> {
-    let Some(annotation) = annotation else {
-        return Some(50);
-    };
-    let resolved = env.resolve_type_name(&annotation.name);
-    if !runtime_value_matches_type_name(value, &resolved, env) {
-        return None;
-    }
-
-    match (&resolved, value) {
-        (TypeName::Int, Value::Int(_))
-        | (TypeName::IntRange { .. }, Value::Int(_))
-        | (TypeName::Float, Value::Float(_))
-        | (TypeName::Rational, Value::Rational(_))
-        | (TypeName::Bool, Value::Bool(_))
-        | (TypeName::String, Value::String(_))
-        | (TypeName::Message, Value::String(_))
-        | (TypeName::Char, Value::Char(_))
-        | (TypeName::Char32, Value::Char32(_))
-        | (TypeName::None, Value::None) => Some(0),
-        (TypeName::Float | TypeName::Rational, Value::Int(_)) => Some(10),
-        (TypeName::Number, _) if runtime_number(value).is_some() => Some(20),
-        (TypeName::Any | TypeName::Comparable, _) => Some(50),
-        _ => Some(25),
-    }
-}
-
-fn runtime_value_matches_type_name(value: &Value, type_name: &TypeName, env: &Env) -> bool {
-    let resolved = env.resolve_type_name(type_name);
-    match &resolved {
-        TypeName::Any => true,
-        TypeName::Comparable => runtime_value_is_comparable(value),
-        TypeName::Int => runtime_value_is_int(value),
-        TypeName::IntRange { min, max } => match value {
-            Value::Int(value) => min <= value && value <= max,
-            Value::External => true,
-            _ => false,
-        },
-        TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
-        TypeName::Rational => matches!(value, Value::Int(_) | Value::Rational(_)),
-        TypeName::Number => runtime_number(value).is_some(),
-        TypeName::Bool => matches!(value, Value::Bool(_)),
-        TypeName::String => match value {
-            Value::String(_) => true,
-            Value::Array(items) => char_array_to_string(items.borrow().as_slice()).is_some(),
-            _ => false,
-        },
-        TypeName::Message => matches!(value, Value::String(_)),
-        TypeName::Char => matches!(value, Value::Char(_)),
-        TypeName::Char8 => false,
-        TypeName::Char32 => matches!(value, Value::Char32(_)),
-        TypeName::None => matches!(value, Value::None),
-        TypeName::Array(item_type) => match value {
-            Value::String(_) if item_type.as_deref().is_some_and(type_name_is_string_char) => true,
-            Value::Array(items) => item_type.as_deref().is_none_or(|item_type| {
-                items
-                    .borrow()
-                    .iter()
-                    .all(|item| runtime_value_matches_type_name(item, item_type, env))
-            }),
-            _ => false,
-        },
-        TypeName::Map(key_type, value_type) | TypeName::WeakMap(key_type, value_type) => {
-            match value {
-                Value::Map(entries) => entries.borrow().iter().all(|(key, value)| {
-                    runtime_value_matches_type_name(key, key_type, env)
-                        && runtime_value_matches_type_name(value, value_type, env)
-                }),
-                _ => false,
-            }
-        }
-        TypeName::Tuple(item_types) => match value {
-            Value::Tuple(items) if items.len() == item_types.len() => items
-                .iter()
-                .zip(item_types)
-                .all(|(item, item_type)| runtime_value_matches_type_name(item, item_type, env)),
-            _ => false,
-        },
-        TypeName::Option(item_type) => match value {
-            Value::Option(Some(value)) => runtime_value_matches_type_name(value, item_type, env),
-            Value::Option(None) | Value::Bool(false) => true,
-            _ => false,
-        },
-        TypeName::Function | TypeName::FunctionSignature { .. } => {
-            matches!(
-                value,
-                Value::Function { .. }
-                    | Value::BoundMethod { .. }
-                    | Value::NativeFunction { .. }
-                    | Value::NativeArrayMethod { .. }
-                    | Value::NativeResultMethod { .. }
-                    | Value::NativeEventMethod { .. }
-                    | Value::NativeSubscribableMethod { .. }
-                    | Value::NativeTaskMethod { .. }
-                    | Value::NativeModifierMethod { .. }
-                    | Value::NativeCancelMethod { .. }
-                    | Value::NativeSubscriptionCancelMethod { .. }
-            )
-        }
-        TypeName::Applied { name, args } if name == "event" => match value {
-            Value::External => true,
-            Value::Event { payload, .. } => event_payload_matches_type_args(payload.as_ref(), args),
-            _ => false,
-        },
-        TypeName::Applied { name, args } if name == "task" => {
-            args.len() == 1
-                && match value {
-                    Value::External => true,
-                    Value::Task(task) => task.matches_payload_type(&args[0], env),
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "generator" => {
-            matches!(args.len(), 0 | 1)
-                && match value {
-                    Value::External => true,
-                    Value::Generator { item_type, values } => {
-                        generator_type_matches_args(item_type.as_ref(), args)
-                            && args.first().is_none_or(|item_type| {
-                                values.borrow().iter().all(|value| {
-                                    runtime_value_matches_type_name(value, item_type, env)
-                                })
-                            })
-                    }
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "castable_subtype" => {
-            args.len() == 1
-                && match value {
-                    Value::External => true,
-                    Value::CastableSubtype(item) => item == &args[0],
-                    Value::ClassType {
-                        name,
-                        castable: true,
-                        ..
-                    } => runtime_class_type_conforms_to_type_name(name, &args[0], env),
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "concrete_subtype" => {
-            args.len() == 1
-                && match value {
-                    Value::External => true,
-                    Value::ConcreteSubtype(item) => item == &args[0],
-                    Value::ClassType {
-                        name,
-                        concrete: true,
-                        castable,
-                        ..
-                    } => runtime_class_type_satisfies_subtype_type_name(
-                        name, *castable, &args[0], env,
-                    ),
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "classifiable_subset" => {
-            args.len() == 1
-                && match value {
-                    Value::External => true,
-                    Value::ClassifiableSubset(items) => items
-                        .borrow()
-                        .iter()
-                        .all(|item| classifiable_subset_item_matches(item, &args[0], env)),
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "modifier" => {
-            args.len() == 1 && runtime_value_matches_modifier_type(value, &args[0], env)
-        }
-        TypeName::Applied { name, args } if name == "modifier_stack" => {
-            args.len() == 1
-                && match value {
-                    Value::External => true,
-                    Value::ModifierStack {
-                        item_type, entries, ..
-                    } => {
-                        item_type == &args[0]
-                            && entries.borrow().iter().all(|entry| {
-                                runtime_value_matches_modifier_type(&entry.modifier, item_type, env)
-                            })
-                    }
-                    _ => false,
-                }
-        }
-        TypeName::Applied { name, args } if name == "awaitable" => match value {
-            Value::External => true,
-            Value::Awaitable { payload } => event_payload_matches_type_args(payload.as_ref(), args),
-            Value::Event { payload, .. } => event_payload_matches_type_args(payload.as_ref(), args),
-            Value::Listenable { payload, .. } => {
-                event_payload_matches_type_args(payload.as_ref(), args)
-            }
-            Value::Task(task) if args.len() == 1 => task.matches_payload_type(&args[0], env),
-            _ => false,
-        },
-        TypeName::Applied { name, args } if name == "signalable" => match value {
-            Value::External => true,
-            Value::Signalable { payload } if args.len() == 1 => payload == &args[0],
-            Value::Event {
-                payload: Some(payload),
-                ..
-            } if args.len() == 1 => payload == &args[0],
-            _ => false,
-        },
-        TypeName::Applied { name, args } if name == "listenable" => match value {
-            Value::External => true,
-            Value::Listenable { payload, .. } => {
-                event_payload_matches_type_args(payload.as_ref(), args)
-            }
-            _ => false,
-        },
-        TypeName::Applied { name, args } if name == "subscribable" => match value {
-            Value::External => true,
-            Value::Subscribable { payload, .. } | Value::Listenable { payload, .. } => {
-                event_payload_matches_type_args(payload.as_ref(), args)
-            }
-            _ => false,
-        },
-        TypeName::Applied { name, args } if name == "result" && args.len() == 2 => match value {
-            Value::External => true,
-            Value::Result { succeeded, value } => {
-                let value_type = if *succeeded { &args[0] } else { &args[1] };
-                runtime_value_matches_type_name(value, value_type, env)
-            }
-            _ => false,
-        },
-        TypeName::Applied { name, args } => match value {
-            Value::External => true,
-            _ => runtime_value_matches_named_type(
-                value,
-                &render_runtime_parametric_type_name(name, args),
-                env,
-            ),
-        },
-        TypeName::Named(name) => runtime_value_matches_named_type(value, name, env),
-    }
-}
-
-fn event_payload_matches_type_args(payload: Option<&TypeName>, args: &[TypeName]) -> bool {
-    match args {
-        [] => payload.is_none(),
-        [expected] => payload.is_some_and(|payload| payload == expected),
-        _ => false,
-    }
-}
-
-fn generator_type_matches_args(payload: Option<&TypeName>, args: &[TypeName]) -> bool {
-    match args {
-        [] => payload.is_none(),
-        [expected] => payload.is_none_or(|payload| payload == expected),
-        _ => false,
-    }
-}
-
-fn classifiable_subset_item_matches(item: &Value, element_type: &TypeName, env: &Env) -> bool {
-    match item {
-        Value::CastableSubtype(item_type) => item_type == element_type,
-        _ => runtime_value_matches_type_name(item, element_type, env),
-    }
-}
-
-fn runtime_value_matches_modifier_type(value: &Value, item_type: &TypeName, env: &Env) -> bool {
-    match value {
-        Value::External => true,
-        Value::Modifier {
-            item_type: modifier_type,
-        } => modifier_type == item_type,
-        Value::ModifierStack {
-            item_type: stack_type,
-            ..
-        } => stack_type == item_type,
-        Value::ClassInstance { methods, .. } => methods.iter().any(|method| {
-            method.name == "Evaluate"
-                && method.params.len() == 1
-                && method.params[0]
-                    .annotation
-                    .as_ref()
-                    .is_none_or(|annotation| {
-                        let param_type = env.resolve_type_name(&annotation.name);
-                        runtime_type_names_assignable(&param_type, item_type)
-                    })
-        }),
-        _ => false,
-    }
-}
-
-fn runtime_type_names_assignable(actual: &TypeName, expected: &TypeName) -> bool {
-    actual == expected
-        || matches!(expected, TypeName::Any)
-        || matches!(
-            (expected, actual),
-            (TypeName::Rational, TypeName::Int)
-                | (TypeName::Float, TypeName::Int)
-                | (
-                    TypeName::Number,
-                    TypeName::Int | TypeName::Float | TypeName::Rational
-                )
-                | (TypeName::Message, TypeName::String)
-        )
-}
-
-fn runtime_value_is_int(value: &Value) -> bool {
-    match value {
-        Value::Int(_) => true,
-        Value::Float(_) | Value::Rational(_) => false,
-        _ => false,
-    }
-}
-
-fn is_builtin_length_receiver_value(value: &Value) -> bool {
-    matches!(value, Value::Array(_) | Value::Map(_) | Value::String(_))
-}
-
-fn runtime_value_is_comparable(value: &Value) -> bool {
-    match value {
-        Value::Int(_)
-        | Value::Float(_)
-        | Value::Rational(_)
-        | Value::Char(_)
-        | Value::Char32(_)
-        | Value::Bool(_)
-        | Value::String(_)
-        | Value::None
-        | Value::Session
-        | Value::EnumValue { .. } => true,
-        Value::StructInstance { .. } => true,
-        Value::ClassInstance { unique, .. } => *unique,
-        Value::Array(items) => items.borrow().iter().all(runtime_value_is_comparable),
-        Value::Map(entries) => entries.borrow().iter().all(|(key, value)| {
-            runtime_value_is_comparable(key) && runtime_value_is_comparable(value)
-        }),
-        Value::Tuple(items) => items.iter().all(runtime_value_is_comparable),
-        Value::Option(Some(value)) => runtime_value_is_comparable(value),
-        Value::Option(None) => true,
-        Value::Result { .. } => false,
-        Value::Pending | Value::Suspended(_) => false,
-        Value::Event { .. } => false,
-        Value::Awaitable { .. } => false,
-        Value::Signalable { .. } => false,
-        Value::Subscribable { .. } => false,
-        Value::Listenable { .. } => false,
-        Value::SubscriptionCancelHandle { .. } => false,
-        Value::Task(_) => false,
-        Value::Generator { .. } => false,
-        Value::Modifier { .. }
-        | Value::ModifierStack { .. }
-        | Value::ModifierCancelHandle { .. }
-        | Value::CastableSubtype(_)
-        | Value::ConcreteSubtype(_)
-        | Value::ClassifiableSubset(_) => false,
-        Value::Function { .. }
-        | Value::Overload(_)
-        | Value::NativeFunction { .. }
-        | Value::NativeArrayMethod { .. }
-        | Value::NativeResultMethod { .. }
-        | Value::NativeEventMethod { .. }
-        | Value::NativeSubscribableMethod { .. }
-        | Value::NativeTaskMethod { .. }
-        | Value::NativeModifierMethod { .. }
-        | Value::NativeCancelMethod { .. }
-        | Value::NativeSubscriptionCancelMethod { .. }
-        | Value::BoundMethod { .. }
-        | Value::Range { .. }
-        | Value::Diagnostic(_)
-        | Value::External
-        | Value::EnumType { .. }
-        | Value::StructType { .. }
-        | Value::ClassType { .. }
-        | Value::InterfaceType { .. }
-        | Value::ParametricType { .. }
-        | Value::Module { .. } => false,
-    }
-}
-
-fn runtime_value_matches_named_type(value: &Value, name: &str, env: &Env) -> bool {
-    let local_name = name.rsplit('.').next().unwrap_or(name);
-    match value {
-        Value::External => true,
-        Value::Diagnostic(_) => local_name == "diagnostic",
-        Value::EnumValue { enum_name, .. } => enum_name == name || enum_name == local_name,
-        Value::StructInstance { struct_name, .. } => {
-            struct_name == name || struct_name == local_name
-        }
-        Value::ClassInstance { class_name, .. } => {
-            runtime_class_instance_conforms_to(class_name, name, env)
-        }
-        Value::EnumType {
-            name: type_name, ..
-        }
-        | Value::StructType {
-            name: type_name, ..
-        }
-        | Value::ClassType {
-            name: type_name, ..
-        }
-        | Value::Module {
-            name: type_name, ..
-        } => type_name == name || type_name == local_name,
-        Value::ModifierCancelHandle { .. } | Value::SubscriptionCancelHandle { .. } => {
-            local_name == "cancelable"
-        }
-        _ => false,
-    }
-}
-
-fn runtime_class_instance_conforms_to(actual: &str, expected: &str, env: &Env) -> bool {
-    if runtime_names_match(actual, expected) {
-        return true;
-    }
-    if runtime_class_is_subtype(actual, expected, env)
-        || runtime_class_implements_interface(actual, expected, env)
-    {
-        return true;
-    }
-    if runtime_builtin_class_base_name(expected) {
-        return runtime_class_is_subtype(actual, expected, env);
-    }
-
-    match runtime_named_type_value(expected, env) {
-        Some(Value::ClassType { name, .. }) => runtime_class_is_subtype(actual, &name, env),
-        Some(Value::InterfaceType { name, .. }) => {
-            runtime_class_implements_interface(actual, &name, env)
-        }
-        _ => false,
-    }
-}
-
-fn runtime_class_type_conforms_to_type_name(actual: &str, expected: &TypeName, env: &Env) -> bool {
-    match env.resolve_type_name(expected) {
-        TypeName::Any => true,
-        TypeName::Named(expected) => runtime_class_instance_conforms_to(actual, &expected, env),
-        _ => false,
-    }
-}
-
-fn runtime_class_type_satisfies_subtype_type_name(
-    actual: &str,
-    castable: bool,
-    expected: &TypeName,
-    env: &Env,
-) -> bool {
-    match env.resolve_type_name(expected) {
-        TypeName::Applied { name, args } if name == "castable_subtype" && args.len() == 1 => {
-            castable && runtime_class_type_conforms_to_type_name(actual, &args[0], env)
-        }
-        resolved => runtime_class_type_conforms_to_type_name(actual, &resolved, env),
-    }
-}
-
-fn runtime_class_is_subtype(actual: &str, expected: &str, env: &Env) -> bool {
-    if runtime_builtin_class_is_subtype(actual, expected) {
-        return true;
-    }
-
-    let mut current = Some(actual.to_string());
-    let mut seen = HashSet::new();
-    while let Some(name) = current {
-        if !seen.insert(name.clone()) {
-            return false;
-        }
-        if runtime_names_match(&name, expected) {
-            return true;
-        }
-        current = match runtime_named_type_value(&name, env) {
-            Some(Value::ClassType { base, .. }) => base,
-            _ => None,
-        };
-    }
-    false
-}
-
-fn runtime_class_implements_interface(actual: &str, expected: &str, env: &Env) -> bool {
-    let mut current = Some(actual.to_string());
-    let mut seen = HashSet::new();
-    while let Some(name) = current {
-        if !seen.insert(name.clone()) {
-            return false;
-        }
-        let Some(Value::ClassType {
-            base, interfaces, ..
-        }) = runtime_named_type_value(&name, env)
-        else {
-            return false;
-        };
-        if interfaces
-            .iter()
-            .any(|interface| runtime_interface_is_subtype(interface, expected, env))
-        {
-            return true;
-        }
-        current = base;
-    }
-    false
-}
-
-fn runtime_interface_is_subtype(actual: &str, expected: &str, env: &Env) -> bool {
-    if runtime_names_match(actual, expected) {
-        return true;
-    }
-
-    let mut seen = HashSet::new();
-    runtime_interface_is_subtype_inner(actual, expected, env, &mut seen)
-}
-
-fn runtime_interface_is_subtype_inner(
-    actual: &str,
-    expected: &str,
-    env: &Env,
-    seen: &mut HashSet<String>,
-) -> bool {
-    if !seen.insert(actual.to_string()) {
-        return false;
-    }
-    let Some(Value::InterfaceType { parents, .. }) = runtime_named_type_value(actual, env) else {
-        return false;
-    };
-    parents.iter().any(|parent| {
-        runtime_names_match(parent, expected)
-            || runtime_interface_is_subtype_inner(parent, expected, env, seen)
-    })
-}
-
-fn runtime_named_type_value(name: &str, env: &Env) -> Option<Value> {
-    env.get_qualified_path(name).or_else(|| {
-        let local_name = name.rsplit('.').next().unwrap_or(name);
-        (local_name != name).then(|| env.get(local_name)).flatten()
-    })
-}
-
-fn runtime_class_definition_diagnostic_span(
-    base: Option<&TypeAnnotation>,
-    fields: &[StructField],
-    methods: &[ClassMethod],
-    blocks: &[ClassBlock],
-) -> Span {
-    base.map_or_else(
-        || {
-            fields
-                .first()
-                .map(|field| field.span)
-                .or_else(|| methods.first().map(|method| method.span))
-                .or_else(|| blocks.first().map(|block| block.span))
-                .unwrap_or_else(|| Span::new(0, 0, 1, 1))
-        },
-        |base| base.span,
-    )
-}
-
-fn runtime_builtin_class_base_name(name: &str) -> bool {
-    matches!(name.rsplit('.').next().unwrap_or(name), "component" | "tag")
-}
-
-fn runtime_builtin_class_type(name: &str) -> Option<Value> {
-    let local_name = name.rsplit('.').next().unwrap_or(name);
-    if !runtime_builtin_class_base_name(local_name) {
-        return None;
-    }
-    Some(Value::ClassType {
-        name: local_name.to_string(),
-        base: None,
-        interfaces: Vec::new(),
-        unique: false,
-        abstract_class: false,
-        epic_internal_class: false,
-        final_class: false,
-        concrete: false,
-        castable: false,
-        fields: Vec::new(),
-        methods: Vec::new(),
-        blocks: Vec::new(),
-    })
-}
-
-fn runtime_names_match(actual: &str, expected: &str) -> bool {
-    let actual_local = actual.rsplit('.').next().unwrap_or(actual);
-    let expected_local = expected.rsplit('.').next().unwrap_or(expected);
-    actual == expected
-        || actual == expected_local
-        || actual_local == expected
-        || actual_local == expected_local
-}
-
-fn runtime_builtin_class_is_subtype(actual: &str, expected: &str) -> bool {
-    let actual = actual.rsplit('.').next().unwrap_or(actual);
-    let expected = expected.rsplit('.').next().unwrap_or(expected);
-    matches!(
-        (actual, expected),
-        ("player", "agent") | ("agent", "entity") | ("player", "entity")
-    )
-}
-
 fn render_runtime_parametric_type_name(name: &str, args: &[TypeName]) -> String {
     if args.is_empty() {
         return format!("{name}()");
@@ -1732,175 +834,6 @@ fn render_runtime_type_name(type_name: &TypeName) -> String {
     }
 }
 
-fn coerce_value_to_type(env: &Env, annotation: Option<&TypeAnnotation>, value: Value) -> Value {
-    if let Some(annotation) = annotation {
-        let resolved = env.resolve_type_name(&annotation.name);
-        coerce_value_to_type_name(env, &resolved, value)
-    } else {
-        value
-    }
-}
-
-fn coerce_value_to_type_name(env: &Env, type_name: &TypeName, value: Value) -> Value {
-    let resolved = env.resolve_type_name(type_name);
-    let type_name = &resolved;
-
-    if let TypeName::Array(item_type) = type_name {
-        if matches!(value, Value::String(_))
-            && item_type.as_deref().is_some_and(type_name_is_string_char)
-        {
-            return value;
-        }
-        return coerce_array_value(env, item_type.as_deref(), value);
-    }
-
-    match type_name {
-        TypeName::Option(item_type) => match value {
-            Value::Bool(false) => Value::Option(None),
-            Value::Option(Some(value)) => Value::Option(Some(Box::new(coerce_value_to_type_name(
-                env, item_type, *value,
-            )))),
-            other => other,
-        },
-        TypeName::Map(key_type, value_type) | TypeName::WeakMap(key_type, value_type) => {
-            coerce_map_value(env, key_type, value_type, value)
-        }
-        TypeName::Tuple(item_types) => coerce_tuple_value(env, item_types, value),
-        TypeName::String => coerce_string_value(value),
-        TypeName::Int => coerce_int_value(value),
-        TypeName::Float => coerce_float_value(value),
-        TypeName::Rational => coerce_rational_value(value),
-        TypeName::Applied { name, args } if name == "castable_subtype" && args.len() == 1 => {
-            match value {
-                Value::External => Value::CastableSubtype(args[0].clone()),
-                Value::ClassType {
-                    name,
-                    castable: true,
-                    ..
-                } if runtime_class_type_conforms_to_type_name(&name, &args[0], env) => {
-                    Value::CastableSubtype(args[0].clone())
-                }
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "concrete_subtype" && args.len() == 1 => {
-            match value {
-                Value::External => Value::ConcreteSubtype(args[0].clone()),
-                Value::ClassType {
-                    name,
-                    concrete: true,
-                    castable,
-                    ..
-                } if runtime_class_type_satisfies_subtype_type_name(
-                    &name, castable, &args[0], env,
-                ) =>
-                {
-                    Value::ConcreteSubtype(args[0].clone())
-                }
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "generator" && matches!(args.len(), 0 | 1) => {
-            match value {
-                Value::External => Value::Generator {
-                    item_type: args.first().cloned(),
-                    values: Rc::new(RefCell::new(Vec::new())),
-                },
-                Value::Generator { item_type, values } => Value::Generator {
-                    item_type: item_type.or_else(|| args.first().cloned()),
-                    values,
-                },
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "event" && matches!(args.len(), 0 | 1) => {
-            match value {
-                Value::External => event_value(args.first().cloned()),
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "awaitable" && matches!(args.len(), 0 | 1) => {
-            match value {
-                Value::External => Value::Awaitable {
-                    payload: args.first().cloned(),
-                },
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "signalable" && args.len() == 1 => {
-            match value {
-                Value::External => Value::Signalable {
-                    payload: args[0].clone(),
-                },
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args }
-            if name == "subscribable" && matches!(args.len(), 0 | 1) =>
-        {
-            match value {
-                Value::External => Value::Subscribable {
-                    payload: args.first().cloned(),
-                    subscribers: Rc::new(RefCell::new(Vec::new())),
-                    next_subscriber_id: Rc::new(RefCell::new(0)),
-                },
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "listenable" && matches!(args.len(), 0 | 1) => {
-            match value {
-                Value::External => Value::Listenable {
-                    payload: args.first().cloned(),
-                    subscribers: Rc::new(RefCell::new(Vec::new())),
-                    next_subscriber_id: Rc::new(RefCell::new(0)),
-                },
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "classifiable_subset" && args.len() == 1 => {
-            match value {
-                Value::External => Value::ClassifiableSubset(Rc::new(RefCell::new(Vec::new()))),
-                other => other,
-            }
-        }
-        TypeName::Applied { name, args } if name == "modifier" && args.len() == 1 => match value {
-            Value::External => Value::Modifier {
-                item_type: args[0].clone(),
-            },
-            other => other,
-        },
-        TypeName::Applied { name, args } if name == "modifier_stack" && args.len() == 1 => {
-            match value {
-                Value::External => Value::ModifierStack {
-                    item_type: args[0].clone(),
-                    entries: Rc::new(RefCell::new(Vec::new())),
-                    next_order: Rc::new(RefCell::new(0)),
-                },
-                other => other,
-            }
-        }
-        _ => value,
-    }
-}
-
-fn coerce_int_value(value: Value) -> Value {
-    value
-}
-
-fn coerce_float_value(value: Value) -> Value {
-    match value {
-        Value::Int(value) => Value::Float(value as f64),
-        other => other,
-    }
-}
-
-fn coerce_rational_value(value: Value) -> Value {
-    match value {
-        Value::Int(value) => Value::Rational(RationalValue::from_int(value)),
-        other => other,
-    }
-}
-
 fn coerce_string_value(value: Value) -> Value {
     match value {
         Value::Array(items) => {
@@ -1910,64 +843,6 @@ fn coerce_string_value(value: Value) -> Value {
             };
             converted.map(Value::String).unwrap_or(Value::Array(items))
         }
-        other => other,
-    }
-}
-
-fn coerce_array_value(env: &Env, item_type: Option<&TypeName>, value: Value) -> Value {
-    match value {
-        Value::Array(items) => {
-            let Some(item_type) = item_type else {
-                return Value::Array(items);
-            };
-            array_value(
-                items
-                    .borrow()
-                    .iter()
-                    .map(|item| coerce_value_to_type_name(env, item_type, value_copy(item)))
-                    .collect(),
-            )
-        }
-        Value::Tuple(items) => Value::Array(Rc::new(RefCell::new(
-            items
-                .into_iter()
-                .map(|item| match item_type {
-                    Some(item_type) => coerce_value_to_type_name(env, item_type, item),
-                    None => value_copy(&item),
-                })
-                .collect(),
-        ))),
-        other => other,
-    }
-}
-
-fn coerce_map_value(env: &Env, key_type: &TypeName, value_type: &TypeName, value: Value) -> Value {
-    match value {
-        Value::Map(entries) => Value::Map(Rc::new(RefCell::new(
-            entries
-                .borrow()
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        coerce_value_to_type_name(env, key_type, value_copy(key)),
-                        coerce_value_to_type_name(env, value_type, value_copy(value)),
-                    )
-                })
-                .collect(),
-        ))),
-        other => other,
-    }
-}
-
-fn coerce_tuple_value(env: &Env, item_types: &[TypeName], value: Value) -> Value {
-    match value {
-        Value::Tuple(items) if items.len() == item_types.len() => Value::Tuple(
-            items
-                .into_iter()
-                .zip(item_types)
-                .map(|(item, item_type)| coerce_value_to_type_name(env, item_type, item))
-                .collect(),
-        ),
         other => other,
     }
 }
@@ -1983,20 +858,6 @@ fn type_name_is_string_char(name: &TypeName) -> bool {
     matches!(name, TypeName::Char)
 }
 
-fn array_type_name(type_name: &TypeName) -> Option<Option<&TypeName>> {
-    match type_name {
-        TypeName::Array(item) => Some(item.as_deref()),
-        _ => None,
-    }
-}
-
-fn tuple_type_name(type_name: &TypeName) -> Option<&[TypeName]> {
-    match type_name {
-        TypeName::Tuple(items) => Some(items),
-        _ => None,
-    }
-}
-
 fn upsert_map_entry(entries: &mut Vec<(Value, Value)>, key: Value, value: Value) {
     if let Some((_, existing_value)) = entries
         .iter_mut()
@@ -2006,149 +867,6 @@ fn upsert_map_entry(entries: &mut Vec<(Value, Value)>, key: Value, value: Value)
     } else {
         entries.push((key, value));
     }
-}
-
-fn method_has_specifier(method: &ClassMethod, name: &str) -> bool {
-    method.effects.iter().any(|effect| effect == name)
-}
-
-fn qualify_runtime_interface_fields(
-    interface_name: &str,
-    mut fields: Vec<RuntimeClassField>,
-) -> Vec<RuntimeClassField> {
-    for field in &mut fields {
-        if field.owner.is_none() {
-            field.owner = Some(interface_name.to_string());
-        }
-    }
-    fields
-}
-
-fn qualify_runtime_interface_methods(
-    interface_name: &str,
-    mut methods: Vec<RuntimeClassMethod>,
-) -> Vec<RuntimeClassMethod> {
-    for method in &mut methods {
-        if method.qualifier.is_none() {
-            method.qualifier = Some(interface_name.to_string());
-        }
-    }
-    methods
-}
-
-fn runtime_qualifier_matches(stored: &str, requested: &str) -> bool {
-    stored == requested
-        || stored.rsplit('.').next() == Some(requested)
-        || requested.rsplit('.').next() == Some(stored)
-}
-
-fn runtime_method_has_qualifier(method: &RuntimeClassMethod, qualifier: &str) -> bool {
-    method
-        .qualifier
-        .as_deref()
-        .is_some_and(|stored| runtime_qualifier_matches(stored, qualifier))
-}
-
-fn runtime_extension_method_has_qualifier(
-    method: &RuntimeExtensionMethod,
-    qualifier: &str,
-) -> bool {
-    method
-        .module_name
-        .as_deref()
-        .is_some_and(|stored| runtime_qualifier_matches(stored, qualifier))
-}
-
-fn runtime_class_method_qualifiers_conflict(
-    left: &RuntimeClassMethod,
-    right: &RuntimeClassMethod,
-) -> bool {
-    match (left.qualifier.as_deref(), right.qualifier.as_deref()) {
-        (Some(left), Some(right)) => runtime_qualifier_matches(left, right),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
-fn runtime_class_methods_conflict(left: &RuntimeClassMethod, right: &RuntimeClassMethod) -> bool {
-    left.name == right.name
-        && runtime_class_method_qualifiers_conflict(left, right)
-        && runtime_param_specs_key(&left.params) == runtime_param_specs_key(&right.params)
-}
-
-fn runtime_class_method_signatures_conflict(
-    left: &RuntimeClassMethod,
-    right: &RuntimeClassMethod,
-) -> bool {
-    left.name == right.name
-        && runtime_param_specs_key(&left.params) == runtime_param_specs_key(&right.params)
-}
-
-fn runtime_inherited_method_override_index(
-    inherited_methods: &[RuntimeClassMethod],
-    method: &RuntimeClassMethod,
-) -> Option<usize> {
-    let candidates = inherited_methods
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            runtime_class_method_signatures_conflict(candidate, method).then_some(index)
-        })
-        .collect::<Vec<_>>();
-
-    if method.qualifier.is_some() {
-        return candidates.into_iter().find(|index| {
-            runtime_class_method_qualifiers_conflict(&inherited_methods[*index], method)
-        });
-    }
-
-    if let Some(index) = candidates
-        .iter()
-        .copied()
-        .find(|index| runtime_class_method_qualifiers_conflict(&inherited_methods[*index], method))
-    {
-        return Some(index);
-    }
-
-    match candidates.as_slice() {
-        [index] => Some(*index),
-        _ => None,
-    }
-}
-
-fn runtime_inherited_method_duplicate_index(
-    inherited_methods: &[RuntimeClassMethod],
-    method: &RuntimeClassMethod,
-) -> Option<usize> {
-    inherited_methods.iter().position(|candidate| {
-        runtime_class_method_signatures_conflict(candidate, method)
-            && (method.qualifier.is_none()
-                || runtime_class_method_qualifiers_conflict(candidate, method))
-    })
-}
-
-fn runtime_param_specs_key(params: &[Param]) -> Vec<(bool, String, Option<TypeName>)> {
-    let mut key = params
-        .iter()
-        .map(|param| {
-            (
-                param.named,
-                if param.named {
-                    param.name.clone()
-                } else {
-                    String::new()
-                },
-                param
-                    .annotation
-                    .as_ref()
-                    .map(|annotation| annotation.name.clone()),
-            )
-        })
-        .collect::<Vec<_>>();
-    if key.iter().all(|(named, _, _)| *named) {
-        key.sort_by(|left, right| left.1.cmp(&right.1));
-    }
-    key
 }
 
 fn eval_array_method(
@@ -2434,17 +1152,6 @@ fn eval_array_method_failable(
     }
 }
 
-fn eval_string_array_method(
-    name: &str,
-    text: &str,
-    args: Vec<Value>,
-    span: Span,
-) -> Result<Value, VerseError> {
-    let items = string_char_values(text);
-    let args = string_array_method_args(name, args);
-    eval_array_method(name, &items, args, span).map(coerce_string_value)
-}
-
 fn eval_string_array_method_failable(
     name: &str,
     text: &str,
@@ -2509,10 +1216,6 @@ pub(crate) fn bytecode_color_add_values(left: &Value, right: &Value) -> Option<V
 
 pub(crate) fn bytecode_color_subtract_values(left: &Value, right: &Value) -> Option<Value> {
     color_pair_value(left, right, RuntimeNumberOp::Subtract)
-}
-
-pub(crate) fn bytecode_color_multiply_values(left: &Value, right: &Value) -> Option<Value> {
-    color_pair_value(left, right, RuntimeNumberOp::Multiply)
 }
 
 pub(crate) fn bytecode_color_multiply_or_scale_values(
@@ -2768,55 +1471,6 @@ fn string_array_method_args(name: &str, args: Vec<Value>) -> Vec<Value> {
     }
 }
 
-fn eval_number_method(
-    name: &str,
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> Result<Value, VerseError> {
-    eval_number_method_failable(name, receiver, args, span)?
-        .ok_or_else(|| VerseError::runtime_at(format!("`{name}` failed"), span))
-}
-
-fn eval_number_method_failable(
-    name: &str,
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> Result<Option<Value>, VerseError> {
-    match name {
-        "IsFinite" => {
-            if !args.is_empty() {
-                return Err(VerseError::runtime_at(
-                    format!("`IsFinite` expected 0 arguments, got {}", args.len()),
-                    span,
-                ));
-            }
-            let finite = match runtime_number(&receiver) {
-                Some(RuntimeNumber::Float(value)) => value.is_finite(),
-                Some(RuntimeNumber::Int(_) | RuntimeNumber::Rational(_)) => true,
-                None => false,
-            };
-            Ok(finite.then_some(receiver))
-        }
-        "IsAlmostZero" => {
-            if args.len() != 1 {
-                return Err(VerseError::runtime_at(
-                    format!("`IsAlmostZero` expected 1 argument, got {}", args.len()),
-                    span,
-                ));
-            }
-            let value = expect_number(&receiver, "`IsAlmostZero` Val", span)?;
-            let tolerance = expect_number(&args[0], "`IsAlmostZero` AbsoluteTolerance", span)?;
-            Ok((value.abs() <= tolerance).then_some(Value::None))
-        }
-        _ => Err(VerseError::runtime_at(
-            format!("unknown number method `{name}`"),
-            span,
-        )),
-    }
-}
-
 fn array_position_value(
     value: &Value,
     context: &str,
@@ -2980,18 +1634,6 @@ fn array_value(items: Vec<Value>) -> Value {
     Value::Array(Rc::new(RefCell::new(items)))
 }
 
-impl NativeResult {
-    fn into_value(self, name: &str, span: Span) -> Result<Value, VerseError> {
-        match self {
-            Self::Value(value) => Ok(value),
-            Self::Failure(reason) => Err(VerseError::runtime_at(
-                format!("`{name}` failed: {reason}"),
-                span,
-            )),
-        }
-    }
-}
-
 fn modifier_stack_position(stack: &Value, first: bool) -> Value {
     let Value::ModifierStack { entries, .. } = stack else {
         return Value::Option(None);
@@ -3031,132 +1673,6 @@ fn expect_runtime_rational(
     runtime_number_to_rational(number).ok_or_else(|| {
         VerseError::runtime_at(format!("{label} expected rational, got {value}"), span)
     })
-}
-
-fn call_native_cancel_method(
-    name: &'static str,
-    entries: &Rc<RefCell<Vec<RuntimeModifierEntry>>>,
-    entry_id: u64,
-    args: Vec<CallValue>,
-    span: Span,
-) -> Result<NativeResult, VerseError> {
-    if args.iter().any(|arg| arg.name.is_some()) {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` does not accept named arguments"),
-            span,
-        ));
-    }
-    if !args.is_empty() {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` expected 0 arguments, got {}", args.len()),
-            span,
-        ));
-    }
-    entries.borrow_mut().retain(|entry| entry.id != entry_id);
-    Ok(NativeResult::Value(Value::None))
-}
-
-fn call_native_subscribable_method(
-    name: &'static str,
-    payload: Option<&TypeName>,
-    subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
-    next_subscriber_id: &Rc<RefCell<u64>>,
-    args: Vec<CallValue>,
-    span: Span,
-) -> Result<NativeResult, VerseError> {
-    if args.iter().any(|arg| arg.name.is_some()) {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` does not accept named arguments"),
-            span,
-        ));
-    }
-    if args.len() != 1 {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` expected 1 argument, got {}", args.len()),
-            span,
-        ));
-    }
-    let callback = args.into_iter().next().expect("arity checked").value;
-    let expected_arity = usize::from(payload.is_some());
-    if !runtime_callable_accepts_arity(&callback, expected_arity) {
-        return Err(VerseError::runtime_at(
-            format!(
-                "`Subscribe` Callback expected function/{expected_arity} -> void, got {callback}"
-            ),
-            span,
-        ));
-    }
-
-    let id = {
-        let mut next = next_subscriber_id.borrow_mut();
-        let id = *next;
-        *next = next.saturating_add(1);
-        id
-    };
-    subscribers.borrow_mut().push(RuntimeSubscriptionEntry {
-        id,
-        callback: value_copy(&callback),
-    });
-    Ok(NativeResult::Value(Value::SubscriptionCancelHandle {
-        subscribers: subscribers.clone(),
-        subscriber_id: id,
-    }))
-}
-
-fn call_native_subscription_cancel_method(
-    name: &'static str,
-    subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
-    subscriber_id: u64,
-    args: Vec<CallValue>,
-    span: Span,
-) -> Result<NativeResult, VerseError> {
-    if args.iter().any(|arg| arg.name.is_some()) {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` does not accept named arguments"),
-            span,
-        ));
-    }
-    if !args.is_empty() {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` expected 0 arguments, got {}", args.len()),
-            span,
-        ));
-    }
-    subscribers
-        .borrow_mut()
-        .retain(|entry| entry.id != subscriber_id);
-    Ok(NativeResult::Value(Value::None))
-}
-
-fn runtime_callable_accepts_arity(value: &Value, expected_arity: usize) -> bool {
-    match value {
-        Value::Function { params, .. } | Value::BoundMethod { params, .. } => {
-            params.len() == expected_arity
-        }
-        Value::Overload(overloads) => overloads
-            .iter()
-            .any(|overload| runtime_callable_accepts_arity(overload, expected_arity)),
-        Value::NativeFunction { arity, .. } => arity.is_none_or(|arity| arity == expected_arity),
-        Value::NativeResultMethod { name, .. }
-        | Value::NativeSubscribableMethod { name, .. }
-        | Value::NativeTaskMethod { name, .. }
-        | Value::NativeModifierMethod { name, .. }
-        | Value::NativeCancelMethod { name, .. }
-        | Value::NativeSubscriptionCancelMethod { name, .. } => match *name {
-            "Await" | "Cancel" | "GetSuccess" | "GetError" => expected_arity == 0,
-            "Evaluate" | "Subscribe" => expected_arity == 1,
-            "AddModifier" => expected_arity == 2,
-            _ => false,
-        },
-        Value::NativeEventMethod { name: "Await", .. } => expected_arity == 0,
-        Value::NativeEventMethod {
-            name: "Signal",
-            payload,
-            ..
-        } => expected_arity == usize::from(payload.is_some()),
-        Value::NativeEventMethod { .. } => false,
-        _ => false,
-    }
 }
 
 fn call_native_function(
@@ -3298,43 +1814,6 @@ fn reorder_native_call_args(
         .collect()
 }
 
-fn call_native_result_method(
-    name: &'static str,
-    result: &Value,
-    args: Vec<CallValue>,
-    span: Span,
-) -> Result<NativeResult, VerseError> {
-    if args.iter().any(|arg| arg.name.is_some()) {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` does not accept named arguments"),
-            span,
-        ));
-    }
-    if !args.is_empty() {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` expected 0 arguments, got {}", args.len()),
-            span,
-        ));
-    }
-
-    let Value::Result { succeeded, value } = result else {
-        return Err(VerseError::runtime_at(
-            format!("`{name}` expected a result receiver"),
-            span,
-        ));
-    };
-
-    match (name, *succeeded) {
-        ("GetSuccess", true) | ("GetError", false) => Ok(NativeResult::Value(value_copy(value))),
-        ("GetSuccess", false) => Ok(NativeResult::Failure("result is an error")),
-        ("GetError", true) => Ok(NativeResult::Failure("result is a success")),
-        _ => Err(VerseError::runtime_at(
-            format!("unknown result method `{name}`"),
-            span,
-        )),
-    }
-}
-
 fn validate_event_signal_args(
     payload: Option<&TypeName>,
     args: &[CallValue],
@@ -3417,7 +1896,95 @@ fn event_signal_value(payload: Option<&TypeName>, args: &[CallValue]) -> Value {
 }
 
 fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
-    runtime_value_matches_type_name(value, payload, &Env::new())
+    match payload {
+        TypeName::Any | TypeName::Comparable => true,
+        TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
+        TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
+        TypeName::Rational => matches!(value, Value::Int(_) | Value::Rational(_)),
+        TypeName::Number => runtime_number(value).is_some(),
+        TypeName::Bool => matches!(value, Value::Bool(_)),
+        TypeName::String => match value {
+            Value::String(_) => true,
+            Value::Array(items) => char_array_to_string(items.borrow().as_slice()).is_some(),
+            _ => false,
+        },
+        TypeName::Message => matches!(value, Value::String(_) | Value::Diagnostic(_)),
+        TypeName::Char | TypeName::Char8 => matches!(value, Value::Char(_)),
+        TypeName::Char32 => matches!(value, Value::Char32(_)),
+        TypeName::None => matches!(value, Value::None),
+        TypeName::Array(item_type) => match value {
+            Value::String(_) if item_type.as_deref().is_some_and(type_name_is_string_char) => true,
+            Value::Array(items) => item_type.as_deref().is_none_or(|item_type| {
+                items
+                    .borrow()
+                    .iter()
+                    .all(|item| runtime_event_payload_matches(item, item_type))
+            }),
+            _ => false,
+        },
+        TypeName::Map(key_type, value_type) | TypeName::WeakMap(key_type, value_type) => {
+            match value {
+                Value::Map(entries) => entries.borrow().iter().all(|(key, value)| {
+                    runtime_event_payload_matches(key, key_type)
+                        && runtime_event_payload_matches(value, value_type)
+                }),
+                _ => false,
+            }
+        }
+        TypeName::Tuple(item_types) => match value {
+            Value::Tuple(items) if items.len() == item_types.len() => items
+                .iter()
+                .zip(item_types)
+                .all(|(item, item_type)| runtime_event_payload_matches(item, item_type)),
+            _ => false,
+        },
+        TypeName::Option(item_type) => match value {
+            Value::Option(Some(value)) => runtime_event_payload_matches(value, item_type),
+            Value::Option(None) | Value::Bool(false) => true,
+            _ => false,
+        },
+        TypeName::Named(name) | TypeName::Applied { name, .. } => {
+            runtime_named_value_matches(value, name)
+        }
+        TypeName::Function | TypeName::FunctionSignature { .. } => matches!(
+            value,
+            Value::NativeFunction { .. }
+                | Value::NativeArrayMethod { .. }
+                | Value::NativeResultMethod { .. }
+                | Value::NativeEventMethod { .. }
+                | Value::NativeSubscribableMethod { .. }
+                | Value::NativeTaskMethod { .. }
+                | Value::NativeModifierMethod { .. }
+                | Value::NativeCancelMethod { .. }
+                | Value::NativeSubscriptionCancelMethod { .. }
+                | Value::External
+        ),
+    }
+}
+
+fn runtime_named_value_matches(value: &Value, expected: &str) -> bool {
+    let expected = expected.rsplit('.').next().unwrap_or(expected);
+    match value {
+        Value::External => true,
+        Value::Diagnostic(_) => expected == "diagnostic",
+        Value::EnumValue { enum_name, .. } => runtime_names_match(enum_name, expected),
+        Value::StructInstance { struct_name, .. } => runtime_names_match(struct_name, expected),
+        Value::ClassInstance { class_name, .. } => runtime_names_match(class_name, expected),
+        Value::EnumType { name, .. }
+        | Value::StructType { name, .. }
+        | Value::ClassType { name, .. }
+        | Value::InterfaceType { name, .. }
+        | Value::Module { name, .. } => runtime_names_match(name, expected),
+        Value::ModifierCancelHandle { .. } | Value::SubscriptionCancelHandle { .. } => {
+            expected == "cancelable"
+        }
+        _ => false,
+    }
+}
+
+fn runtime_names_match(actual: &str, expected: &str) -> bool {
+    let actual_local = actual.rsplit('.').next().unwrap_or(actual);
+    actual == expected || actual_local == expected
 }
 
 fn native_print_call(args: Vec<CallValue>, span: Span) -> Result<NativeResult, VerseError> {
