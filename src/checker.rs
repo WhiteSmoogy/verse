@@ -1299,7 +1299,10 @@ fn access_is_more_visible_than(left: AccessLevel, right: AccessLevel) -> bool {
     match left {
         AccessLevel::Public => !matches!(right, AccessLevel::Public),
         AccessLevel::Scoped => matches!(right, AccessLevel::Internal | AccessLevel::Private),
-        AccessLevel::Protected => matches!(right, AccessLevel::Internal | AccessLevel::Private),
+        AccessLevel::Protected => matches!(
+            right,
+            AccessLevel::Scoped | AccessLevel::Internal | AccessLevel::Private
+        ),
         AccessLevel::Internal => matches!(right, AccessLevel::Private),
         AccessLevel::Private => false,
     }

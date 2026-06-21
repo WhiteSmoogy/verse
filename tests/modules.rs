@@ -236,6 +236,94 @@ DataTypes<public> := module:
 }
 
 #[test]
+fn rejects_public_inferred_data_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class<concrete>:
+        Value:int = 0
+    Leaked<public> := secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Leaked` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_inferred_data_exposing_scoped_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret<scoped{DataTypes}> := class<concrete>:
+        Value:int = 0
+    Leaked<public> := secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Leaked` is public but depends on `DataTypes.secret`, which is scoped"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_function_inferred_return_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class<concrete>:
+        Value:int = 0
+    Make<public>() = secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Make` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_function_inferred_return_exposing_scoped_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret<scoped{DataTypes}> := class<concrete>:
+        Value:int = 0
+    Make<public>() = secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Make` is public but depends on `DataTypes.secret`, which is scoped"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_public_function_signature_exposing_internal_module_type() {
     let error = check_source(
         r#"
@@ -396,6 +484,29 @@ DataTypes<public> := module:
 }
 
 #[test]
+fn rejects_public_class_protected_field_exposing_scoped_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret<scoped{DataTypes}> := class:
+        Value:int = 0
+    exposed<public> := class:
+        Item<protected>:secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed.Item` is protected but depends on `DataTypes.secret`, which is scoped"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_public_class_protected_method_exposing_internal_module_type() {
     let error = check_source(
         r#"
@@ -464,6 +575,50 @@ DataTypes<public> := module:
 }
 
 #[test]
+fn rejects_public_extension_method_inferred_return_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class<concrete>:
+        Value:int = 0
+    (Value:int).Reveal<public>() = secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_extension_method_inferred_return_exposing_scoped_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret<scoped{DataTypes}> := class<concrete>:
+        Value:int = 0
+    (Value:int).Reveal<public>() = secret{}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is scoped"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_public_class_base_exposing_internal_module_type() {
     let error = check_source(
         r#"
@@ -482,6 +637,52 @@ DataTypes<public> := module:
         error
             .to_string()
             .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.base`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_type_alias_exposing_internal_child_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    Hidden := module:
+        secret<public> := class:
+            Value:int = 0
+    exposed<public> := []DataTypes.Hidden.secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.Hidden.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_type_alias_exposing_scoped_child_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    Hidden<scoped{DataTypes}> := module:
+        secret<public> := class:
+            Value:int = 0
+    exposed<public> := []DataTypes.Hidden.secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.Hidden.secret`, which is scoped"),
         "{error}"
     );
 }

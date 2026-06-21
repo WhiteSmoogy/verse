@@ -1733,7 +1733,7 @@ impl Checker {
         Ok(())
     }
 
-    fn ensure_type_dependencies_accessible(
+    pub(super) fn ensure_type_dependencies_accessible(
         &self,
         dependee: &str,
         access: AccessLevel,
@@ -1892,6 +1892,7 @@ impl Checker {
         span: Span,
     ) -> Result<(), VerseError> {
         let dependency = dependency_base_name(dependency);
+        let dependee_access = self.definition_effective_access(dependee, dependee_access);
         let Some(dependency_access) = self.module_member_dependency_access(dependency) else {
             return Ok(());
         };
@@ -1916,7 +1917,51 @@ impl Checker {
             .get(member_name)
             .copied()
             .unwrap_or(AccessLevel::Internal);
-        Some(access)
+        Some(self.definition_effective_access(name, access))
+    }
+
+    fn definition_effective_access(&self, name: &str, declared: AccessLevel) -> AccessLevel {
+        let Some(module_name) = self.containing_module_name(name) else {
+            return declared;
+        };
+        self.access_constrained_by_enclosing_modules(declared, module_name)
+    }
+
+    fn containing_module_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        let mut current = aggregate_module_name(name);
+        while let Some(candidate) = current {
+            if self.module_types.contains_key(candidate) {
+                return Some(candidate);
+            }
+            current = candidate.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        None
+    }
+
+    fn access_constrained_by_enclosing_modules(
+        &self,
+        mut access: AccessLevel,
+        module_name: &str,
+    ) -> AccessLevel {
+        let mut current = Some(module_name);
+        while let Some(name) = current {
+            if let Some(info) = self.module_types.get(name)
+                && self.module_access_constrains_surface(name, info.access)
+                && access_is_more_visible_than(access, info.access)
+            {
+                access = info.access;
+            }
+            current = name.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        access
+    }
+
+    fn module_access_constrains_surface(&self, module_name: &str, access: AccessLevel) -> bool {
+        match access {
+            AccessLevel::Scoped => true,
+            AccessLevel::Internal => module_name.contains('.'),
+            AccessLevel::Public | AccessLevel::Protected | AccessLevel::Private => false,
+        }
     }
 
     pub(super) fn current_qualified_name(&self, name: &str) -> String {

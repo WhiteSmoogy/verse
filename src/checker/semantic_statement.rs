@@ -339,6 +339,13 @@ impl Checker {
         };
         let visible_type =
             self.extension_method_type_with_return(&extension.method, *return_type)?;
+        let access = access_level_from_specifiers(
+            &extension.method.effects,
+            "extension method",
+            extension.span,
+        )?;
+        let dependee = self.current_qualified_name(&extension.method.name);
+        self.ensure_type_dependencies_accessible(&dependee, access, &visible_type, extension.span)?;
         self.update_extension_method_type(
             &extension.method.name,
             &receiver_type,
@@ -697,6 +704,15 @@ impl Checker {
             self.define(name, checked_type.clone(), mutable, span)?;
             checked_type.clone()
         };
+        if self.current_definition_level() {
+            let access = access_level_from_specifiers(
+                module_member_specifiers(specifiers, expr),
+                "module member",
+                span,
+            )?;
+            let dependee = self.current_qualified_name(name);
+            self.ensure_type_dependencies_accessible(&dependee, access, &binding_type, span)?;
+        }
         self.record_current_module_member(
             name,
             binding_type.clone(),
