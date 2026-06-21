@@ -487,7 +487,7 @@ fn evaluates_interface_fields_and_default_method() {
 triggerable := interface:
     var<protected> Triggered<public>:logic = false
     PerformAction():void
-    Trigger()<transacts>:int =
+    Trigger():int =
         if (Triggered?):
             0
         else:
@@ -551,6 +551,27 @@ set Target.Triggered = true
         error
             .to_string()
             .contains("field `Triggered` is protected in interface `triggerable`")
+    );
+}
+
+#[test]
+fn evaluates_default_public_interface_var_assignment_with_protected_read() {
+    let source = r#"
+counter := interface:
+    var Value<protected>:int = 0
+
+button := class(counter):
+    ID:int = 0
+
+Target:counter = button{}
+set Target.Value = 42
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
@@ -772,7 +793,7 @@ else:
 fn evaluates_builtin_showable_interface_field() {
     let source = r#"
 panel := class(showable):
-    var Show<override>:?logic = false
+    var Show<override><public>:?logic = false
 
 Panel := panel{}
 Showable:showable = Panel
@@ -813,7 +834,7 @@ fn rejects_builtin_showable_field_type_mismatch() {
     let error = check_source(
         r#"
 panel := class(showable):
-    var Show<override>:logic = true
+    var Show<override><public>:logic = true
 "#,
     )
     .expect_err("source should fail");
@@ -959,36 +980,32 @@ widget{}.Value
 }
 
 #[test]
-fn rejects_decides_abstract_class_method_without_transacts_effect() {
-    let error = check_source(
-        r#"
+fn checks_decides_abstract_class_method_without_call_effect() {
+    let source = r#"
 picker := class<abstract>:
     Pick()<decides>:int
-"#,
-    )
-    .expect_err("source should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("function with `<decides>` must also have `<transacts>`")
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
 #[test]
-fn rejects_decides_interface_method_without_transacts_effect() {
-    let error = check_source(
-        r#"
+fn checks_decides_interface_method_without_call_effect() {
+    let source = r#"
 picker := interface:
     Pick()<decides>:int
-"#,
-    )
-    .expect_err("source should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("function with `<decides>` must also have `<transacts>`")
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
@@ -1014,29 +1031,29 @@ Counter.Value
 }
 
 #[test]
-fn rejects_class_field_assignment_in_method_without_write_effect() {
-    let error = check_source(
-        r#"
+fn evaluates_default_class_method_field_assignment() {
+    let source = r#"
 counter := class:
     var Value:int = 0
 
     Increment():void =
-        set Value += 1
-"#,
-    )
-    .expect_err("source should fail");
+        set Value += 42
 
-    assert!(
-        error
-            .to_string()
-            .contains("mutable assignment in function requires `<writes>` or `<transacts>` effect")
+Counter := counter{}
+Counter.Increment()
+Counter.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
 #[test]
-fn rejects_no_rollback_method_call_in_failure_context() {
-    let error = check_source(
-        r#"
+fn evaluates_default_class_method_call_in_failure_context() {
+    let source = r#"
 reader := class:
     Read():int = 42
 
@@ -1048,14 +1065,12 @@ then:
     Value
 else:
     0
-"#,
-    )
-    .expect_err("source should fail");
+"#;
 
-    assert!(
-        error
-            .to_string()
-            .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
@@ -1739,6 +1754,26 @@ bad := interface:
 }
 
 #[test]
+fn rejects_class_field_default_constructing_class_with_block() {
+    let error = check_source(
+        r#"
+worker := class:
+    var Value:int = 0
+    block:
+        set Value += 1
+
+bad := class:
+    Worker:worker = worker{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <converges> effect cannot call function requiring <transacts> effect"
+    ));
+}
+
+#[test]
 fn rejects_class_field_default_suspends_call() {
     let error = check_source(
         r#"
@@ -1835,7 +1870,7 @@ fn rejects_private_class_field_assignment_outside_defining_class() {
     let error = check_source(
         r#"
 counter := class:
-    var Value<private>:int = 0
+    var<private> Value<public>:int = 0
 
 Counter := counter{}
 set Counter.Value = 42
@@ -1844,6 +1879,40 @@ set Counter.Value = 42
     .expect_err("source should fail");
 
     assert!(error.to_string().contains("private"));
+}
+
+#[test]
+fn evaluates_default_public_var_assignment_with_protected_read() {
+    let source = r#"
+counter := class:
+    var Value<protected>:int = 0
+
+Counter := counter{}
+set Counter.Value = 42
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_default_public_var_read_with_protected_read() {
+    let error = check_source(
+        r#"
+counter := class:
+    var Value<protected>:int = 0
+
+Counter := counter{}
+Counter.Value
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains("protected"));
 }
 
 #[test]
@@ -1954,6 +2023,70 @@ DataTypes<public> := module:
         error
             .to_string()
             .contains("field `RemainingTime` is private to class `DataTypes.countdown_timer`")
+    );
+}
+
+#[test]
+fn rejects_protected_class_constructor_archetype_outside_subclass() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    token<public> := class<protected><concrete>:
+        Value<public>:int = 42
+
+DataTypes.token{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `DataTypes.token` is protected")
+    );
+}
+
+#[test]
+fn evaluates_protected_class_constructor_for_subclass() {
+    let source = r#"
+DataTypes<public> := module:
+    base<public> := class<protected><concrete>:
+        Value<public>:int = 40
+
+    child<public> := class<concrete>(base):
+        Bonus<public>:int = 2
+
+Item := DataTypes.child{}
+Item.Value + Item.Bonus
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_private_base_class_constructor_from_subclass() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    base<public> := class<private><concrete>:
+        Value<public>:int = 40
+
+    child<public> := class<concrete>(base):
+        Bonus<public>:int = 2
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `DataTypes.base` is private")
     );
 }
 
@@ -2165,6 +2298,24 @@ MakeToken().ID
 }
 
 #[test]
+fn evaluates_varies_function_constructing_unique_class() {
+    let source = r#"
+token := class<unique>:
+    ID:int = 0
+
+MakeToken()<varies>:token = token{ID := 42}
+
+MakeToken().ID
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_no_rollback_function_constructing_unique_class() {
     let error = check_source(
         r#"
@@ -2324,7 +2475,86 @@ entity := class<public><public>:
     )
     .expect_err("source should fail");
 
-    assert!(error.to_string().contains("duplicate class specifier"));
+    assert!(error.to_string().contains("Duplicate access levels"));
+}
+
+#[test]
+fn rejects_conflicting_class_access_specifiers() {
+    let cases = [
+        (
+            "class",
+            r#"
+entity := class<public><internal>:
+    Name:string = "entity"
+"#,
+        ),
+        (
+            "field",
+            r#"
+entity := class:
+    Data<public><internal>:int = 1
+"#,
+        ),
+        (
+            "method",
+            r#"
+entity := class:
+    Score<public><internal>():int = 1
+"#,
+        ),
+        (
+            "var field",
+            r#"
+entity := class:
+    var<public><private> Data:int = 1
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        let error = check_source(source).expect_err(label);
+
+        assert!(
+            error.to_string().contains("Conflicting access levels"),
+            "{label}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_duplicate_class_member_access_specifiers() {
+    let cases = [
+        (
+            "field",
+            r#"
+entity := class:
+    Data<public><public>:int = 1
+"#,
+        ),
+        (
+            "method",
+            r#"
+entity := class:
+    Score<public><public>():int = 1
+"#,
+        ),
+        (
+            "var field",
+            r#"
+entity := class:
+    var<public><public> Data:int = 1
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        let error = parse_source(source).expect_err(label);
+
+        assert!(
+            error.to_string().contains("Duplicate access levels"),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -2972,6 +3202,26 @@ Head.Data + if (Next := Head.Next?). Next.Data else. 0
 }
 
 #[test]
+fn evaluates_class_field_override_inheriting_access_level() {
+    let source = r#"
+base := class:
+    Data<protected> : int = 1
+
+child := class(base):
+    Data<override> : int = 42
+    Reveal<public>():int = Data
+
+child{}.Reveal()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_editable_class_field_attributes() {
     let source = r#"
 settings := class:
@@ -3368,6 +3618,49 @@ child := class(base):
 }
 
 #[test]
+fn rejects_class_field_override_changing_access_level() {
+    let error = check_source(
+        r#"
+base := class:
+    Data<protected> : int = 1
+
+child := class(base):
+    Data<override><public> : int = 2
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot change the inherited access level")
+    );
+}
+
+#[test]
+fn rejects_class_var_field_override_widening_omitted_mutation_access() {
+    let error = check_source(
+        r#"
+weapon := class:
+    var<protected> Ammo<public>:int = 10
+
+gun := class(weapon):
+    var Ammo<override><public>:int = 20
+
+Gun := gun{}
+set Gun.Ammo = 30
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("field `Ammo` is protected in class `weapon`")
+    );
+}
+
+#[test]
 fn rejects_duplicate_class_field_specifier() {
     let error = parse_source(
         r#"
@@ -3489,6 +3782,48 @@ Hero.Label()
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::String
+    );
+}
+
+#[test]
+fn rejects_class_method_override_widening_omitted_access_level() {
+    let error = check_source(
+        r#"
+base := class:
+    Hidden<protected>():int = 40
+
+child := class(base):
+    Hidden<override>():int = 42
+
+child{}.Hidden()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("method `Hidden` is protected in class `base`")
+    );
+}
+
+#[test]
+fn rejects_class_method_override_changing_access_level() {
+    let error = check_source(
+        r#"
+base := class:
+    Hidden<protected>():int = 40
+
+child := class(base):
+    Hidden<override><public>():int = 42
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("overridden method cannot change the inherited access level")
     );
 }
 
@@ -3856,6 +4191,47 @@ Hero.Score
         check_source(source).expect("source should check"),
         Type::Int
     );
+}
+
+#[test]
+fn evaluates_transacts_function_constructing_class_with_block() {
+    let source = r#"
+counter := class:
+    var Value:int = 0
+
+    block:
+        set Value = 42
+
+Make()<transacts>:counter = counter{}
+
+Make().Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_computes_function_constructing_class_with_block() {
+    let error = check_source(
+        r#"
+counter := class:
+    var Value:int = 0
+
+    block:
+        set Value = 42
+
+Make()<computes>:counter = counter{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
 }
 
 #[test]

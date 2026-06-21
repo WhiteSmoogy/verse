@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{ExprKind, Program, Stmt, StmtKind};
-use crate::checker::{Type, check_source};
+use crate::checker::{Type, check_source_in_package};
 use crate::error::VerseError;
 use crate::parser::parse_source;
-use crate::pipeline::run_source;
+use crate::pipeline::run_source_in_package;
 use crate::runtime::Value;
 use crate::token::Span;
 
@@ -15,13 +15,15 @@ pub fn load_project_source(path: impl AsRef<Path>) -> Result<String, VerseError>
 }
 
 pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
-    let source = load_project_source(path)?;
-    check_source(&source)
+    let project = SourceProject::from_path(path.as_ref())?;
+    let source = project.load_source()?;
+    check_source_in_package(&source, project.package.as_deref())
 }
 
 pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
-    let source = load_project_source(path)?;
-    run_source(&source)
+    let project = SourceProject::from_path(path.as_ref())?;
+    let source = project.load_source()?;
+    run_source_in_package(&source, project.package.as_deref())
 }
 
 #[derive(Debug, Clone)]

@@ -104,17 +104,12 @@ impl EffectSet {
     pub fn call_allowed_effects(&self) -> Vec<Effect> {
         let mut capabilities = Vec::new();
 
-        if self.contains(Effect::Transacts) {
+        if self.contains(Effect::Transacts) || self.contains(Effect::Varies) {
             push_effect(&mut capabilities, Effect::Transacts);
             push_effect(&mut capabilities, Effect::Varies);
             push_effect(&mut capabilities, Effect::Reads);
             push_effect(&mut capabilities, Effect::Writes);
             push_effect(&mut capabilities, Effect::Allocates);
-            push_effect(&mut capabilities, Effect::Computes);
-            push_effect(&mut capabilities, Effect::Converges);
-        }
-        if self.contains(Effect::Varies) {
-            push_effect(&mut capabilities, Effect::Varies);
             push_effect(&mut capabilities, Effect::Computes);
             push_effect(&mut capabilities, Effect::Converges);
         }
@@ -147,10 +142,8 @@ impl EffectSet {
     pub fn call_required_effects(&self) -> Vec<Effect> {
         let mut capabilities = Vec::new();
 
-        if self.contains(Effect::Transacts) {
+        if self.contains(Effect::Transacts) || self.contains(Effect::Varies) {
             push_effect(&mut capabilities, Effect::Transacts);
-        } else if self.contains(Effect::Varies) {
-            push_effect(&mut capabilities, Effect::Varies);
         } else if self.contains(Effect::Computes) {
             push_effect(&mut capabilities, Effect::Computes);
         } else if self.contains(Effect::Converges) {
@@ -202,7 +195,7 @@ impl EffectSet {
         if self.has_no_rollback() {
             push_effect(&mut capabilities, Effect::NoRollback);
         }
-        if self.contains(Effect::Transacts) {
+        if self.contains(Effect::Transacts) || self.contains(Effect::Varies) {
             push_effect(&mut capabilities, Effect::Transacts);
             push_effect(&mut capabilities, Effect::Varies);
             push_effect(&mut capabilities, Effect::Computes);
@@ -210,11 +203,6 @@ impl EffectSet {
             push_effect(&mut capabilities, Effect::Allocates);
             push_effect(&mut capabilities, Effect::Reads);
             push_effect(&mut capabilities, Effect::Writes);
-        }
-        if self.contains(Effect::Varies) {
-            push_effect(&mut capabilities, Effect::Varies);
-            push_effect(&mut capabilities, Effect::Computes);
-            push_effect(&mut capabilities, Effect::Converges);
         }
         if self.contains(Effect::Computes) {
             push_effect(&mut capabilities, Effect::Computes);
@@ -248,11 +236,26 @@ pub(super) fn ensure_callable_in_failure_context(
     effects: &[String],
     span: Span,
 ) -> Result<(), VerseError> {
-    if has_no_rollback_effect(effects) {
+    let effect_set = EffectSet::from_effect_names(effects);
+    if effect_set.has_no_rollback() {
         return Err(VerseError::check_at(
             "function with `<no_rollback>` effect cannot be called in a failure context",
             span,
         ));
+    }
+
+    if !effect_set.contains(Effect::Transacts) && !effect_set.contains(Effect::Varies) {
+        for effect in [Effect::Writes, Effect::Allocates] {
+            if effect_set.contains(effect) {
+                return Err(VerseError::check_at(
+                    format!(
+                        "function with `<{}>` effect cannot be called in a failure context",
+                        effect.name()
+                    ),
+                    span,
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -333,12 +336,6 @@ pub(super) fn validate_function_effect_combination(
     }
 
     let effect_set = EffectSet::from_effect_names(effects);
-    if effect_set.contains(Effect::Decides) && !effect_set.contains(Effect::Transacts) {
-        return Err(VerseError::check_at(
-            "function with `<decides>` must also have `<transacts>`",
-            span,
-        ));
-    }
 
     if has_effect(effects, "constructor") && effect_set.contains(Effect::Suspends) {
         return Err(VerseError::check_at(
@@ -457,6 +454,21 @@ impl Checker {
         }
     }
 
+    pub(super) fn ensure_callee_type_failure_context_allowed(
+        &mut self,
+        callee_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match callee_type {
+            Type::Function { effects, .. } => {
+                ensure_callable_in_failure_context(effects, span)?;
+                self.ensure_callable_in_async_context(effects, span)?;
+                self.ensure_current_function_allows_call_effects(effects, span)
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(super) fn ensure_current_function_allows_call_effects(
         &self,
         callee_effects: &[String],
@@ -470,7 +482,7 @@ impl Checker {
         }
 
         if has_no_rollback_effect(callee_effects) {
-            if has_effect(caller_effects, "transacts") {
+            if has_effect(caller_effects, "transacts") || has_effect(caller_effects, "varies") {
                 return Ok(());
             }
             return Err(effect_call_error(caller_effects, "no_rollback", span));

@@ -26,6 +26,9 @@ pub(super) struct ParametricTypeInfo {
 pub(super) struct ModuleInfo {
     pub(super) members: HashMap<String, Type>,
     pub(super) member_access: HashMap<String, AccessLevel>,
+    pub(super) member_scopes: HashMap<String, Vec<String>>,
+    pub(super) access: AccessLevel,
+    pub(super) scopes: Vec<String>,
     pub(super) imports: Vec<String>,
 }
 
@@ -567,6 +570,9 @@ impl Checker {
             ModuleInfo {
                 members: named_color_members,
                 member_access: named_color_access,
+                member_scopes: HashMap::new(),
+                access: AccessLevel::Public,
+                scopes: Vec::new(),
                 imports: Vec::new(),
             },
         );
@@ -608,8 +614,14 @@ impl Checker {
             errors: Vec::new(),
             warnings: Vec::new(),
             semantic_facts: SemanticFacts::default(),
+            package_name: None,
             recovering: false,
         }
+    }
+
+    pub fn with_package(mut self, package_name: Option<String>) -> Self {
+        self.package_name = package_name;
+        self
     }
 }
 
@@ -637,7 +649,7 @@ impl Checker {
                         statements: module_statements,
                         ..
                     } => {
-                        self.record_current_module_member_access(name, specifiers, statement.span)?;
+                        self.record_module_definition_access(name, specifiers, statement.span)?;
                         self.module_path.push(name.clone());
                         self.predeclare_module_member_access(module_statements)?;
                         self.module_path.pop();
@@ -657,8 +669,10 @@ impl Checker {
                 StmtKind::ParametricType {
                     name, specifiers, ..
                 } => self.record_current_module_member_access(name, specifiers, statement.span)?,
-                StmtKind::TypeAlias { name, .. } => {
-                    self.record_current_module_member_access(name, &[], statement.span)?;
+                StmtKind::TypeAlias {
+                    name, specifiers, ..
+                } => {
+                    self.record_current_module_member_access(name, specifiers, statement.span)?;
                 }
                 _ => {}
             }
@@ -684,6 +698,9 @@ impl Checker {
             self.module_types.entry(qualified).or_insert(ModuleInfo {
                 members: HashMap::new(),
                 member_access: HashMap::new(),
+                member_scopes: HashMap::new(),
+                access: AccessLevel::Internal,
+                scopes: Vec::new(),
                 imports: Vec::new(),
             });
 
@@ -726,11 +743,17 @@ impl Checker {
         }
     }
 
-    pub(super) fn predeclare_top_level_aggregate_names(&mut self, program: &Program) {
-        self.predeclare_aggregate_names(&program.statements);
+    pub(super) fn predeclare_top_level_aggregate_names(
+        &mut self,
+        program: &Program,
+    ) -> Result<(), VerseError> {
+        self.predeclare_aggregate_names(&program.statements)
     }
 
-    pub(super) fn predeclare_aggregate_names(&mut self, statements: &[Stmt]) {
+    pub(super) fn predeclare_aggregate_names(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
         for statement in statements {
             let StmtKind::Let { name, expr, .. } = &statement.kind else {
                 continue;
@@ -747,25 +770,39 @@ impl Checker {
                 continue;
             }
 
-            let (kind, persistable, computes) = match &expr.kind {
-                ExprKind::StructDefinition {
-                    persistable,
-                    computes,
-                    ..
-                } => (AggregateKind::Struct, *persistable, *computes),
-                ExprKind::ClassDefinition { specifiers, .. } => (
-                    AggregateKind::Class,
-                    class_has_specifier(specifiers, "persistable"),
-                    false,
-                ),
-                ExprKind::ModuleDefinition { statements, .. } => {
-                    self.module_path.push(name.clone());
-                    self.predeclare_aggregate_names(statements);
-                    self.module_path.pop();
-                    continue;
-                }
-                _ => continue,
-            };
+            let (kind, persistable, computes, constructor_access, constructor_scopes) =
+                match &expr.kind {
+                    ExprKind::StructDefinition {
+                        persistable,
+                        computes,
+                        ..
+                    } => (
+                        AggregateKind::Struct,
+                        *persistable,
+                        *computes,
+                        AccessLevel::Public,
+                        Vec::new(),
+                    ),
+                    ExprKind::ClassDefinition { specifiers, .. } => {
+                        let (constructor_access, constructor_scopes) =
+                            class_constructor_access_from_specifiers(specifiers, statement.span)?;
+                        (
+                            AggregateKind::Class,
+                            class_has_specifier(specifiers, "persistable"),
+                            false,
+                            constructor_access,
+                            constructor_scopes,
+                        )
+                    }
+                    ExprKind::ModuleDefinition { statements, .. } => {
+                        self.module_path.push(name.clone());
+                        let result = self.predeclare_aggregate_names(statements);
+                        self.module_path.pop();
+                        result?;
+                        continue;
+                    }
+                    _ => continue,
+                };
             let qualified = self.current_qualified_name(name);
             self.struct_types.entry(qualified).or_insert(StructInfo {
                 kind,
@@ -779,10 +816,14 @@ impl Checker {
                 castable: false,
                 persistable,
                 computes,
+                constructor_effects: Vec::new(),
+                constructor_access,
+                constructor_scopes,
                 fields: Vec::new(),
                 methods: Vec::new(),
             });
         }
+        Ok(())
     }
 
     pub(super) fn predeclare_top_level_aggregate_values(
@@ -841,10 +882,13 @@ impl Checker {
                 }
                 StmtKind::ParametricType {
                     name,
-                    specifiers: _,
+                    specifiers,
                     params,
                     expr,
                 } => {
+                    self.validate_data_specifiers(name, specifiers, None, false, statement.span)?;
+                    access_level_from_specifiers(specifiers, "parametric type", statement.span)?;
+                    ensure_private_protected_access_only_in_classes(specifiers, statement.span)?;
                     let kind = parametric_type_kind(expr).ok_or_else(|| {
                         VerseError::check_at(
                             "parametric type definitions must define a class, struct, or interface",
@@ -941,10 +985,18 @@ impl Checker {
                 continue;
             }
 
-            let StmtKind::TypeAlias { name, target } = &statement.kind else {
+            let StmtKind::TypeAlias {
+                name,
+                specifiers,
+                target,
+            } = &statement.kind
+            else {
                 continue;
             };
 
+            self.validate_data_specifiers(name, specifiers, None, false, statement.span)?;
+            access_level_from_specifiers(specifiers, "type alias", statement.span)?;
+            ensure_private_protected_access_only_in_classes(specifiers, statement.span)?;
             let qualified = self.current_qualified_name(name);
             self.validate_type_alias_name(name, &qualified, statement.span)?;
             if self.type_alias_defs.contains_key(&qualified) {
@@ -1249,6 +1301,624 @@ impl Checker {
         self.ensure_module_member_accessible(module_name, access, member_name, span)
     }
 
+    pub(super) fn validate_public_module_surface_access(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        for statement in statements {
+            match &statement.kind {
+                StmtKind::Let {
+                    name,
+                    specifiers,
+                    annotation,
+                    expr,
+                } => {
+                    let access = access_level_from_specifiers(
+                        module_member_specifiers(specifiers, expr),
+                        "module member",
+                        statement.span,
+                    )?;
+                    let dependee = self.current_qualified_name(name);
+                    if let Some(annotation) = annotation {
+                        self.ensure_type_annotation_dependencies_accessible(
+                            &dependee, access, annotation,
+                        )?;
+                    }
+                    self.validate_public_expression_surface_access(&dependee, access, expr)?;
+                }
+                StmtKind::TypeAlias {
+                    name,
+                    specifiers,
+                    target,
+                } => {
+                    let access =
+                        access_level_from_specifiers(specifiers, "type alias", statement.span)?;
+                    let dependee = self.current_qualified_name(name);
+                    self.ensure_type_annotation_dependencies_accessible(&dependee, access, target)?;
+                }
+                StmtKind::ParametricType {
+                    name,
+                    specifiers,
+                    params,
+                    expr,
+                } => {
+                    let access = access_level_from_specifiers(
+                        specifiers,
+                        "parametric type",
+                        statement.span,
+                    )?;
+                    let dependee = self.current_qualified_name(name);
+                    let result = (|| {
+                        self.push_type_param_scope(params.iter().map(|param| {
+                            (
+                                param.name.clone(),
+                                Type::Param(param.name.clone(), param.constraint.clone()),
+                            )
+                        }));
+                        for param in params {
+                            self.ensure_type_param_constraint_dependencies_accessible(
+                                &dependee,
+                                access,
+                                &param.constraint,
+                                param.span,
+                            )?;
+                        }
+                        self.validate_public_expression_surface_access(&dependee, access, expr)
+                    })();
+                    self.pop_type_param_scope();
+                    result?;
+                }
+                StmtKind::ExtensionMethod(extension) => {
+                    let access = access_level_from_specifiers(
+                        &extension.method.effects,
+                        "extension method",
+                        extension.span,
+                    )?;
+                    let dependee = self.current_qualified_name(&extension.method.name);
+                    self.ensure_param_dependencies_accessible(
+                        &dependee,
+                        access,
+                        &extension.receiver,
+                    )?;
+                    self.ensure_function_signature_dependencies_accessible(
+                        &dependee,
+                        access,
+                        &extension.method.params,
+                        extension.method.return_type.as_ref(),
+                        extension.span,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_public_expression_surface_access(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        expr: &Expr,
+    ) -> Result<(), VerseError> {
+        match &expr.kind {
+            ExprKind::Function {
+                params,
+                return_type,
+                ..
+            } => self.ensure_function_signature_dependencies_accessible(
+                dependee,
+                access,
+                params,
+                return_type.as_ref(),
+                expr.span,
+            ),
+            ExprKind::StructDefinition { fields, .. } => {
+                if !access_requires_dependency_validation(access) {
+                    return Ok(());
+                }
+                for field in fields {
+                    let field_name = format!("{dependee}.{}", field.name);
+                    if let Some(annotation) = field.annotation.as_ref() {
+                        self.ensure_type_annotation_dependencies_accessible(
+                            &field_name,
+                            access,
+                            annotation,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            ExprKind::ClassDefinition {
+                base,
+                interfaces,
+                fields,
+                methods,
+                extension_methods,
+                ..
+            } => {
+                self.ensure_class_parent_dependencies_accessible(
+                    dependee, access, base, interfaces,
+                )?;
+                if !access_requires_dependency_validation(access) {
+                    return Ok(());
+                }
+                for field in fields {
+                    let member_access =
+                        access_level_from_specifiers(&field.specifiers, "class field", field.span)?;
+                    if access_requires_dependency_validation(member_access)
+                        && let Some(annotation) = field.annotation.as_ref()
+                    {
+                        let field_name = format!("{dependee}.{}", field.name);
+                        self.ensure_type_annotation_dependencies_accessible(
+                            &field_name,
+                            member_access,
+                            annotation,
+                        )?;
+                    }
+                }
+                for method in methods {
+                    let member_access =
+                        access_level_from_specifiers(&method.effects, "class method", method.span)?;
+                    if access_requires_dependency_validation(member_access) {
+                        let method_name = format!("{dependee}.{}", method.name);
+                        self.ensure_function_signature_dependencies_accessible(
+                            &method_name,
+                            member_access,
+                            &method.params,
+                            method.return_type.as_ref(),
+                            method.span,
+                        )?;
+                    }
+                }
+                for extension in extension_methods {
+                    let member_access = access_level_from_specifiers(
+                        &extension.method.effects,
+                        "extension method",
+                        extension.span,
+                    )?;
+                    if access_requires_dependency_validation(member_access) {
+                        let method_name = format!("{dependee}.{}", extension.method.name);
+                        self.ensure_param_dependencies_accessible(
+                            &method_name,
+                            member_access,
+                            &extension.receiver,
+                        )?;
+                        self.ensure_function_signature_dependencies_accessible(
+                            &method_name,
+                            member_access,
+                            &extension.method.params,
+                            extension.method.return_type.as_ref(),
+                            extension.span,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            ExprKind::InterfaceDefinition {
+                parents,
+                fields,
+                methods,
+                ..
+            } => {
+                self.ensure_class_parent_dependencies_accessible(dependee, access, &None, parents)?;
+                if !access_requires_dependency_validation(access) {
+                    return Ok(());
+                }
+                for field in fields {
+                    let member_access = access_level_from_specifiers(
+                        &field.specifiers,
+                        "interface field",
+                        field.span,
+                    )?;
+                    if access_requires_dependency_validation(member_access)
+                        && let Some(annotation) = field.annotation.as_ref()
+                    {
+                        let field_name = format!("{dependee}.{}", field.name);
+                        self.ensure_type_annotation_dependencies_accessible(
+                            &field_name,
+                            member_access,
+                            annotation,
+                        )?;
+                    }
+                }
+                for method in methods {
+                    let member_access = access_level_from_specifiers(
+                        &method.effects,
+                        "interface method",
+                        method.span,
+                    )?;
+                    if access_requires_dependency_validation(member_access) {
+                        let method_name = format!("{dependee}.{}", method.name);
+                        self.ensure_function_signature_dependencies_accessible(
+                            &method_name,
+                            member_access,
+                            &method.params,
+                            method.return_type.as_ref(),
+                            method.span,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn ensure_class_parent_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        base: &Option<TypeAnnotation>,
+        interfaces: &[TypeAnnotation],
+    ) -> Result<(), VerseError> {
+        if !access_requires_dependency_validation(access) {
+            return Ok(());
+        }
+        if let Some(base) = base {
+            self.ensure_type_annotation_dependencies_accessible(dependee, access, base)?;
+        }
+        for interface in interfaces {
+            self.ensure_type_annotation_dependencies_accessible(dependee, access, interface)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_function_signature_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        params: &[Param],
+        return_type: Option<&TypeAnnotation>,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if !access_requires_dependency_validation(access) {
+            return Ok(());
+        }
+        let type_params = collect_function_type_params(params)?;
+        self.push_type_param_scope(type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = (|| {
+            for type_param in &type_params {
+                self.ensure_type_param_constraint_dependencies_accessible(
+                    dependee,
+                    access,
+                    &type_param.constraint,
+                    type_param.span,
+                )?;
+            }
+            for param in params {
+                self.ensure_param_dependencies_accessible(dependee, access, param)?;
+            }
+            if let Some(return_type) = return_type {
+                self.ensure_type_annotation_dependencies_accessible(dependee, access, return_type)?;
+            }
+            Ok(())
+        })();
+        self.pop_type_param_scope();
+        result.map_err(|error: VerseError| {
+            if error.diagnostic().span.is_some() {
+                error
+            } else {
+                VerseError::check_at(error.to_string(), span)
+            }
+        })
+    }
+
+    fn ensure_param_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        param: &Param,
+    ) -> Result<(), VerseError> {
+        if let Some(annotation) = param.annotation.as_ref() {
+            self.ensure_type_annotation_dependencies_accessible(dependee, access, annotation)?;
+        }
+        if let ParamPattern::Tuple(items) = &param.pattern {
+            for item in items {
+                self.ensure_param_dependencies_accessible(dependee, access, item)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_type_param_constraint_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        constraint: &TypeParamConstraint,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let TypeParamConstraint::Subtype(parent) = constraint else {
+            return Ok(());
+        };
+        self.ensure_type_name_dependencies_accessible(dependee, access, parent, span)
+    }
+
+    fn ensure_type_annotation_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        annotation: &TypeAnnotation,
+    ) -> Result<(), VerseError> {
+        if !access_requires_dependency_validation(access) {
+            return Ok(());
+        }
+        self.ensure_type_name_dependencies_accessible(
+            dependee,
+            access,
+            &annotation.name,
+            annotation.span,
+        )?;
+        let value_type = self.type_name_to_type(annotation)?;
+        self.ensure_type_dependencies_accessible(dependee, access, &value_type, annotation.span)
+    }
+
+    fn ensure_type_name_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        name: &TypeName,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match name {
+            TypeName::Array(item) => {
+                if let Some(item) = item.as_deref() {
+                    self.ensure_type_name_dependencies_accessible(dependee, access, item, span)?;
+                }
+            }
+            TypeName::Map(key, value) | TypeName::WeakMap(key, value) => {
+                self.ensure_type_name_dependencies_accessible(dependee, access, key, span)?;
+                self.ensure_type_name_dependencies_accessible(dependee, access, value, span)?;
+            }
+            TypeName::Tuple(items) => {
+                for item in items {
+                    self.ensure_type_name_dependencies_accessible(dependee, access, item, span)?;
+                }
+            }
+            TypeName::Option(item) => {
+                self.ensure_type_name_dependencies_accessible(dependee, access, item, span)?;
+            }
+            TypeName::FunctionSignature {
+                params,
+                return_type,
+                ..
+            } => {
+                for param in params {
+                    self.ensure_type_name_dependencies_accessible(dependee, access, param, span)?;
+                }
+                self.ensure_type_name_dependencies_accessible(dependee, access, return_type, span)?;
+            }
+            TypeName::Applied { name, args } => {
+                if !is_official_parametric_type_name(name)
+                    && let Some(qualified) = self.resolve_parametric_type_reference(name)
+                {
+                    self.ensure_named_type_dependency_accessible(
+                        dependee, access, &qualified, span,
+                    )?;
+                }
+                for arg in args {
+                    self.ensure_type_name_dependencies_accessible(dependee, access, arg, span)?;
+                }
+            }
+            TypeName::Named(name) => {
+                if self.resolve_type_alias_dependency_name(name).is_none()
+                    && let Some(qualified) = self.resolve_type_dependency_name(name)
+                {
+                    self.ensure_named_type_dependency_accessible(
+                        dependee, access, &qualified, span,
+                    )?;
+                }
+            }
+            TypeName::Int
+            | TypeName::Float
+            | TypeName::Rational
+            | TypeName::Number
+            | TypeName::Bool
+            | TypeName::String
+            | TypeName::Message
+            | TypeName::Char
+            | TypeName::Char8
+            | TypeName::Char32
+            | TypeName::None
+            | TypeName::Any
+            | TypeName::Comparable
+            | TypeName::IntRange { .. }
+            | TypeName::Function => {}
+        }
+        Ok(())
+    }
+
+    fn ensure_type_dependencies_accessible(
+        &self,
+        dependee: &str,
+        access: AccessLevel,
+        value_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match value_type {
+            Type::Enum(name)
+            | Type::EnumType(name)
+            | Type::Struct(name)
+            | Type::StructType(name)
+            | Type::Class(name)
+            | Type::ClassType(name)
+            | Type::Interface(name)
+            | Type::InterfaceType(name) => {
+                self.ensure_named_type_dependency_accessible(dependee, access, name, span)?;
+            }
+            Type::ParametricType { name, .. } => {
+                self.ensure_named_type_dependency_accessible(dependee, access, name, span)?;
+            }
+            Type::Param(_, TypeParamConstraint::Subtype(parent)) => {
+                if let Some(parent_type) = self.type_name_to_type_name_for_assignability(parent) {
+                    self.ensure_type_dependencies_accessible(dependee, access, &parent_type, span)?;
+                }
+            }
+            Type::Array(item)
+            | Type::Option(item)
+            | Type::Event(Some(item))
+            | Type::Task(item)
+            | Type::Generator(Some(item))
+            | Type::CastableSubtype(item)
+            | Type::ConcreteSubtype(item)
+            | Type::ClassifiableSubset(item)
+            | Type::Modifier(item)
+            | Type::ModifierStack(item)
+            | Type::Awaitable(Some(item))
+            | Type::Signalable(item)
+            | Type::Subscribable(Some(item))
+            | Type::Listenable(Some(item)) => {
+                self.ensure_type_dependencies_accessible(dependee, access, item, span)?;
+            }
+            Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
+                self.ensure_type_dependencies_accessible(dependee, access, key, span)?;
+                self.ensure_type_dependencies_accessible(dependee, access, value, span)?;
+            }
+            Type::Tuple(items) => {
+                for item in items {
+                    self.ensure_type_dependencies_accessible(dependee, access, item, span)?;
+                }
+            }
+            Type::Function {
+                param_types,
+                param_specs,
+                return_type,
+                ..
+            } => {
+                if let Some(param_types) = param_types {
+                    for param_type in param_types {
+                        self.ensure_type_dependencies_accessible(
+                            dependee, access, param_type, span,
+                        )?;
+                    }
+                }
+                if let Some(param_specs) = param_specs {
+                    for param_spec in param_specs {
+                        self.ensure_param_spec_dependencies_accessible(
+                            dependee, access, param_spec, span,
+                        )?;
+                    }
+                }
+                self.ensure_type_dependencies_accessible(dependee, access, return_type, span)?;
+            }
+            Type::Overload(overloads) => {
+                for overload in overloads {
+                    self.ensure_type_dependencies_accessible(dependee, access, overload, span)?;
+                }
+            }
+            Type::Param(_, TypeParamConstraint::Type)
+            | Type::Int
+            | Type::IntRange(_)
+            | Type::Float
+            | Type::Rational
+            | Type::Number
+            | Type::Bool
+            | Type::String
+            | Type::Message
+            | Type::Char
+            | Type::Char8
+            | Type::Char32
+            | Type::None
+            | Type::Any
+            | Type::Comparable
+            | Type::Unknown
+            | Type::Never
+            | Type::Range
+            | Type::Module(_)
+            | Type::Event(None)
+            | Type::Generator(None)
+            | Type::Awaitable(None)
+            | Type::Subscribable(None)
+            | Type::Listenable(None) => {}
+        }
+        Ok(())
+    }
+
+    fn ensure_param_spec_dependencies_accessible(
+        &self,
+        dependee: &str,
+        access: AccessLevel,
+        param_spec: &ParamSpec,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_type_dependencies_accessible(dependee, access, &param_spec.value_type, span)?;
+        if let Some(items) = &param_spec.tuple_items {
+            for item in items {
+                self.ensure_param_spec_dependencies_accessible(dependee, access, item, span)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_type_dependency_name(&self, name: &str) -> Option<String> {
+        if self.resolve_type_param(name).is_some() {
+            return None;
+        }
+        if self.enum_types.contains_key(name)
+            || self.struct_types.contains_key(name)
+            || self.interface_types.contains_key(name)
+            || self.parametric_types.contains_key(name)
+        {
+            return Some(name.to_string());
+        }
+        if !name.contains('.') {
+            return self.resolve_contextual_type_name(name);
+        }
+        None
+    }
+
+    fn resolve_type_alias_dependency_name(&self, name: &str) -> Option<String> {
+        if self.type_alias_defs.contains_key(name) {
+            return Some(name.to_string());
+        }
+        if !name.contains('.') {
+            return self
+                .resolve_contextual_type_name(name)
+                .filter(|qualified| self.type_alias_defs.contains_key(qualified));
+        }
+        None
+    }
+
+    fn ensure_named_type_dependency_accessible(
+        &self,
+        dependee: &str,
+        dependee_access: AccessLevel,
+        dependency: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let dependency = dependency_base_name(dependency);
+        let Some(dependency_access) = self.module_member_dependency_access(dependency) else {
+            return Ok(());
+        };
+        if access_is_more_visible_than(dependee_access, dependency_access) {
+            return Err(VerseError::check_at(
+                format!(
+                    "definition `{dependee}` is {} but depends on `{dependency}`, which is {}",
+                    access_level_name(dependee_access),
+                    access_level_name(dependency_access)
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    fn module_member_dependency_access(&self, name: &str) -> Option<AccessLevel> {
+        let (module_name, member_name) = name.rsplit_once('.')?;
+        let module_info = self.module_types.get(module_name)?;
+        let access = module_info
+            .member_access
+            .get(member_name)
+            .copied()
+            .unwrap_or(AccessLevel::Internal);
+        Some(access)
+    }
+
     pub(super) fn current_qualified_name(&self, name: &str) -> String {
         if self.module_path.is_empty() {
             name.to_string()
@@ -1267,6 +1937,128 @@ impl Checker {
 
     pub(super) fn current_module_name(&self) -> Option<String> {
         (!self.module_path.is_empty()).then(|| self.module_path.join("."))
+    }
+
+    pub(super) fn module_member_scoped_accessible(
+        &self,
+        module_name: &str,
+        member_name: &str,
+    ) -> bool {
+        self.module_types
+            .get(module_name)
+            .and_then(|module| module.member_scopes.get(member_name))
+            .is_some_and(|scopes| self.scoped_accessible(scopes))
+    }
+
+    pub(super) fn scoped_accessible(&self, scopes: &[String]) -> bool {
+        let package_name = self.package_name.as_deref();
+        let current_module = self.current_module_name();
+        scopes.iter().any(|scope| {
+            package_name.is_some_and(|package| scoped_scope_contains(scope, package))
+                || current_module
+                    .as_deref()
+                    .is_some_and(|module| scoped_scope_contains(scope, module))
+        })
+    }
+
+    pub(super) fn current_module_is_same_or_child_of(&self, module_name: &str) -> bool {
+        self.current_module_name()
+            .as_deref()
+            .is_some_and(|current| scoped_scope_contains(module_name, current))
+    }
+
+    pub(super) fn module_or_parent_scoped_accessible(&self, module_name: &str) -> bool {
+        let mut current = Some(module_name);
+        while let Some(name) = current {
+            if self.module_types.get(name).is_some_and(|info| {
+                info.access == AccessLevel::Scoped && self.scoped_accessible(&info.scopes)
+            }) {
+                return true;
+            }
+            current = name.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        false
+    }
+
+    pub(super) fn inaccessible_scoped_enclosing_module(&self, module_name: &str) -> Option<String> {
+        let mut current = Some(module_name);
+        while let Some(name) = current {
+            if self.module_types.get(name).is_some_and(|info| {
+                info.access == AccessLevel::Scoped
+                    && !self.current_module_is_same_or_child_of(name)
+                    && !self.module_or_parent_scoped_accessible(name)
+            }) {
+                return Some(name.to_string());
+            }
+            current = name.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        None
+    }
+
+    pub(super) fn inaccessible_internal_enclosing_module(
+        &self,
+        module_name: &str,
+    ) -> Option<String> {
+        let mut current = Some(module_name);
+        while let Some(name) = current {
+            if let Some((parent, _)) = name.rsplit_once('.')
+                && self.module_types.get(name).is_some_and(|info| {
+                    info.access == AccessLevel::Internal
+                        && !self.current_module_is_same_or_child_of(parent)
+                        && !self.module_or_parent_scoped_accessible(parent)
+                })
+            {
+                return Some(name.to_string());
+            }
+            current = name.rsplit_once('.').map(|(parent, _)| parent);
+        }
+        None
+    }
+
+    pub(super) fn aggregate_or_parent_scoped_accessible(&self, aggregate_name: &str) -> bool {
+        let Some(module_name) = aggregate_module_name(aggregate_name) else {
+            return false;
+        };
+        let member_name = aggregate_unqualified_name(aggregate_name);
+        if self.module_types.get(module_name).is_some_and(|module| {
+            module.member_access.get(member_name) == Some(&AccessLevel::Scoped)
+                && module
+                    .member_scopes
+                    .get(member_name)
+                    .is_some_and(|scopes| self.scoped_accessible(scopes))
+        }) {
+            return true;
+        }
+        self.module_or_parent_scoped_accessible(module_name)
+    }
+
+    pub(super) fn inaccessible_scoped_enclosing_aggregate(
+        &self,
+        aggregate_name: &str,
+    ) -> Option<String> {
+        let module_name = aggregate_module_name(aggregate_name)?;
+        if let Some(inaccessible) = self.inaccessible_scoped_enclosing_module(module_name) {
+            return Some(inaccessible);
+        }
+
+        let member_name = aggregate_unqualified_name(aggregate_name);
+        if self.module_types.get(module_name).is_some_and(|module| {
+            module.member_access.get(member_name) == Some(&AccessLevel::Scoped)
+                && !self.current_module_is_same_or_child_of(module_name)
+                && !self.aggregate_or_parent_scoped_accessible(aggregate_name)
+        }) {
+            return Some(aggregate_name.to_string());
+        }
+
+        None
+    }
+
+    pub(super) fn inaccessible_internal_enclosing_aggregate(
+        &self,
+        aggregate_name: &str,
+    ) -> Option<String> {
+        let module_name = aggregate_module_name(aggregate_name)?;
+        self.inaccessible_internal_enclosing_module(module_name)
     }
 
     pub(super) fn resolve_contextual_type_name(&self, name: &str) -> Option<String> {
@@ -1368,6 +2160,27 @@ impl Checker {
         })
     }
 
+    pub(super) fn ensure_module_import_accessible(
+        &self,
+        module_name: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if let Some(scope) = self.inaccessible_scoped_enclosing_module(module_name) {
+            return Err(VerseError::check_at(
+                format!("module `{module_name}` is scoped to `{scope}`"),
+                span,
+            ));
+        }
+        if let Some(scope) = self.inaccessible_internal_enclosing_module(module_name) {
+            let parent = aggregate_module_name(&scope).unwrap_or("<root module>");
+            return Err(VerseError::check_at(
+                format!("module `{module_name}` is internal to module `{parent}`"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn current_scope_imports_mut(&mut self) -> &mut Vec<String> {
         self.scope_imports
             .last_mut()
@@ -1404,6 +2217,7 @@ impl Checker {
                     statement.span,
                 ));
             };
+            self.ensure_module_import_accessible(&module_name, statement.span)?;
             self.add_current_import(module_name);
         }
         Ok(())
@@ -1792,6 +2606,9 @@ impl Checker {
                         castable: false,
                         persistable: *persistable,
                         computes: *computes,
+                        constructor_effects: Vec::new(),
+                        constructor_access: AccessLevel::Public,
+                        constructor_scopes: Vec::new(),
                         fields: Vec::new(),
                         methods: Vec::new(),
                     },
@@ -1814,6 +2631,9 @@ impl Checker {
                         castable: false,
                         persistable: *persistable,
                         computes: *computes,
+                        constructor_effects: Vec::new(),
+                        constructor_access: AccessLevel::Public,
+                        constructor_scopes: Vec::new(),
                         fields,
                         methods: Vec::new(),
                     },
@@ -1830,6 +2650,8 @@ impl Checker {
                 blocks,
                 ..
             } => {
+                let (constructor_access, constructor_scopes) =
+                    class_constructor_access_from_specifiers(specifiers, info.span)?;
                 self.struct_types.insert(
                     instance_name.clone(),
                     StructInfo {
@@ -1844,6 +2666,9 @@ impl Checker {
                         castable: class_has_specifier(specifiers, "castable"),
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
+                        constructor_effects: class_constructor_effects(blocks),
+                        constructor_access,
+                        constructor_scopes: constructor_scopes.clone(),
                         fields: Vec::new(),
                         methods: Vec::new(),
                     },
@@ -1875,6 +2700,9 @@ impl Checker {
                         castable,
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
+                        constructor_effects: class_constructor_effects(blocks),
+                        constructor_access,
+                        constructor_scopes,
                         fields,
                         methods,
                     },

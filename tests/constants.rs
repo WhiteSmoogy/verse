@@ -178,9 +178,24 @@ fn rejects_localizes_data_specifier_without_message_annotation() {
 #[test]
 fn rejects_duplicate_data_specifier() {
     let error =
-        parse_source(r#"Tip<public><public>:message = "Hi""#).expect_err("source should fail");
+        parse_source(r#"Tip<native><native>:message = "Hi""#).expect_err("source should fail");
 
     assert!(error.to_string().contains("duplicate data specifier"));
+}
+
+#[test]
+fn rejects_duplicate_data_access_specifier() {
+    let error =
+        parse_source(r#"Tip<public><public>:message = "Hi""#).expect_err("source should fail");
+
+    assert!(error.to_string().contains("Duplicate access levels"));
+}
+
+#[test]
+fn rejects_conflicting_data_access_specifiers() {
+    let error = check_source("Answer<public><internal>:int = 42").expect_err("source should fail");
+
+    assert!(error.to_string().contains("Conflicting access levels"));
 }
 
 #[test]

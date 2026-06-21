@@ -103,6 +103,55 @@ Observed + Hits
 }
 
 #[test]
+fn rejects_return_in_failure_context() {
+    let error = check_source(
+        r#"
+Choose():int =
+    if:
+        return 1
+        true?
+    then:
+        2
+    else:
+        3
+
+Choose()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Explicit return out of a failure context is not allowed")
+    );
+}
+
+#[test]
+fn rejects_break_in_failure_context() {
+    let error = check_source(
+        r#"
+var Hits:int = 0
+loop:
+    if:
+        break
+        true?
+    then:
+        set Hits = 1
+    else:
+        set Hits = 2
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`break` may not be used in a failure context")
+    );
+}
+
+#[test]
 fn evaluates_official_comparison_success_value_in_failure_context() {
     let source = r#"
 Greater := if (Value := 5 > 0). Value else. 0
@@ -328,10 +377,67 @@ Handler:type{_()<transacts>:int} = Read
 }
 
 #[test]
-fn rejects_decides_function_without_transacts_effect() {
+fn checks_decides_function_without_call_effect() {
+    let source = r#"
+Pick(Value:int)<decides>:int = Value
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_computes_function_call_in_failure_context() {
+    let source = r#"
+Pick(Value:int)<decides><computes>:int = Value
+if (Result := Pick[42]). Result else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_reads_function_call_in_failure_context() {
+    let source = r#"
+Pick(Value:int)<decides><reads>:int = Value
+if (Result := Pick[42]). Result else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_converges_function_call_in_failure_context() {
+    let source = r#"
+Pick(Value:int)<decides><converges>:int = Value
+if (Result := Pick[42]). Result else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_decides_no_rollback_function_call_in_failure_context() {
     let error = check_source(
         r#"
 Pick(Value:int)<decides>:int = Value
+if (Result := Pick[42]). Result else. 0
 "#,
     )
     .expect_err("source should fail");
@@ -339,7 +445,41 @@ Pick(Value:int)<decides>:int = Value
     assert!(
         error
             .to_string()
-            .contains("function with `<decides>` must also have `<transacts>`")
+            .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_decides_writes_function_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Pick(Value:int)<decides><writes>:int = Value
+if (Result := Pick[42]). Result else. 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_decides_allocates_function_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Pick(Value:int)<decides><allocates>:int = Value
+if (Result := Pick[42]). Result else. 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
     );
 }
 
@@ -350,6 +490,47 @@ Read()<computes>:int = 40
 if:
     Value := Read()
     Value > 0
+then:
+    Value + 2
+else:
+    0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_reads_function_call_in_failure_context() {
+    let source = r#"
+Read()<reads>:int = 40
+if:
+    Value := Read()
+    Value = 40
+then:
+    Value + 2
+else:
+    0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_computes_function_typed_value_call_in_failure_context() {
+    let source = r#"
+Read()<computes>:int = 40
+Handler:type{_()<computes>:int} = Read
+if:
+    Value := Handler()
+    Value = 40
 then:
     Value + 2
 else:
@@ -384,6 +565,172 @@ else:
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
+    );
+}
+
+#[test]
+fn evaluates_varies_function_call_in_failure_context() {
+    let source = r#"
+var Total:int = 0
+Next()<varies>:int =
+    set Total += 1
+    Total
+
+if:
+    Value := Next()
+    Value = 1
+then:
+    Total + 41
+else:
+    0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_no_rollback_function_typed_value_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Read():int = 42
+Handler:type{_():int} = Read
+if:
+    Value := Handler()
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_writes_function_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Write()<writes>:int = 42
+if:
+    Value := Write()
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_writes_function_typed_value_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Write()<writes>:int = 42
+Handler:type{_()<writes>:int} = Write
+if:
+    Value := Handler()
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_allocates_function_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Make()<allocates>:int = 42
+if:
+    Value := Make()
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_allocates_function_typed_value_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Make()<allocates>:int = 42
+Handler:type{_()<allocates>:int} = Make
+if:
+    Value := Handler()
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_decides_allocates_function_typed_value_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Pick(Value:int)<decides><allocates>:int = Value
+Handler:type{_(:int)<decides><allocates>:int} = Pick
+if:
+    Value := Handler[42]
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
     );
 }
 
@@ -429,6 +776,30 @@ else:
         error
             .to_string()
             .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_writes_overload_call_in_failure_context() {
+    let error = check_source(
+        r#"
+Pick(Value:int)<writes>:int = Value
+Pick(Value:string)<computes>:int = 0
+if:
+    Value := Pick(42)
+    Value = 42
+then:
+    Value
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
     );
 }
 
@@ -508,6 +879,42 @@ else:
             .to_string()
             .contains("function with `<no_rollback>` effect cannot be called in a failure context")
     );
+}
+
+#[test]
+fn rejects_no_rollback_special_call_in_failure_context() {
+    let error = check_source(
+        r#"
+if:
+    Values := Concatenate(array{array{1}, array{2}})
+    Values[0] = 1
+then:
+    42
+else:
+    0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_special_transacts_call_in_computes_failure_context() {
+    let error = check_source(
+        r#"
+Use()<computes>:?[]int = option{Shuffle(array{1})}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
 }
 
 #[test]

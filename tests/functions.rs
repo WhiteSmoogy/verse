@@ -280,6 +280,50 @@ MakeAdder(40)(2)
 }
 
 #[test]
+fn rejects_local_binding_access_specifiers() {
+    for access in ["public", "internal", "protected", "private"] {
+        let source = format!(
+            r#"
+Make():int =
+    Local<{access}>:int = 42
+    Local
+
+Make()
+"#
+        );
+        let error = check_source(&source).expect_err("source should fail");
+
+        assert!(
+            error.to_string().contains(&format!(
+                "local definition `Local` cannot use access specifier `<{access}>`"
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_local_function_access_specifier() {
+    let error = check_source(
+        r#"
+Make():int =
+    Helper<private>():int = 42
+    Helper()
+
+Make()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("local definition `Helper` cannot use access specifier `<private>`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn evaluates_function_type_annotations() {
     let source = r#"
 Double(X:int):int = X * 2
@@ -356,6 +400,83 @@ Handler()
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_computes_function_type_assignment() {
+    let source = r#"
+Pick(Value:int)<decides><computes>:int = Value
+Handler:type{_(:int)<decides><computes>:int} = Pick
+if (Value := Handler[42]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_function_type_effect_hierarchy_to_transacts() {
+    let source = r#"
+Pick(Value:int)<decides><computes>:int = Value
+Handler:type{_(:int)<decides><transacts>:int} = Pick
+if (Value := Handler[42]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_function_type_effect_hierarchy_to_computes() {
+    let source = r#"
+Pick(Value:int)<decides><converges>:int = Value
+Handler:type{_(:int)<decides><computes>:int} = Pick
+if (Value := Handler[42]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_decides_reads_function_type_assignment() {
+    let source = r#"
+Pick(Value:int)<decides><reads>:int = Value
+Handler:type{_(:int)<decides><reads>:int} = Pick
+if (Value := Handler[42]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_decides_function_type_effect_hierarchy_widening() {
+    let error = check_source(
+        r#"
+Pick(Value:int)<decides><transacts>:int = Value
+Handler:type{_(:int)<decides><computes>:int} = Pick
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("annotated as `function/1<decides><computes> -> int`")
     );
 }
 
@@ -444,6 +565,52 @@ fn effect_set_models_call_capability_lattice() {
     assert!(reads.call_allowed_effects().contains(&Effect::Computes));
     assert!(!reads.call_allowed_effects().contains(&Effect::Writes));
 
+    let reads_writes = EffectSet::from_names(["reads", "writes"]);
+    assert!(reads_writes.call_allowed_effects().contains(&Effect::Reads));
+    assert!(
+        reads_writes
+            .call_allowed_effects()
+            .contains(&Effect::Writes)
+    );
+    assert!(
+        reads_writes
+            .call_required_effects()
+            .contains(&Effect::Reads)
+    );
+    assert!(
+        reads_writes
+            .call_required_effects()
+            .contains(&Effect::Writes)
+    );
+
+    let writes_allocates = EffectSet::from_names(["writes", "allocates"]);
+    assert!(
+        writes_allocates
+            .call_allowed_effects()
+            .contains(&Effect::Writes)
+    );
+    assert!(
+        writes_allocates
+            .call_allowed_effects()
+            .contains(&Effect::Allocates)
+    );
+    assert!(
+        writes_allocates
+            .call_required_effects()
+            .contains(&Effect::Writes)
+    );
+    assert!(
+        writes_allocates
+            .call_required_effects()
+            .contains(&Effect::Allocates)
+    );
+
+    let varies = EffectSet::from_names(["varies"]);
+    assert!(varies.call_allowed_effects().contains(&Effect::Transacts));
+    assert!(varies.call_allowed_effects().contains(&Effect::Reads));
+    assert!(varies.call_allowed_effects().contains(&Effect::Writes));
+    assert!(varies.call_allowed_effects().contains(&Effect::Allocates));
+
     let no_rollback = EffectSet::from_names(std::iter::empty::<&str>());
     assert!(no_rollback.has_no_rollback());
     assert_eq!(no_rollback.render_declared(), "<no_rollback>");
@@ -462,6 +629,46 @@ fn effect_set_models_function_type_assignability() {
     let expected = EffectSet::from_names(["transacts", "decides"]);
     let actual = EffectSet::from_names(["transacts"]);
     assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["transacts", "decides"]);
+    let actual = EffectSet::from_names(["computes", "decides"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["computes", "decides"]);
+    let actual = EffectSet::from_names(["converges", "decides"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["computes", "decides"]);
+    let actual = EffectSet::from_names(["transacts", "decides"]);
+    assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["transacts"]);
+    let actual = EffectSet::from_names(["reads", "writes"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["writes"]);
+    let actual = EffectSet::from_names(["reads", "writes"]);
+    assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["transacts"]);
+    let actual = EffectSet::from_names(["writes", "allocates"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["writes"]);
+    let actual = EffectSet::from_names(["writes", "allocates"]);
+    assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["allocates"]);
+    let actual = EffectSet::from_names(["writes", "allocates"]);
+    assert!(!expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["transacts"]);
+    let actual = EffectSet::from_names(["varies"]);
+    assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["varies"]);
+    let actual = EffectSet::from_names(["transacts"]);
+    assert!(expected.assignable_from(&actual));
 }
 
 #[test]
@@ -522,24 +729,42 @@ Pure()<computes>:int = Update()
     )
     .expect_err("source should fail");
 
-    assert!(error.to_string().contains(
-        "function with <computes> effect cannot call function requiring <transacts> effect"
-    ));
+    assert!(
+        error.to_string().contains(
+            "function with <computes> effect cannot call function requiring <transacts> effect"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
-fn rejects_varies_function_calling_transacts_function() {
-    let error = check_source(
-        r#"
+fn evaluates_varies_function_calling_transacts_function() {
+    let source = r#"
 Update()<transacts>:int = 42
 ReadVarying()<varies>:int = Update()
-"#,
-    )
-    .expect_err("source should fail");
+ReadVarying()
+"#;
 
-    assert!(error.to_string().contains(
-        "function with <varies> effect cannot call function requiring <transacts> effect"
-    ));
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_varies_function_calling_no_rollback_function() {
+    let source = r#"
+Read():int = 42
+ReadVarying()<varies>:int = Read()
+ReadVarying()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
 }
 
 #[test]
@@ -551,9 +776,12 @@ Use()<computes>:float = GetRandomFloat(0.0, 1.0)
     )
     .expect_err("source should fail");
 
-    assert!(error.to_string().contains(
-        "function with <computes> effect cannot call function requiring <transacts> effect"
-    ));
+    assert!(
+        error.to_string().contains(
+            "function with <computes> effect cannot call function requiring <transacts> effect"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
@@ -570,6 +798,89 @@ Read()<reads>:int = Write()
         error.to_string().contains(
             "function with <reads> effect cannot call function requiring <writes> effect"
         )
+    );
+}
+
+#[test]
+fn checks_combined_memory_effect_call_capabilities() {
+    let source = r#"
+Read()<reads>:int = 40
+ReadThenWrite()<reads><writes>:int =
+    var Total:int = Read()
+    set Total += 2
+    Total
+Use()<transacts>:int = ReadThenWrite()
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(0),
+            vec!["transacts".to_string()],
+            Some(Vec::new()),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn rejects_writes_function_calling_reads_writes_function() {
+    let error = check_source(
+        r#"
+ReadWrite()<reads><writes>:int = 42
+Use()<writes>:int = ReadWrite()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "function with <writes> effect cannot call function requiring <reads> effect"
+        )
+    );
+}
+
+#[test]
+fn checks_combined_write_allocate_effect_call_capabilities() {
+    let source = r#"
+token := class<unique>:
+    ID:int = 0
+
+MakeAndWrite()<writes><allocates>:int =
+    var Total:int = 0
+    Token := token{ID := 40}
+    set Total = Token.ID + 2
+    Total
+
+Use()<transacts>:int = MakeAndWrite()
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(0),
+            vec!["transacts".to_string()],
+            Some(Vec::new()),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn rejects_writes_function_calling_writes_allocates_function() {
+    let error = check_source(
+        r#"
+MakeAndWrite()<writes><allocates>:int = 42
+Use()<writes>:int = MakeAndWrite()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "function with <writes> effect cannot call function requiring <allocates> effect"
+        ),
+        "{error}"
     );
 }
 
@@ -617,9 +928,33 @@ fn rejects_unknown_function_name_specifier() {
 #[test]
 fn rejects_duplicate_function_name_specifier() {
     let error =
-        parse_source("Double<public><public>(X:int):int = X").expect_err("source should fail");
+        parse_source("Double<final><final>(X:int):int = X").expect_err("source should fail");
 
     assert!(error.to_string().contains("duplicate function specifier"));
+}
+
+#[test]
+fn rejects_duplicate_function_access_specifier() {
+    let error =
+        parse_source("Double<public><public>(X:int):int = X").expect_err("source should fail");
+
+    assert!(error.to_string().contains("Duplicate access levels"));
+}
+
+#[test]
+fn rejects_conflicting_function_access_specifiers() {
+    let error =
+        check_source("Double<public><internal>(X:int):int = X").expect_err("source should fail");
+
+    assert!(error.to_string().contains("Conflicting access levels"));
+}
+
+#[test]
+fn rejects_conflicting_extension_method_access_specifiers() {
+    let error = check_source("(Value:int).Bump<public><internal>():int = Value")
+        .expect_err("source should fail");
+
+    assert!(error.to_string().contains("Conflicting access levels"));
 }
 
 #[test]
@@ -1394,6 +1729,29 @@ fn checks_official_result_constructor_inferred_types() {
 }
 
 #[test]
+fn rejects_result_constructor_no_rollback_call_from_computes_function() {
+    let success_error = check_source(
+        r#"
+Use()<computes>:result(int, any) = MakeSuccess(42)
+"#,
+    )
+    .expect_err("source should fail");
+    assert!(success_error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <no_rollback> effect"
+    ));
+
+    let error_error = check_source(
+        r#"
+Use()<computes>:result(any, string) = MakeError("no")
+"#,
+    )
+    .expect_err("source should fail");
+    assert!(error_error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <no_rollback> effect"
+    ));
+}
+
+#[test]
 fn rejects_official_result_get_success_parentheses_call() {
     let error = check_source(
         r#"
@@ -1505,6 +1863,34 @@ Hero.Name + ":" + str(Hero.Health) + ":" + Hero.Class + ":" + str(Hero.Level)
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::String
+    );
+}
+
+#[test]
+fn rejects_constructor_delegation_effect_mismatch() {
+    let error = check_source(
+        r#"
+entity := class:
+    Name:string
+
+character := class(entity):
+    Level:int = 42
+
+MakeEntity<constructor>(Name:string)<transacts>:entity =
+    entity{Name := Name}
+
+MakeCharacter<constructor>()<computes>:character =
+    character:
+        MakeEntity<constructor>("Ava")
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "function with <computes> effect cannot call function requiring <transacts> effect"
+        ),
+        "{error}"
     );
 }
 

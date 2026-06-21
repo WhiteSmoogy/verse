@@ -1728,6 +1728,10 @@ impl<'semantic> Lowerer<'semantic> {
                 state.last_value = state.none();
                 Ok(())
             }
+            StmtKind::ScopedAccessLevel { .. } => {
+                state.last_value = state.none();
+                Ok(())
+            }
             StmtKind::ParametricType {
                 name,
                 specifiers,
@@ -2142,6 +2146,10 @@ impl<'semantic> Lowerer<'semantic> {
                 Ok(())
             }
             StmtKind::TypeAlias { .. } => {
+                state.last_value = state.none();
+                Ok(())
+            }
+            StmtKind::ScopedAccessLevel { .. } => {
                 state.last_value = state.none();
                 Ok(())
             }
@@ -8017,6 +8025,7 @@ impl<'semantic> Lowerer<'semantic> {
             | StmtKind::Using { .. }
             | StmtKind::Break
             | StmtKind::TypeAlias { .. }
+            | StmtKind::ScopedAccessLevel { .. }
             | StmtKind::ParametricType { .. }
             | StmtKind::ExtensionMethod(_) => false,
         }
@@ -8111,7 +8120,10 @@ fn collect_capture_names_stmt(stmt: &Stmt, bound: &mut HashSet<String>, names: &
             collect_capture_names_expr(expr, bound, names);
             bound.insert(name.clone());
         }
-        StmtKind::Using { .. } | StmtKind::TypeAlias { .. } | StmtKind::Break => {}
+        StmtKind::Using { .. }
+        | StmtKind::TypeAlias { .. }
+        | StmtKind::ScopedAccessLevel { .. }
+        | StmtKind::Break => {}
     }
 }
 

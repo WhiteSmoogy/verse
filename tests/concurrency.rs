@@ -48,6 +48,21 @@ Use(Stack:modifier_stack(int), Modifier:modifier(int))<transacts>:void =
 }
 
 #[test]
+fn rejects_modifier_stack_add_modifier_in_computes_function() {
+    let error = check_source(
+        r#"
+Use(Stack:modifier_stack(int), Modifier:modifier(int))<computes>:cancelable =
+    Stack.AddModifier(Modifier, 1)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
+}
+
+#[test]
 fn checks_modifier_stack_assignable_to_modifier_interface() {
     let source = r#"
 AsModifier(Stack:modifier_stack(int)):modifier(int) = Stack
@@ -760,6 +775,35 @@ Notify(Event:event(int))<decides><transacts>:void = Event.Signal(42)
             .to_string()
             .contains("function with `<no_rollback>` effect cannot be called in a failure context")
     );
+}
+
+#[test]
+fn rejects_official_signalable_signal_in_computes_function() {
+    let error = check_source(
+        r#"
+Notify(Source:signalable(int))<computes>:void = Source.Signal(42)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <no_rollback> effect"
+    ));
+}
+
+#[test]
+fn rejects_official_subscribable_subscribe_in_computes_function() {
+    let error = check_source(
+        r#"
+Handler(Value:int):void = {}
+SubscribeTo(Source:subscribable(int))<computes>:cancelable = Source.Subscribe(Handler)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
 }
 
 #[test]

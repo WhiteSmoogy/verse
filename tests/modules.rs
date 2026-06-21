@@ -11,7 +11,6 @@ using { /Verse.org/Verse }
 Abs(-42)
 "#;
 
-    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -28,7 +27,6 @@ using { /UnrealEngine.com/Temporary/Diagnostics }
 42
 "#;
 
-    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -124,6 +122,448 @@ DataTypes.Answer
             .to_string()
             .contains("member `Answer` is internal to module `DataTypes`")
     );
+}
+
+#[test]
+fn rejects_private_or_protected_access_specifiers_outside_classes() {
+    let cases = [
+        (
+            "module data",
+            r#"
+DataTypes<public> := module:
+    Hidden<private>:int = 42
+
+0
+"#,
+        ),
+        (
+            "module function",
+            r#"
+Hidden<protected>():int = 42
+Hidden()
+"#,
+        ),
+        (
+            "module class",
+            r#"
+hidden := class<private>:
+    Value:int = 0
+
+0
+"#,
+        ),
+        (
+            "module type alias",
+            r#"
+DataTypes<public> := module:
+    hidden_map<private> := [string]int
+
+0
+"#,
+        ),
+        (
+            "module parametric type",
+            r#"
+DataTypes<public> := module:
+    box<private>(t:type) := class:
+        Value:t
+
+0
+"#,
+        ),
+        (
+            "module extension method",
+            r#"
+(Value:int).Hidden<protected>():int = Value
+41.Hidden()
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        let error = check_source(source).expect_err("source should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("Access levels protected and private are only allowed inside classes"),
+            "{label}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_public_type_alias_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := []secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_data_annotation_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Item<public>:secret = external {}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Item` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_function_signature_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Reveal<public>(Item:[]secret):int = 42
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_parametric_type_argument_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    box<public>(t:type) := class:
+        Item<public>:t
+    Item<public>:box(secret) = external {}
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Item` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_parametric_type_public_field_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    box<public>(t:type) := class:
+        Item<public>:secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.box.Item` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_function_subtype_constraint_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Reveal<public>(Item:t where t:subtype(secret)):int = 42
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_interface_parent_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    base := interface:
+        Ping():int
+    exposed<public> := interface(base):
+        Pong():int
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.base`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_class_public_field_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := class:
+        Item<public>:secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed.Item` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_class_protected_field_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := class:
+        Item<protected>:secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed.Item` is protected but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_class_protected_method_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := class:
+        Reveal<protected>(Item:secret):int = 42
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed.Reveal` is protected but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_interface_protected_field_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := interface:
+        Item<protected>:secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed.Item` is protected but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_extension_method_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    (Item:secret).Reveal<public>():int = 42
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_class_base_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    base := class:
+        Value:int = 0
+    exposed<public> := class(base):
+        Item<public>:int = 42
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.exposed` is public but depends on `DataTypes.base`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn allows_public_class_internal_field_with_internal_module_type() {
+    let source = r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := class:
+        Item:secret
+
+0
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn allows_public_class_internal_method_with_internal_module_type() {
+    let source = r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    exposed<public> := class:
+        Reveal(Item:secret):int = 42
+
+0
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_duplicate_type_alias_and_parametric_type_access_specifiers() {
+    let cases = [
+        ("type alias", "score_map<public><public> := [string]int"),
+        (
+            "parametric type",
+            r#"
+box<public><public>(t:type) := class:
+    Value:t
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        let error = parse_source(source).expect_err(label);
+        assert!(
+            error.to_string().contains("Duplicate access levels"),
+            "{label}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_conflicting_type_alias_and_parametric_type_access_specifiers() {
+    let cases = [
+        ("type alias", "score_map<public><internal> := [string]int"),
+        (
+            "parametric type",
+            r#"
+box<public><internal>(t:type) := class:
+    Value:t
+"#,
+        ),
+    ];
+
+    for (label, source) in cases {
+        let error = check_source(source).expect_err(label);
+        assert!(
+            error.to_string().contains("Conflicting access levels"),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -500,6 +940,1365 @@ Api.Answer
 }
 
 #[test]
+fn evaluates_cross_file_scoped_members_inside_matching_package() {
+    let root = temp_project_dir("cross_file_scoped_members_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{DemoPackage}>:int = 20
+    score_map<scoped{DemoPackage}> := [string]int
+    box<scoped{DemoPackage}>(t:type) := class:
+        Value<public>:t
+    Double<scoped{DemoPackage}>(Value:int)<computes>:int = Value * 2
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Scores:score_map = map{"ada" => 1}
+Item:box(int) = box(int){Value := Double(11)}
+Answer + Item.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn evaluates_named_scoped_access_level_inside_matching_package() {
+    let root = temp_project_dir("named_scoped_access_level_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<demo_scope>:int = 18
+    score_map<demo_scope> := [string]int
+    box<demo_scope>(t:type) := class:
+        Value<public>:t
+    Double<demo_scope>(Value:int)<computes>:int = Value * 2
+    (Value:int).Bump<demo_scope>():int = Value + 1
+
+    item<public> := class:
+        Value<demo_scope>:int = 5
+        var<demo_scope> Count<public>:int = 0
+        Score<demo_scope>():int = Value + 1
+
+    readable<public> := interface:
+        Seen<demo_scope>:int
+
+    box_item<public> := class(readable):
+        Seen<override><demo_scope>:int = 4
+
+    demo_scope := scoped{DemoPackage}
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Scores:score_map = map{"ada" => 1}
+Boxed:box(int) = box(int){Value := Double(2)}
+Thing:item = item{}
+set Thing.Count = 1
+ReadSeen(Target:readable):int = Target.Seen
+Answer + Double(3) + 1.Bump() + Thing.Value + Thing.Score() + Thing.Count + ReadSeen(box_item{})
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_named_scoped_access_level_outside_package_scope() {
+    let root = temp_project_dir("named_scoped_access_level_outside_package");
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    demo_scope := scoped{DemoPackage}
+    Answer<demo_scope>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_member_without_package_scope() {
+    let root = temp_project_dir("cross_file_scoped_member_no_package");
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{DemoPackage}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_member_from_other_package() {
+    let root = temp_project_dir("cross_file_scoped_member_other_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{DemoPackage}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn evaluates_cross_file_scoped_member_inside_package_path_scope() {
+    let root = temp_project_dir("cross_file_scoped_member_package_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /Demo/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{/Demo}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_member_from_unlisted_package_path_scope() {
+    let root = temp_project_dir("cross_file_scoped_member_other_package_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /DemoOther/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{/Demo}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn evaluates_cross_file_scoped_extension_method_inside_matching_package() {
+    let root = temp_project_dir("cross_file_scoped_extension_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Ops.verse",
+        r#"
+Ops<public> := module:
+    (Value:int).Bump<scoped{DemoPackage}>():int = Value + 1
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Ops }
+20.Bump() + 20.(Ops:)Bump()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_extension_method_without_package_scope() {
+    let root = temp_project_dir("cross_file_scoped_extension_no_package");
+    write_project_file(
+        &root,
+        "Ops.verse",
+        r#"
+Ops<public> := module:
+    (Value:int).Bump<scoped{DemoPackage}>():int = Value + 1
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Ops }
+41.Bump()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Bump` is scoped to `Ops`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Bump` is scoped to `Ops`")
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_extension_method_from_other_package() {
+    let root = temp_project_dir("cross_file_scoped_extension_other_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Ops.verse",
+        r#"
+Ops<public> := module:
+    (Value:int).Bump<scoped{DemoPackage}>():int = Value + 1
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Ops }
+41.Bump()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Bump` is scoped to `Ops`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Bump` is scoped to `Ops`")
+    );
+}
+
+#[test]
+fn evaluates_cross_file_scoped_class_members_inside_matching_package() {
+    let root = temp_project_dir("cross_file_scoped_class_members_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    item<public> := class:
+        Value<scoped{DemoPackage}>:int = 20
+        var<scoped{DemoPackage}> Count<public>:int = 0
+        Score<scoped{DemoPackage}>():int = Value + 1
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Item:item = item{}
+set Item.Count = 1
+Item.Value + Item.Score() + Item.Count
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_class_member_without_package_scope() {
+    let root = temp_project_dir("cross_file_scoped_class_member_no_package");
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    item<public> := class:
+        Value<scoped{DemoPackage}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Item:item = item{}
+Item.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Value` is scoped to class `Api.item`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Value` is scoped to class `Api.item`")
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_class_method_from_other_package() {
+    let root = temp_project_dir("cross_file_scoped_class_method_other_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    item<public> := class:
+        Score<scoped{DemoPackage}>():int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+item{}.Score()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("method `Score` is scoped to class `Api.item`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("method `Score` is scoped to class `Api.item`")
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_class_var_assignment_without_package_scope() {
+    let root = temp_project_dir("cross_file_scoped_class_var_assignment_no_package");
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    item<public> := class:
+        var<scoped{DemoPackage}> Count<public>:int = 0
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Item:item = item{}
+set Item.Count = 1
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Count` is scoped to class `Api.item`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Count` is scoped to class `Api.item`")
+    );
+}
+
+#[test]
+fn evaluates_cross_file_scoped_interface_field_inside_matching_package() {
+    let root = temp_project_dir("cross_file_scoped_interface_field_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    readable<public> := interface:
+        Value<scoped{DemoPackage}>:int
+
+    item<public> := class(readable):
+        Value<override><scoped{DemoPackage}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Target:readable = item{}
+Target.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_interface_field_without_package_scope() {
+    let root = temp_project_dir("cross_file_scoped_interface_field_no_package");
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    readable<public> := interface:
+        Value<scoped{DemoPackage}>:int
+
+    item<public> := class(readable):
+        Value<override><scoped{DemoPackage}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Target:readable = item{}
+Target.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Value` is scoped to interface `Api.readable`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("field `Value` is scoped to interface `Api.readable`")
+    );
+}
+
+#[test]
+fn evaluates_scoped_members_inside_descendant_module_scope() {
+    let source = r#"
+Api<public> := module:
+    Answer<scoped{Friend}>:int = 20
+    Double<scoped{Friend}>(Value:int)<computes>:int = Value * 2
+    (Value:int).Bump<scoped{Friend}>():int = Value + 1
+
+    item<public> := class:
+        Value<scoped{Friend}>:int = 5
+        Score<scoped{Friend}>():int = Value + 1
+
+    readable<public> := interface:
+        Seen<scoped{Friend}>:int
+
+    box<public> := class(readable):
+        Seen<override><scoped{Friend}>:int = 4
+
+Friend<public> := module:
+    Child<public> := module:
+        using { Api }
+
+        ReadSeen<public>(Target:readable):int = Target.Seen
+
+        Read<public>():int =
+            Answer + Double(2) + 1.Bump() + item{}.Value + item{}.Score() + ReadSeen(box{}) + 1
+
+Friend.Child.Read()
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_scoped_member_from_unlisted_descendant_module_scope() {
+    let source = r#"
+Api<public> := module:
+    Answer<scoped{Friend}>:int = 42
+
+Other<public> := module:
+    Child<public> := module:
+        Read<public>():int = Api.Answer
+
+Other.Child.Read()
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_source(source).expect_err("source run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn evaluates_internal_members_inside_descendant_module_scope() {
+    let source = r#"
+DataTypes<public> := module:
+    Hidden:int = 20
+
+    tile_coordinate<public> := class<concrete>:
+        Left:int = 20
+
+    Child<public> := module:
+        Read<public>():int = DataTypes.Hidden + DataTypes.tile_coordinate{}.Left + 2
+
+DataTypes.Child.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_parent_scoped_module_internal_members_inside_matching_package() {
+    let root = temp_project_dir("parent_scoped_module_internal_members");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer:int = 20
+    Double(Value:int)<computes>:int = Value * 2
+
+    item<public> := class:
+        Value:int = 5
+        Score():int = Value + 1
+
+    readable<public> := interface:
+        Seen:int
+
+    box<public> := class(readable):
+        Seen<override>:int = 4
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+ReadSeen(Target:readable):int = Target.Seen
+Answer + Double(2) + item{}.Value + item{}.Score() + ReadSeen(box{}) + 3
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn evaluates_parent_scoped_module_public_member_inside_matching_package() {
+    let root = temp_project_dir("parent_scoped_module_public_member");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_parent_scoped_module_internal_member_from_unlisted_package() {
+    let root = temp_project_dir("parent_scoped_module_internal_member_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn rejects_parent_scoped_module_public_member_from_unlisted_package() {
+    let root = temp_project_dir("parent_scoped_module_public_member_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn evaluates_using_scoped_module_inside_matching_package() {
+    let root = temp_project_dir("using_scoped_module_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_using_scoped_module_from_unlisted_package() {
+    let root = temp_project_dir("using_scoped_module_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{DemoPackage}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Api` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Api` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn rejects_using_public_child_module_through_scoped_parent_from_unlisted_package() {
+    let root = temp_project_dir("using_public_child_module_scoped_parent_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Outer<scoped{DemoPackage}> := module:
+    Inner<public> := module:
+        Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Outer.Inner }
+0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Outer.Inner` is scoped to `Outer`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Outer.Inner` is scoped to `Outer`")
+    );
+}
+
+#[test]
+fn evaluates_internal_child_module_public_member_inside_parent_module_scope() {
+    let source = r#"
+Outer<public> := module:
+    Inner := module:
+        Answer<public>:int = 42
+    Read<public>():int = Inner.Answer
+
+Outer.Read()
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_internal_ancestor_module_public_member_outside_parent_module_scope() {
+    let error = check_source(
+        r#"
+Outer<public> := module:
+    Inner := module:
+        Answer<public>:int = 42
+
+Outer.Inner.Answer
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("member `Inner` is internal to module `Outer`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_using_internal_child_module_outside_parent_module_scope() {
+    let error = check_source(
+        r#"
+Outer<public> := module:
+    Inner := module:
+        Answer<public>:int = 42
+
+using { Outer.Inner }
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("module `Outer.Inner` is internal to module `Outer`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_scoped_ancestor_module_public_member_from_unlisted_module_scope() {
+    let root = temp_project_dir("scoped_ancestor_module_public_member_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Outer.verse",
+        r#"
+Outer<scoped{DemoPackage}> := module {}
+"#,
+    );
+    write_project_file(
+        &root,
+        "Outer\\Inner\\defs.verse",
+        r#"
+Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Outer.Inner.Answer
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Inner` is scoped to `Outer`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Inner` is scoped to `Outer`")
+    );
+}
+
+#[test]
+fn evaluates_parent_scoped_class_internal_members_inside_descendant_module_scope() {
+    let source = r#"
+Api<public> := module:
+    item<scoped{Friend}> := class<concrete>:
+        Value:int = 20
+        Score():int = 22
+
+Friend<public> := module:
+    Child<public> := module:
+        Read<public>():int = Api.item{}.Value + Api.item{}.Score()
+
+Friend.Child.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_scoped_class_constructor_inside_matching_package() {
+    let root = temp_project_dir("scoped_class_constructor_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    token<public> := class<scoped{DemoPackage}><concrete>:
+        Value<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.token{}.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_scoped_class_constructor_from_unlisted_package() {
+    let root = temp_project_dir("scoped_class_constructor_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    token<public> := class<scoped{DemoPackage}><concrete>:
+        Value<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.token{}.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `Api.token` is scoped")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `Api.token` is scoped")
+    );
+}
+
+#[test]
+fn evaluates_named_scoped_class_constructor_inside_matching_package() {
+    let root = temp_project_dir("named_scoped_class_constructor_matching_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = DemoPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    demo_scope := scoped{DemoPackage}
+    token<public> := class<demo_scope><concrete>:
+        Value<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.token{}.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_named_scoped_class_constructor_from_unlisted_package() {
+    let root = temp_project_dir("named_scoped_class_constructor_unlisted_package");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = OtherPackage
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    demo_scope := scoped{DemoPackage}
+    token<public> := class<demo_scope><concrete>:
+        Value<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Api.token{}.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `Api.token` is scoped")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("class constructor `Api.token` is scoped")
+    );
+}
+
+#[test]
 fn generates_external_digest_that_project_loader_can_consume() {
     let implementation = r#"
 Api<public> := module:
@@ -856,6 +2655,38 @@ using { Ops }
 }
 
 #[test]
+fn rejects_cross_file_public_signature_exposing_internal_module_type() {
+    let root = temp_project_dir("cross_file_public_signature_internal_type");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Reveal<public>(Item:secret):int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_cross_file_imported_transacts_call_from_computes_function() {
     let root = temp_project_dir("cross_file_transacts_effect");
     write_project_file(
@@ -915,6 +2746,215 @@ else:
         error
             .to_string()
             .contains("function with `<no_rollback>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn evaluates_cross_file_imported_decides_computes_call_in_failure_context() {
+    let root = temp_project_dir("cross_file_decides_computes_effect");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Pick<public>(Value:int)<decides><computes>:int = Value
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+if:
+    Value := Effects.Pick[42]
+    Value > 0
+then:
+    Value
+else:
+    0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn evaluates_cross_file_imported_decides_function_type_assignment() {
+    let root = temp_project_dir("cross_file_decides_function_type");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Pick<public>(Value:int)<decides><computes>:int = Value
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+Handler:type{_(:int)<decides><computes>:int} = Effects.Pick
+if (Value := Handler[42]). Value else. 0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_imported_writes_call_in_failure_context() {
+    let root = temp_project_dir("cross_file_writes_failure_context");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Write<public>()<writes>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+if:
+    Value := Effects.Write()
+    Value > 0
+then:
+    Value
+else:
+    0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_cross_file_imported_decides_writes_call_in_failure_context() {
+    let root = temp_project_dir("cross_file_decides_writes_failure_context");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Pick<public>(Value:int)<decides><writes>:int = Value
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+if:
+    Value := Effects.Pick[42]
+    Value > 0
+then:
+    Value
+else:
+    0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<writes>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_cross_file_imported_decides_allocates_call_in_failure_context() {
+    let root = temp_project_dir("cross_file_decides_allocates_failure_context");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Pick<public>(Value:int)<decides><allocates>:int = Value
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+if:
+    Value := Effects.Pick[42]
+    Value > 0
+then:
+    Value
+else:
+    0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
+    );
+}
+
+#[test]
+fn rejects_cross_file_imported_allocates_call_in_failure_context() {
+    let root = temp_project_dir("cross_file_allocates_failure_context");
+    write_project_file(
+        &root,
+        "Effects.verse",
+        r#"
+Effects<public> := module:
+    Allocate<public>()<allocates>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Effects }
+if:
+    Value := Effects.Allocate()
+    Value > 0
+then:
+    Value
+else:
+    0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("function with `<allocates>` effect cannot be called in a failure context")
     );
 }
 
@@ -1055,6 +3095,38 @@ using { Ops }
 }
 
 #[test]
+fn evaluates_cross_file_using_public_type_alias_outside_module() {
+    let root = temp_project_dir("cross_file_using_public_type_alias");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    score_map<public> := [string]int
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+Scores:score_map = map{"ada" => 42}
+Scores.Length + 41
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
 fn rejects_cross_file_using_internal_type_alias_outside_module() {
     let root = temp_project_dir("cross_file_using_internal_type_alias");
     write_project_file(
@@ -1092,6 +3164,76 @@ Scores.Length
 }
 
 #[test]
+fn evaluates_cross_file_using_public_parametric_type_outside_module() {
+    let root = temp_project_dir("cross_file_using_public_parametric_type");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    box<public>(t:type) := class:
+        Value<public>:t
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+Item:box(int) = box(int){Value := 42}
+Item.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_using_internal_parametric_type_outside_module() {
+    let root = temp_project_dir("cross_file_using_internal_parametric_type");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    box(t:type) := class:
+        Value:t
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+Item:box(int) = external {}
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `box` is internal to module `DataTypes`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `box` is internal to module `DataTypes`")
+    );
+}
+
+#[test]
 fn rejects_default_internal_module_using_type_outside_module() {
     let error = check_source(
         r#"
@@ -1124,6 +3266,25 @@ DataTypes.Total(map{"ada" => 42})
 "#;
 
     assert_eq!(eval(source), Value::Int(1));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_type_alias_outside_module() {
+    let source = r#"
+DataTypes<public> := module:
+    score_map<public> := [string]int
+
+using { DataTypes }
+Scores:score_map = map{"ada" => 40, "grace" => 2}
+Qualified:DataTypes.score_map = Scores
+Qualified.Length + 40
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

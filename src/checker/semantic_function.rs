@@ -914,6 +914,12 @@ impl Checker {
     ) -> Result<(), VerseError> {
         let receiver_type = self.extension_receiver_type(extension)?;
         let method_type = self.extension_method_declared_type(&extension.method)?;
+        if self.current_definition_level() {
+            ensure_private_protected_access_only_in_classes(
+                &extension.method.effects,
+                extension.span,
+            )?;
+        }
         let access = access_level_from_specifiers(
             &extension.method.effects,
             "extension method",
@@ -942,6 +948,7 @@ impl Checker {
             method_type,
             module_name,
             access,
+            scopes: scoped_access_scopes(&extension.method.effects).unwrap_or_default(),
             span: extension.span,
         });
 
@@ -969,7 +976,14 @@ impl Checker {
         for extension in extensions {
             let receiver_type = self.extension_receiver_type(extension)?;
             if local.iter().any(
-                |(name, existing_receiver, _, _, _): &(String, Type, Type, AccessLevel, Span)| {
+                |(name, existing_receiver, _, _, _, _): &(
+                    String,
+                    Type,
+                    Type,
+                    AccessLevel,
+                    Vec<String>,
+                    Span,
+                )| {
                     name == &extension.method.name && existing_receiver == &receiver_type
                 },
             ) {
@@ -992,11 +1006,12 @@ impl Checker {
                 receiver_type,
                 method_type,
                 access,
+                scoped_access_scopes(&extension.method.effects).unwrap_or_default(),
                 extension.span,
             ));
         }
 
-        for (name, receiver_type, method_type, access, span) in local {
+        for (name, receiver_type, method_type, access, scopes, span) in local {
             let methods = self.extension_methods.entry(name).or_default();
             methods.retain(|method| method.receiver_type != receiver_type);
             methods.push(ExtensionMethodInfo {
@@ -1004,6 +1019,7 @@ impl Checker {
                 method_type,
                 module_name: None,
                 access,
+                scopes,
                 span,
             });
         }

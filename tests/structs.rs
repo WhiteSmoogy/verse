@@ -629,6 +629,62 @@ player:
 }
 
 #[test]
+fn rejects_return_in_archetype_instantiation() {
+    let error = check_source(
+        r#"
+player := class:
+    ID:int = 0
+
+Make()<transacts>:int =
+    Item := player:
+        block:
+            return 42
+        ID := 1
+    Item.ID
+
+Make()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`return` and `break` are disallowed in archetype instantiation")
+    );
+}
+
+#[test]
+fn rejects_break_out_of_archetype_instantiation() {
+    let error = check_source(
+        r#"
+player := class:
+    ID:int = 0
+
+Make()<transacts>:int =
+    var Total:int = 0
+    loop:
+        Item := player:
+            block:
+                break
+            ID := 1
+        set Total = Item.ID
+        break
+    Total
+
+Make()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`return` and `break` are disallowed in archetype instantiation")
+    );
+}
+
+#[test]
 fn rejects_epic_internal_class_archetype() {
     let error = check_source(
         r#"

@@ -15,7 +15,7 @@ use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 mod semantic_class;
 use semantic_class::{
     AccessLevel, AggregateKind, ClassMethodInfo, ExtensionMethodInfo, InterfaceInfo,
-    StructFieldInfo, StructInfo,
+    StructFieldInfo, StructInfo, class_constructor_effects,
 };
 
 mod definition;
@@ -25,7 +25,7 @@ mod effects;
 pub use effects::{Effect, EffectSet};
 use effects::{
     ensure_callable_in_failure_context, function_effects_are_assignable, has_effect,
-    has_no_rollback_effect, validate_function_effect_combination,
+    validate_function_effect_combination,
 };
 
 mod semantic_expression;
@@ -56,6 +56,13 @@ pub fn check_source(source: &str) -> Result<Type, VerseError> {
     Ok(check_source_with_diagnostics(source)?.value_type)
 }
 
+pub fn check_source_in_package(
+    source: &str,
+    package_name: Option<&str>,
+) -> Result<Type, VerseError> {
+    Ok(check_source_with_diagnostics_in_package(source, package_name)?.value_type)
+}
+
 pub fn check_source_with_diagnostics(source: &str) -> Result<CheckResult, VerseError> {
     let typed_program = check_source_to_typed_program(source)?;
     Ok(CheckResult {
@@ -64,9 +71,29 @@ pub fn check_source_with_diagnostics(source: &str) -> Result<CheckResult, VerseE
     })
 }
 
+pub fn check_source_with_diagnostics_in_package(
+    source: &str,
+    package_name: Option<&str>,
+) -> Result<CheckResult, VerseError> {
+    let typed_program = check_source_to_typed_program_in_package(source, package_name)?;
+    Ok(CheckResult {
+        value_type: typed_program.value_type,
+        warnings: typed_program.warnings,
+    })
+}
+
 pub fn check_source_to_typed_program(source: &str) -> Result<SemanticProgram, VerseError> {
+    check_source_to_typed_program_in_package(source, None)
+}
+
+pub fn check_source_to_typed_program_in_package(
+    source: &str,
+    package_name: Option<&str>,
+) -> Result<SemanticProgram, VerseError> {
     let program = parse_source(source)?;
-    Checker::new().check_program_to_semantic_program(&program)
+    Checker::new()
+        .with_package(package_name.map(str::to_string))
+        .check_program_to_semantic_program(&program)
 }
 
 pub fn check_source_with_recovery(source: &str) -> Result<RecoveredCheckResult, VerseError> {
@@ -169,6 +196,7 @@ pub struct Checker {
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
     semantic_facts: SemanticFacts,
+    package_name: Option<String>,
     recovering: bool,
 }
 
@@ -211,13 +239,14 @@ impl Checker {
         self.predeclare_top_level_modules(&program);
         self.predeclare_top_level_module_member_access(&program)?;
         self.predeclare_top_level_enums(&program);
-        self.predeclare_top_level_aggregate_names(&program);
+        self.predeclare_top_level_aggregate_names(&program)?;
         self.predeclare_top_level_aggregate_values(&program)?;
         self.predeclare_top_level_parametric_types(&program)?;
         self.predeclare_using_imports_recursive(&program.statements)?;
         self.predeclare_top_level_type_aliases(&program)?;
         self.predeclare_extension_methods_in_current_scope(&program.statements)?;
         self.predeclare_top_level_functions(&program)?;
+        self.validate_public_module_surface_access(&program.statements)?;
         self.define_top_level_interface_members(&program)?;
         self.define_top_level_aggregate_members(&program)?;
         self.validate_function_overloads_in_current_scope()?;
@@ -238,7 +267,7 @@ impl Checker {
             checker.predeclare_top_level_module_member_access(&program)
         });
         self.predeclare_top_level_enums(&program);
-        self.predeclare_top_level_aggregate_names(&program);
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_aggregate_names(&program));
         self.run_recovering_pass(|checker| checker.predeclare_top_level_aggregate_values(&program));
         self.run_recovering_pass(|checker| checker.predeclare_top_level_parametric_types(&program));
         self.run_recovering_pass(|checker| {
@@ -249,6 +278,9 @@ impl Checker {
             checker.predeclare_extension_methods_in_current_scope(&program.statements)
         });
         self.run_recovering_pass(|checker| checker.predeclare_top_level_functions(&program));
+        self.run_recovering_pass(|checker| {
+            checker.validate_public_module_surface_access(&program.statements)
+        });
         self.run_recovering_pass(|checker| checker.define_top_level_interface_members(&program));
         self.run_recovering_pass(|checker| checker.define_top_level_aggregate_members(&program));
         self.run_recovering_pass(|checker| checker.validate_function_overloads_in_current_scope());
@@ -551,6 +583,7 @@ fn failure_statement_has_failable_expr(statement: &Stmt) -> bool {
         }
         StmtKind::Using { .. }
         | StmtKind::TypeAlias { .. }
+        | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::ParametricType { .. }
         | StmtKind::ExtensionMethod(_) => false,
         StmtKind::Break => false,
@@ -863,9 +896,151 @@ fn defer_statement_failable_expr(statement: &Stmt) -> Option<Span> {
         }
         StmtKind::Using { .. }
         | StmtKind::TypeAlias { .. }
+        | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::ParametricType { .. }
         | StmtKind::ExtensionMethod(_)
         | StmtKind::Break => None,
+    }
+}
+
+fn archetype_entry_escape(entry: &ArchetypeEntry) -> Option<Span> {
+    match entry {
+        ArchetypeEntry::Field(field) => archetype_body_escape(&field.expr, 0),
+        ArchetypeEntry::Let(binding) => archetype_body_escape(&binding.expr, 0),
+        ArchetypeEntry::Block(block) => archetype_body_escape(block, 0),
+        ArchetypeEntry::ConstructorCall(call) => call
+            .args
+            .iter()
+            .find_map(|arg| archetype_body_escape(call_arg_expr(arg), 0)),
+    }
+}
+
+fn archetype_body_escape(body: &Expr, loop_depth: usize) -> Option<Span> {
+    match &body.kind {
+        ExprKind::Unary { expr, .. } | ExprKind::UnwrapOption(expr) => {
+            archetype_body_escape(expr, loop_depth)
+        }
+        ExprKind::Binary { left, right, .. } => archetype_body_escape(left, loop_depth)
+            .or_else(|| archetype_body_escape(right, loop_depth)),
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => archetype_body_escape(condition, loop_depth)
+            .or_else(|| archetype_body_escape(then_branch, loop_depth))
+            .or_else(|| {
+                else_branch
+                    .as_deref()
+                    .and_then(|branch| archetype_body_escape(branch, loop_depth))
+            }),
+        ExprKind::FailureBind { expr, .. } => archetype_body_escape(expr, loop_depth),
+        ExprKind::Set { target, expr, .. } => archetype_body_escape(target, loop_depth)
+            .or_else(|| archetype_body_escape(expr, loop_depth)),
+        ExprKind::Var { expr, .. } => archetype_body_escape(expr, loop_depth),
+        ExprKind::FailureSequence(items) | ExprKind::Array(items) | ExprKind::Tuple(items) => items
+            .iter()
+            .find_map(|item| archetype_body_escape(item, loop_depth)),
+        ExprKind::Loop { body } => archetype_body_escape(body, loop_depth + 1),
+        ExprKind::For { clauses, body } => clauses
+            .iter()
+            .find_map(|clause| match clause {
+                ForClause::Generator { iterable, .. }
+                | ForClause::Let { expr: iterable, .. }
+                | ForClause::RangeOrLet { expr: iterable, .. }
+                | ForClause::Filter(iterable) => archetype_body_escape(iterable, loop_depth),
+            })
+            .or_else(|| archetype_body_escape(body, loop_depth)),
+        ExprKind::Profile { description, body } => archetype_body_escape(description, loop_depth)
+            .or_else(|| archetype_body_escape(body, loop_depth)),
+        ExprKind::Spawn { body } => archetype_body_escape(body, loop_depth),
+        ExprKind::Concurrent { body, .. } => archetype_body_escape(body, loop_depth),
+        ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => statements
+            .iter()
+            .find_map(|statement| archetype_statement_escape(statement, loop_depth)),
+        ExprKind::Function { .. } => None,
+        ExprKind::Call { callee, args } => {
+            archetype_body_escape(callee, loop_depth).or_else(|| {
+                args.iter().find_map(|arg| match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                        archetype_body_escape(expr, loop_depth)
+                    }
+                })
+            })
+        }
+        ExprKind::BracketCall { callee, args } => archetype_body_escape(callee, loop_depth)
+            .or_else(|| {
+                args.iter()
+                    .find_map(|arg| archetype_body_escape(arg, loop_depth))
+            }),
+        ExprKind::Map(entries) => entries.iter().find_map(|(key, value)| {
+            archetype_body_escape(key, loop_depth)
+                .or_else(|| archetype_body_escape(value, loop_depth))
+        }),
+        ExprKind::Archetype {
+            callee, entries, ..
+        } => archetype_body_escape(callee, loop_depth).or_else(|| {
+            entries.iter().find_map(|entry| match entry {
+                ArchetypeEntry::Field(field) => archetype_body_escape(&field.expr, loop_depth),
+                ArchetypeEntry::Let(binding) => archetype_body_escape(&binding.expr, loop_depth),
+                ArchetypeEntry::Block(block) => archetype_body_escape(block, loop_depth),
+                ArchetypeEntry::ConstructorCall(call) => call
+                    .args
+                    .iter()
+                    .find_map(|arg| archetype_body_escape(call_arg_expr(arg), loop_depth)),
+            })
+        }),
+        ExprKind::Case { subject, arms } => {
+            archetype_body_escape(subject, loop_depth).or_else(|| {
+                arms.iter().find_map(|arm| match &arm.pattern {
+                    CasePattern::Wildcard { .. } => archetype_body_escape(&arm.expr, loop_depth),
+                    CasePattern::Expr(pattern) => archetype_body_escape(pattern, loop_depth)
+                        .or_else(|| archetype_body_escape(&arm.expr, loop_depth)),
+                })
+            })
+        }
+        ExprKind::Option(Some(value)) => archetype_body_escape(value, loop_depth),
+        ExprKind::InterpolatedString(parts) => parts.iter().find_map(|part| match part {
+            InterpolatedStringPart::Text(_) => None,
+            InterpolatedStringPart::Expr(expr) => archetype_body_escape(expr, loop_depth),
+        }),
+        ExprKind::Member { object, .. } | ExprKind::QualifiedMember { object, .. } => {
+            archetype_body_escape(object, loop_depth)
+        }
+        ExprKind::Index { collection, index } => archetype_body_escape(collection, loop_depth)
+            .or_else(|| archetype_body_escape(index, loop_depth)),
+        ExprKind::StructDefinition { .. }
+        | ExprKind::ClassDefinition { .. }
+        | ExprKind::InterfaceDefinition { .. }
+        | ExprKind::ModuleDefinition { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::Number { .. }
+        | ExprKind::Char { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::String(_)
+        | ExprKind::None
+        | ExprKind::External
+        | ExprKind::Ident(_)
+        | ExprKind::EnumDefinition { .. }
+        | ExprKind::Option(None) => None,
+    }
+}
+
+fn archetype_statement_escape(statement: &Stmt, loop_depth: usize) -> Option<Span> {
+    match &statement.kind {
+        StmtKind::Return(_) => Some(statement.span),
+        StmtKind::Break if loop_depth == 0 => Some(statement.span),
+        StmtKind::Break => None,
+        StmtKind::Using { .. }
+        | StmtKind::TypeAlias { .. }
+        | StmtKind::ScopedAccessLevel { .. }
+        | StmtKind::ParametricType { .. }
+        | StmtKind::ExtensionMethod(_) => None,
+        StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
+            archetype_body_escape(expr, loop_depth)
+        }
+        StmtKind::Set { target, expr, .. } => archetype_body_escape(target, loop_depth)
+            .or_else(|| archetype_body_escape(expr, loop_depth)),
+        StmtKind::Defer(body) => archetype_body_escape(body, loop_depth),
     }
 }
 
@@ -992,6 +1167,7 @@ fn defer_statement_escape(statement: &Stmt, loop_depth: usize) -> Option<(&'stat
         StmtKind::Break => None,
         StmtKind::Using { .. } => None,
         StmtKind::TypeAlias { .. } => None,
+        StmtKind::ScopedAccessLevel { .. } => None,
         StmtKind::ParametricType { .. } => None,
         StmtKind::ExtensionMethod(_) => None,
         StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
@@ -1011,6 +1187,20 @@ fn aggregate_module_name(aggregate_name: &str) -> Option<&str> {
     uninstantiated.rsplit_once('.').map(|(module, _)| module)
 }
 
+fn scoped_scope_contains(scope: &str, candidate: &str) -> bool {
+    if scope.starts_with('/') || candidate.starts_with('/') {
+        return candidate == scope
+            || candidate
+                .strip_prefix(scope)
+                .is_some_and(|rest| rest.starts_with('/'));
+    }
+
+    candidate == scope
+        || candidate
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
 fn aggregate_unqualified_name(aggregate_name: &str) -> &str {
     let uninstantiated = aggregate_name
         .split_once('(')
@@ -1021,30 +1211,43 @@ fn aggregate_unqualified_name(aggregate_name: &str) -> &str {
 }
 
 fn is_access_specifier(specifier: &str) -> bool {
-    matches!(specifier, "public" | "internal" | "protected" | "private")
+    access_specifier_name(specifier).is_some()
+}
+
+fn has_access_specifier(specifiers: &[String]) -> bool {
+    specifiers
+        .iter()
+        .any(|specifier| is_access_specifier(specifier))
+}
+
+fn private_or_protected_access_specifier(specifiers: &[String]) -> Option<&str> {
+    specifiers
+        .iter()
+        .map(String::as_str)
+        .find(|specifier| matches!(*specifier, "protected" | "private"))
+}
+
+fn ensure_private_protected_access_only_in_classes(
+    specifiers: &[String],
+    span: Span,
+) -> Result<(), VerseError> {
+    if private_or_protected_access_specifier(specifiers).is_some() {
+        return Err(VerseError::check_at(
+            "Access levels protected and private are only allowed inside classes",
+            span,
+        ));
+    }
+    Ok(())
 }
 
 fn module_member_specifiers<'a>(binding_specifiers: &'a [String], expr: &'a Expr) -> &'a [String] {
-    if binding_specifiers
-        .iter()
-        .any(|specifier| is_access_specifier(specifier))
-    {
+    if has_access_specifier(binding_specifiers) {
         return binding_specifiers;
     }
 
     match &expr.kind {
-        ExprKind::Function { effects, .. }
-            if effects
-                .iter()
-                .any(|specifier| is_access_specifier(specifier)) =>
-        {
-            effects
-        }
-        ExprKind::ClassDefinition { specifiers, .. }
-            if specifiers
-                .iter()
-                .any(|specifier| is_access_specifier(specifier)) =>
-        {
+        ExprKind::Function { effects, .. } if has_access_specifier(effects) => effects,
+        ExprKind::ClassDefinition { specifiers, .. } if has_access_specifier(specifiers) => {
             specifiers
         }
         _ => binding_specifiers,
@@ -1054,22 +1257,116 @@ fn module_member_specifiers<'a>(binding_specifiers: &'a [String], expr: &'a Expr
 fn access_level_from_specifiers(
     specifiers: &[String],
     _context: &str,
-    _span: Span,
+    span: Span,
 ) -> Result<AccessLevel, VerseError> {
-    Ok(
-        match specifiers
-            .iter()
-            .rev()
-            .find(|specifier| is_access_specifier(specifier))
-            .map(|specifier| specifier.as_str())
-        {
-            Some("public") => AccessLevel::Public,
-            Some("protected") => AccessLevel::Protected,
-            Some("private") => AccessLevel::Private,
-            Some("internal") | None => AccessLevel::Internal,
-            Some(_) => unreachable!("filtered access specifiers"),
-        },
+    let mut access_specifiers = specifiers
+        .iter()
+        .filter_map(|specifier| access_specifier_name(specifier));
+    let Some(first) = access_specifiers.next() else {
+        return Ok(AccessLevel::Internal);
+    };
+    for access in access_specifiers {
+        if access == first {
+            return Err(VerseError::check_at(
+                "Duplicate access levels: [access levels]. Only one access level may be used or omit for default access.",
+                span,
+            ));
+        }
+        return Err(VerseError::check_at(
+            "Conflicting access levels: [access levels]. Only one access level may be used or omit for default access.",
+            span,
+        ));
+    }
+
+    Ok(match first {
+        "public" => AccessLevel::Public,
+        "protected" => AccessLevel::Protected,
+        "private" => AccessLevel::Private,
+        "internal" => AccessLevel::Internal,
+        "scoped" => AccessLevel::Scoped,
+        _ => unreachable!("filtered access specifiers"),
+    })
+}
+
+fn access_requires_dependency_validation(access: AccessLevel) -> bool {
+    matches!(
+        access,
+        AccessLevel::Public | AccessLevel::Protected | AccessLevel::Scoped
     )
+}
+
+fn access_is_more_visible_than(left: AccessLevel, right: AccessLevel) -> bool {
+    match left {
+        AccessLevel::Public => !matches!(right, AccessLevel::Public),
+        AccessLevel::Scoped => matches!(right, AccessLevel::Internal | AccessLevel::Private),
+        AccessLevel::Protected => matches!(right, AccessLevel::Internal | AccessLevel::Private),
+        AccessLevel::Internal => matches!(right, AccessLevel::Private),
+        AccessLevel::Private => false,
+    }
+}
+
+fn access_level_name(access: AccessLevel) -> &'static str {
+    match access {
+        AccessLevel::Public => "public",
+        AccessLevel::Scoped => "scoped",
+        AccessLevel::Protected => "protected",
+        AccessLevel::Internal => "internal",
+        AccessLevel::Private => "private",
+    }
+}
+
+fn class_constructor_access_from_specifiers(
+    specifiers: &[String],
+    span: Span,
+) -> Result<(AccessLevel, Vec<String>), VerseError> {
+    let access = if has_access_specifier(specifiers) {
+        access_level_from_specifiers(specifiers, "class constructor", span)?
+    } else {
+        AccessLevel::Public
+    };
+    let scopes = if access == AccessLevel::Scoped {
+        scoped_access_scopes(specifiers).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok((access, scopes))
+}
+
+fn access_specifier_name(specifier: &str) -> Option<&str> {
+    match specifier {
+        "public" | "internal" | "protected" | "private" => Some(specifier),
+        _ if specifier
+            .strip_prefix("scoped{")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .is_some() =>
+        {
+            Some("scoped")
+        }
+        _ => None,
+    }
+}
+
+fn scoped_access_specifier_scopes(specifier: &str) -> Option<Vec<String>> {
+    let inner = specifier
+        .strip_prefix("scoped{")
+        .and_then(|rest| rest.strip_suffix('}'))?;
+    let scopes = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!scopes.is_empty()).then_some(scopes)
+}
+
+fn scoped_access_scopes(specifiers: &[String]) -> Option<Vec<String>> {
+    specifiers
+        .iter()
+        .find_map(|specifier| scoped_access_specifier_scopes(specifier))
+}
+
+fn dependency_base_name(name: &str) -> &str {
+    name.split_once('(').map_or(name, |(base, _)| base)
 }
 
 fn is_fits_in_player_map_callee(callee: &Expr) -> bool {
@@ -1405,6 +1702,7 @@ fn modifier_method_info(item_type: &Type, span: Span) -> ClassMethodInfo {
         final_member: false,
         abstract_member: true,
         access: AccessLevel::Public,
+        scopes: Vec::new(),
         owner: Some(format!("modifier({item_type})")),
         span,
     }
@@ -1740,6 +2038,7 @@ fn builtin_interface_method(
         final_member: false,
         abstract_member: true,
         access: AccessLevel::Public,
+        scopes: Vec::new(),
         owner: Some(interface_name.to_string()),
         span: Span::new(0, 0, 1, 1),
     }
@@ -1758,7 +2057,9 @@ fn builtin_interface_field(
         mutable,
         final_member: false,
         access: AccessLevel::Public,
+        scopes: Vec::new(),
         mutation_access: AccessLevel::Public,
+        mutation_scopes: Vec::new(),
         owner: Some(interface_name.to_string()),
         span: Span::new(0, 0, 1, 1),
     }
@@ -1777,6 +2078,9 @@ fn builtin_color_info() -> StructInfo {
         castable: false,
         persistable: true,
         computes: false,
+        constructor_effects: Vec::new(),
+        constructor_access: AccessLevel::Public,
+        constructor_scopes: Vec::new(),
         fields: ["R", "G", "B"]
             .into_iter()
             .map(|name| StructFieldInfo {
@@ -1786,7 +2090,9 @@ fn builtin_color_info() -> StructInfo {
                 mutable: false,
                 final_member: false,
                 access: AccessLevel::Public,
+                scopes: Vec::new(),
                 mutation_access: AccessLevel::Public,
+                mutation_scopes: Vec::new(),
                 owner: Some("color".to_string()),
                 span: Span::new(0, 0, 1, 1),
             })
@@ -1808,6 +2114,9 @@ fn builtin_color_alpha_info() -> StructInfo {
         castable: false,
         persistable: false,
         computes: false,
+        constructor_effects: Vec::new(),
+        constructor_access: AccessLevel::Public,
+        constructor_scopes: Vec::new(),
         fields: [
             ("Color".to_string(), color_type()),
             ("A".to_string(), Type::Float),
@@ -1820,7 +2129,9 @@ fn builtin_color_alpha_info() -> StructInfo {
             mutable: false,
             final_member: false,
             access: AccessLevel::Public,
+            scopes: Vec::new(),
             mutation_access: AccessLevel::Public,
+            mutation_scopes: Vec::new(),
             owner: Some("color_alpha".to_string()),
             span: Span::new(0, 0, 1, 1),
         })
@@ -1842,6 +2153,9 @@ fn builtin_locale_info() -> StructInfo {
         castable: false,
         persistable: false,
         computes: false,
+        constructor_effects: Vec::new(),
+        constructor_access: AccessLevel::Public,
+        constructor_scopes: Vec::new(),
         fields: Vec::new(),
         methods: Vec::new(),
     }

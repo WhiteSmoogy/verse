@@ -36,7 +36,12 @@ pub enum StmtKind {
     },
     TypeAlias {
         name: String,
+        specifiers: Vec<String>,
         target: TypeAnnotation,
+    },
+    ScopedAccessLevel {
+        name: String,
+        scopes: Vec<String>,
     },
     ExtensionMethod(Box<ExtensionMethod>),
     Var {

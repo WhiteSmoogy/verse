@@ -23,6 +23,44 @@ Bump()
 }
 
 #[test]
+fn evaluates_varies_function_mutable_assignment() {
+    let source = r#"
+Bump()<varies>:int =
+    var Total:int = 0
+    set Total += 42
+    Total
+
+Bump()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_reads_writes_function_mutable_assignment_after_read_call() {
+    let source = r#"
+Base()<reads>:int = 40
+
+Bump()<reads><writes>:int =
+    var Total:int = Base()
+    set Total += 2
+    Total
+
+Bump()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_writes_function_container_slot_assignment() {
     let source = r#"
 ReplaceFirst()<writes>:int =

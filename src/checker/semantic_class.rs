@@ -1,5 +1,6 @@
 use crate::token::Span;
 
+use super::effects::has_explicit_call_effect_specifier;
 use super::*;
 
 #[derive(Clone)]
@@ -15,6 +16,9 @@ pub(super) struct StructInfo {
     pub(super) castable: bool,
     pub(super) persistable: bool,
     pub(super) computes: bool,
+    pub(super) constructor_effects: Vec<String>,
+    pub(super) constructor_access: AccessLevel,
+    pub(super) constructor_scopes: Vec<String>,
     pub(super) fields: Vec<StructFieldInfo>,
     pub(super) methods: Vec<ClassMethodInfo>,
 }
@@ -31,6 +35,7 @@ pub(super) enum AccessLevel {
     Internal,
     Protected,
     Private,
+    Scoped,
 }
 
 #[derive(Clone)]
@@ -41,7 +46,9 @@ pub(super) struct StructFieldInfo {
     pub(super) mutable: bool,
     pub(super) final_member: bool,
     pub(super) access: AccessLevel,
+    pub(super) scopes: Vec<String>,
     pub(super) mutation_access: AccessLevel,
+    pub(super) mutation_scopes: Vec<String>,
     pub(super) owner: Option<String>,
     pub(super) span: Span,
 }
@@ -54,6 +61,7 @@ pub(super) struct ClassMethodInfo {
     pub(super) final_member: bool,
     pub(super) abstract_member: bool,
     pub(super) access: AccessLevel,
+    pub(super) scopes: Vec<String>,
     pub(super) owner: Option<String>,
     pub(super) span: Span,
 }
@@ -71,6 +79,7 @@ pub(super) struct ExtensionMethodInfo {
     pub(super) method_type: Type,
     pub(super) module_name: Option<String>,
     pub(super) access: AccessLevel,
+    pub(super) scopes: Vec<String>,
     pub(super) span: Span,
 }
 
@@ -205,10 +214,14 @@ impl Checker {
                     .clone()
                     .or_else(|| Some(interface_name.to_string())),
                 name: method.name.clone(),
-                value_type: self.class_method_declared_type(method)?,
+                value_type: self.class_method_declared_type(
+                    method,
+                    class_or_interface_default_method_effects(&method.effects),
+                )?,
                 final_member: false,
                 abstract_member: method.body.is_none(),
                 access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                 owner: Some(interface_name.to_string()),
                 span: method.span,
             };
@@ -326,18 +339,46 @@ impl Checker {
                 for (name, value_type) in &method_bindings {
                     self.define(name, value_type.clone(), false, method.span)?;
                 }
-                self.check_function(
-                    &method.params,
-                    &method.effects,
-                    method.return_type.as_ref(),
-                    body,
-                )
+                let effects = class_or_interface_default_method_effects(&method.effects);
+                self.check_function(&method.params, &effects, method.return_type.as_ref(), body)
             })();
             self.pop_scope();
             method_type?;
         }
 
         Ok(())
+    }
+
+    fn class_or_interface_method_effects(
+        &mut self,
+        method: &ClassMethod,
+        inherited_methods: &[ClassMethodInfo],
+    ) -> Result<Vec<String>, VerseError> {
+        let inherited_effects = if has_effect(&method.effects, "override")
+            && !has_effect(&method.effects, "decides")
+            && !has_explicit_call_effect_specifier(&method.effects)
+        {
+            let probe = ClassMethodInfo {
+                qualifier: method.qualifier.clone(),
+                name: method.name.clone(),
+                value_type: self.class_method_declared_type(method, method.effects.clone())?,
+                final_member: false,
+                abstract_member: self.class_method_is_abstract(method),
+                access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
+                owner: None,
+                span: method.span,
+            };
+            inherited_method_override_index(inherited_methods, &probe, &self.struct_types)?
+                .map(|index| inherited_methods[index].value_type.clone())
+        } else {
+            None
+        };
+
+        Ok(class_or_interface_method_effects_with_inherited(
+            &method.effects,
+            inherited_effects.as_ref(),
+        ))
     }
 
     pub(super) fn define_top_level_aggregate_members(
@@ -379,6 +420,9 @@ impl Checker {
                 castable,
                 persistable,
                 computes,
+                constructor_effects,
+                constructor_access,
+                constructor_scopes,
             ) = match &expr.kind {
                 ExprKind::StructDefinition {
                     fields,
@@ -401,6 +445,9 @@ impl Checker {
                         false,
                         *persistable,
                         *computes,
+                        Vec::new(),
+                        AccessLevel::Public,
+                        Vec::new(),
                     )
                 }
                 ExprKind::ClassDefinition {
@@ -414,6 +461,17 @@ impl Checker {
                     ..
                 } => {
                     let qualified = self.current_qualified_name(name);
+                    let (constructor_access, constructor_scopes) =
+                        class_constructor_access_from_specifiers(
+                            specifiers,
+                            class_definition_diagnostic_span(
+                                base.as_ref(),
+                                fields,
+                                methods,
+                                extension_methods,
+                                blocks,
+                            ),
+                        )?;
                     let (fields, methods, unique, castable, base, implemented_interfaces) = self
                         .class_member_infos(
                             &qualified,
@@ -441,6 +499,9 @@ impl Checker {
                         castable,
                         class_has_specifier(specifiers, "persistable"),
                         false,
+                        class_constructor_effects(blocks),
+                        constructor_access,
+                        constructor_scopes,
                     )
                 }
                 _ => continue,
@@ -463,6 +524,9 @@ impl Checker {
                     castable,
                     persistable,
                     computes,
+                    constructor_effects,
+                    constructor_access,
+                    constructor_scopes,
                     fields,
                     methods,
                 },
@@ -512,10 +576,22 @@ impl Checker {
                     ));
                 }
                 let access = access_level_from_specifiers(&field.specifiers, "field", field.span)?;
-                let mutation_access = if field.mutable && !field.var_specifiers.is_empty() {
-                    access_level_from_specifiers(&field.var_specifiers, "var field", field.span)?
+                let scopes = scoped_access_scopes(&field.specifiers).unwrap_or_default();
+                let (mutation_access, mutation_scopes) = if field.mutable {
+                    if !field.var_specifiers.is_empty() {
+                        (
+                            access_level_from_specifiers(
+                                &field.var_specifiers,
+                                "var field",
+                                field.span,
+                            )?,
+                            scoped_access_scopes(&field.var_specifiers).unwrap_or_default(),
+                        )
+                    } else {
+                        (AccessLevel::Public, Vec::new())
+                    }
                 } else {
-                    access
+                    (access, scopes.clone())
                 };
                 Ok(StructFieldInfo {
                     name: field.name.clone(),
@@ -524,7 +600,9 @@ impl Checker {
                     mutable: field.mutable,
                     final_member: field_has_specifier(&field.specifiers, "final"),
                     access,
+                    scopes,
                     mutation_access,
+                    mutation_scopes,
                     owner: owner.map(str::to_string),
                     span: field.span,
                 })
@@ -684,6 +762,12 @@ impl Checker {
                                     base.span,
                                 ));
                             }
+                            self.ensure_base_class_constructor_accessible(
+                                &base_name,
+                                info.constructor_access,
+                                &info.constructor_scopes,
+                                base.span,
+                            )?;
                             (
                                 info.fields,
                                 info.methods,
@@ -764,7 +848,7 @@ impl Checker {
         let castable = class_has_specifier(specifiers, "castable") || base_castable;
 
         let local = self.struct_field_infos_with_owner(fields, Some(class_name))?;
-        for field in local {
+        for mut field in local {
             let source_field = fields
                 .iter()
                 .find(|candidate| candidate.name == field.name)
@@ -789,6 +873,31 @@ impl Checker {
                         ),
                         source_field.span,
                     ));
+                }
+                let inherited_owner_is_interface = inherited
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| self.interface_types.contains_key(owner));
+                if !inherited_owner_is_interface {
+                    if !has_access_specifier(&source_field.specifiers) {
+                        field.access = inherited.access;
+                        field.scopes = inherited.scopes.clone();
+                    }
+                    if field.mutable && !has_access_specifier(&source_field.var_specifiers) {
+                        field.mutation_access = inherited.mutation_access;
+                        field.mutation_scopes = inherited.mutation_scopes.clone();
+                    }
+                }
+                if field.access != inherited.access
+                    || (field.access == AccessLevel::Scoped && field.scopes != inherited.scopes)
+                {
+                    return Err(VerseError::check_at(
+                        "An overridden field cannot change the inherited access level",
+                        source_field.span,
+                    ));
+                }
+                if !inherited_owner_is_interface {
+                    field.owner = inherited.owner.clone();
                 }
                 if !self.is_field_override_assignable(
                     &inherited.value_type,
@@ -846,13 +955,16 @@ impl Checker {
             self.ensure_persistable_class(class_name, specifiers, base, &inherited_fields)?;
         }
 
-        let local_method_signatures = self.class_method_signature_infos(class_name, methods)?;
+        let local_method_signatures =
+            self.class_method_signature_infos(class_name, methods, &inherited_methods)?;
         let method_signatures = self.merge_class_methods(
             &inherited_fields,
             inherited_methods.clone(),
             methods,
             local_method_signatures,
         )?;
+        let (constructor_access, constructor_scopes) =
+            class_constructor_access_from_specifiers(specifiers, class_span)?;
         let previous_info = self.struct_types.insert(
             class_name.to_string(),
             StructInfo {
@@ -867,6 +979,9 @@ impl Checker {
                 castable,
                 persistable: class_has_specifier(specifiers, "persistable"),
                 computes: false,
+                constructor_effects: class_constructor_effects(blocks),
+                constructor_access,
+                constructor_scopes,
                 fields: inherited_fields.clone(),
                 methods: method_signatures,
             },
@@ -882,6 +997,7 @@ impl Checker {
                 class_name,
                 base_name.as_deref(),
                 &inherited_fields,
+                &inherited_methods,
                 methods,
             )?;
             let blocks_result = checker.check_class_blocks(
@@ -1110,7 +1226,10 @@ impl Checker {
                     ));
                 }
                 self.push_class_member_shadow_names(class_name, fields);
+                self.function_effects
+                    .push(class_constructor_effects(std::slice::from_ref(block)));
                 let block_result = self.check_expr(&block.body);
+                self.function_effects.pop();
                 self.pop_class_member_shadow_names();
                 block_result?;
                 Ok(())
@@ -1199,6 +1318,26 @@ impl Checker {
                     },
                 )?;
                 let mut replacement = method;
+                let inherited_owner_is_interface = inherited
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| self.interface_types.contains_key(owner));
+                if !inherited_owner_is_interface {
+                    if !has_access_specifier(&source_method.effects) {
+                        replacement.access = inherited.access;
+                        replacement.scopes = inherited.scopes.clone();
+                    }
+                    if replacement.access != inherited.access
+                        || (replacement.access == AccessLevel::Scoped
+                            && replacement.scopes != inherited.scopes)
+                    {
+                        return Err(VerseError::check_at(
+                            "An overridden method cannot change the inherited access level",
+                            source_method.span,
+                        ));
+                    }
+                    replacement.owner = inherited.owner.clone();
+                }
                 if replacement.qualifier.is_none() {
                     replacement.qualifier = inherited.qualifier.clone();
                 }
@@ -1289,18 +1428,21 @@ impl Checker {
         &mut self,
         class_name: &str,
         methods: &[ClassMethod],
+        inherited_methods: &[ClassMethodInfo],
     ) -> Result<Vec<ClassMethodInfo>, VerseError> {
         let mut infos = Vec::with_capacity(methods.len());
         for method in methods {
             self.validate_abstract_class_method_shape(method)?;
+            let effects = self.class_or_interface_method_effects(method, inherited_methods)?;
             let info = ClassMethodInfo {
                 qualifier: method.qualifier.clone(),
                 name: method.name.clone(),
                 final_member: has_effect(&method.effects, "final"),
                 abstract_member: self.class_method_is_abstract(method),
                 access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                 owner: Some(class_name.to_string()),
-                value_type: self.class_method_declared_type(method)?,
+                value_type: self.class_method_declared_type(method, effects)?,
                 span: method.span,
             };
             push_distinct_local_method_info(&mut infos, info, "class", &self.struct_types)?;
@@ -1311,8 +1453,9 @@ impl Checker {
     pub(super) fn class_method_declared_type(
         &mut self,
         method: &ClassMethod,
+        effects: Vec<String>,
     ) -> Result<Type, VerseError> {
-        validate_function_effect_combination(&method.effects, method.span)?;
+        validate_function_effect_combination(&effects, method.span)?;
         let type_params = collect_function_type_params(&method.params)?;
         self.validate_type_parameter_constraints(&type_params, method.span)?;
         self.push_type_param_scope(type_params.iter().map(|param| {
@@ -1325,7 +1468,7 @@ impl Checker {
             Ok(Type::Function {
                 arity: Some(method.params.len()),
                 arity_range: None,
-                effects: method.effects.clone(),
+                effects,
                 param_types: Some(self.param_types(&method.params)?),
                 param_specs: Some(self.param_specs(&method.params)?),
                 return_type: Box::new(self.annotation_to_type(method.return_type.as_ref())?),
@@ -1488,6 +1631,7 @@ impl Checker {
         class_name: &str,
         base_name: Option<&str>,
         fields: &[StructFieldInfo],
+        inherited_methods: &[ClassMethodInfo],
         methods: &[ClassMethod],
     ) -> Result<Vec<ClassMethodInfo>, VerseError> {
         let mut infos = Vec::with_capacity(methods.len());
@@ -1500,13 +1644,15 @@ impl Checker {
         for method in methods {
             self.validate_abstract_class_method_shape(method)?;
             if method.body.is_none() {
+                let effects = self.class_or_interface_method_effects(method, inherited_methods)?;
                 infos.push(ClassMethodInfo {
                     qualifier: method.qualifier.clone(),
                     name: method.name.clone(),
-                    value_type: self.class_method_declared_type(method)?,
+                    value_type: self.class_method_declared_type(method, effects)?,
                     final_member: has_effect(&method.effects, "final"),
                     abstract_member: true,
                     access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                    scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                     owner: Some(class_name.to_string()),
                     span: method.span,
                 });
@@ -1544,9 +1690,10 @@ impl Checker {
                 self.define_current_class_type_if_unshadowed(class_name, method.span)?;
 
                 self.push_class_member_shadow_names(class_name, fields);
+                let effects = self.class_or_interface_method_effects(method, inherited_methods)?;
                 let function_result = self.check_function(
                     &method.params,
-                    &method.effects,
+                    &effects,
                     method.return_type.as_ref(),
                     method
                         .body
@@ -1566,6 +1713,7 @@ impl Checker {
                 final_member: has_effect(&method.effects, "final"),
                 abstract_member: false,
                 access: access_level_from_specifiers(&method.effects, "method", method.span)?,
+                scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                 owner: Some(class_name.to_string()),
                 span: method.span,
             });
@@ -1681,4 +1829,50 @@ impl Checker {
         }
         self.define(name, Type::ClassType(class_name.to_string()), false, span)
     }
+}
+
+fn class_or_interface_default_method_effects(effects: &[String]) -> Vec<String> {
+    class_or_interface_method_effects_with_inherited(effects, None)
+}
+
+pub(super) fn class_constructor_effects(blocks: &[ClassBlock]) -> Vec<String> {
+    if blocks.is_empty() {
+        Vec::new()
+    } else {
+        vec!["transacts".to_string()]
+    }
+}
+
+fn class_or_interface_method_effects_with_inherited(
+    effects: &[String],
+    inherited: Option<&Type>,
+) -> Vec<String> {
+    let mut effective = effects.to_vec();
+    if !has_effect(effects, "decides") && !has_explicit_call_effect_specifier(effects) {
+        match inherited.and_then(function_call_effects) {
+            Some(inherited_effects) => effective.extend(inherited_effects),
+            None => effective.push("transacts".to_string()),
+        }
+    }
+    effective
+}
+
+fn function_call_effects(value_type: &Type) -> Option<Vec<String>> {
+    let Type::Function { effects, .. } = value_type else {
+        return None;
+    };
+    Some(
+        effects
+            .iter()
+            .filter(|effect| is_explicit_call_effect_name(effect))
+            .cloned()
+            .collect(),
+    )
+}
+
+fn is_explicit_call_effect_name(effect: &str) -> bool {
+    matches!(
+        effect,
+        "transacts" | "varies" | "computes" | "converges" | "reads" | "writes" | "allocates"
+    )
 }

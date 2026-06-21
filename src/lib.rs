@@ -19,8 +19,9 @@ pub mod token;
 
 pub use checker::{
     CheckResult, Checker, Effect, EffectSet, IntRange, RecoveredCheckResult, Type, TypeVariable,
-    TypeVariableBounds, check_source, check_source_to_typed_program, check_source_with_diagnostics,
-    check_source_with_recovery,
+    TypeVariableBounds, check_source, check_source_in_package, check_source_to_typed_program,
+    check_source_to_typed_program_in_package, check_source_with_diagnostics,
+    check_source_with_diagnostics_in_package, check_source_with_recovery,
 };
 pub use compiler_passes::{
     DefaultParserPass, IrGeneratorPass, ParserPass, PostVstPass, SemanticAnalyzerPass,
@@ -35,7 +36,10 @@ pub use ir::{
     RegisterIndex, ValueOperand,
 };
 pub use parser::parse_source;
-pub use pipeline::{analyze_source, analyze_vst, compile_source, desugar_vst, parse_vst_source};
+pub use pipeline::{
+    analyze_source, analyze_source_in_package, analyze_vst, compile_source,
+    compile_source_in_package, desugar_vst, parse_vst_source, run_source_in_package,
+};
 pub use project::{SourceProject, check_project_file, load_project_source, run_project_file};
 pub use runtime::{Value, VerseVm};
 pub use semantic_analyzer::SemanticAnalyzer;

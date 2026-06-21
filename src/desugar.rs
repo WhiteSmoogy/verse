@@ -48,9 +48,18 @@ fn desugar_stmt(statement: &Stmt) -> Stmt {
             params: params.clone(),
             expr: desugar_expr(expr),
         },
-        StmtKind::TypeAlias { name, target } => StmtKind::TypeAlias {
+        StmtKind::TypeAlias {
+            name,
+            specifiers,
+            target,
+        } => StmtKind::TypeAlias {
             name: name.clone(),
+            specifiers: specifiers.clone(),
             target: target.clone(),
+        },
+        StmtKind::ScopedAccessLevel { name, scopes } => StmtKind::ScopedAccessLevel {
+            name: name.clone(),
+            scopes: scopes.clone(),
         },
         StmtKind::ExtensionMethod(method) => {
             StmtKind::ExtensionMethod(Box::new(desugar_extension_method(method)))

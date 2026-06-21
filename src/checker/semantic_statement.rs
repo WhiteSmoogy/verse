@@ -81,6 +81,7 @@ impl Checker {
                         statement.span,
                     ));
                 };
+                self.ensure_module_import_accessible(&module_name, statement.span)?;
                 self.add_current_import(module_name);
                 Ok(Type::None)
             }
@@ -109,10 +110,24 @@ impl Checker {
                 expr,
                 statement.span,
             ),
-            StmtKind::TypeAlias { .. } => {
+            StmtKind::TypeAlias {
+                name, specifiers, ..
+            } => {
                 if !self.current_definition_level() {
                     return Err(VerseError::check_at(
                         "type aliases are only supported at module level",
+                        statement.span,
+                    ));
+                }
+                self.validate_data_specifiers(name, specifiers, None, false, statement.span)?;
+                access_level_from_specifiers(specifiers, "type alias", statement.span)?;
+                ensure_private_protected_access_only_in_classes(specifiers, statement.span)?;
+                Ok(Type::None)
+            }
+            StmtKind::ScopedAccessLevel { .. } => {
+                if !self.current_definition_level() {
+                    return Err(VerseError::check_at(
+                        "scoped access level definitions are only supported at module level",
                         statement.span,
                     ));
                 }
@@ -128,6 +143,12 @@ impl Checker {
                 self.check_set_expression(target, *op, expr, false, statement.span)
             }
             StmtKind::Return(expr) => {
+                if self.in_failure_context() {
+                    return Err(VerseError::check_at(
+                        "Explicit return out of a failure context is not allowed",
+                        statement.span,
+                    ));
+                }
                 let Some(expected) = self.function_returns.last().cloned() else {
                     return Err(VerseError::check_at(
                         "`return` used outside a function",
@@ -142,6 +163,12 @@ impl Checker {
                 Ok(Type::Never)
             }
             StmtKind::Break => {
+                if self.in_failure_context() {
+                    return Err(VerseError::check_at(
+                        "`break` may not be used in a failure context",
+                        statement.span,
+                    ));
+                }
                 if self.break_depth == 0 {
                     Err(VerseError::check_at(
                         "`break` used outside a loop",
@@ -192,6 +219,8 @@ impl Checker {
             ));
         }
         self.validate_data_specifiers(name, specifiers, None, false, span)?;
+        access_level_from_specifiers(specifiers, "parametric type", span)?;
+        ensure_private_protected_access_only_in_classes(specifiers, span)?;
         let Some(kind) = parametric_type_kind(expr) else {
             return Err(VerseError::check_at(
                 "parametric type definitions must define a class, struct, or interface",
@@ -341,6 +370,7 @@ impl Checker {
             method_type,
             module_name,
             access: AccessLevel::Internal,
+            scopes: Vec::new(),
             span,
         });
         Ok(())
@@ -384,6 +414,17 @@ impl Checker {
         span: Span,
     ) -> Result<Type, VerseError> {
         self.validate_data_specifiers(name, specifiers, annotation, mutable, span)?;
+        if self.current_definition_level() {
+            access_level_from_specifiers(
+                module_member_specifiers(specifiers, expr),
+                "module member",
+                span,
+            )?;
+            ensure_private_protected_access_only_in_classes(
+                module_member_specifiers(specifiers, expr),
+                span,
+            )?;
+        }
 
         if let ExprKind::EnumDefinition {
             open,
@@ -458,6 +499,9 @@ impl Checker {
                         castable: false,
                         persistable: *persistable,
                         computes: *computes,
+                        constructor_effects: Vec::new(),
+                        constructor_access: AccessLevel::Public,
+                        constructor_scopes: Vec::new(),
                         fields,
                         methods: Vec::new(),
                     },
@@ -494,6 +538,8 @@ impl Checker {
             }
             let qualified = self.current_qualified_name(name);
             if !self.struct_types.contains_key(&qualified) {
+                let (constructor_access, constructor_scopes) =
+                    class_constructor_access_from_specifiers(class_specifiers, span)?;
                 let (fields, methods, unique, castable, base, implemented_interfaces) = self
                     .class_member_infos(
                         &qualified,
@@ -521,6 +567,9 @@ impl Checker {
                         castable,
                         persistable: class_has_specifier(class_specifiers, "persistable"),
                         computes: false,
+                        constructor_effects: class_constructor_effects(blocks),
+                        constructor_access,
+                        constructor_scopes,
                         fields,
                         methods,
                     },
@@ -578,6 +627,9 @@ impl Checker {
                 .or_insert(ModuleInfo {
                     members: HashMap::new(),
                     member_access: HashMap::new(),
+                    member_scopes: HashMap::new(),
+                    access: AccessLevel::Internal,
+                    scopes: Vec::new(),
                     imports: Vec::new(),
                 });
             let value_type = Type::Module(qualified.clone());
@@ -588,13 +640,24 @@ impl Checker {
         }
 
         if let ExprKind::Function { effects, .. } = &expr.kind
-            && has_effect(effects, "final")
             && !self.current_definition_level()
         {
-            return Err(VerseError::check_at(
-                "`final` specifier is not allowed on local definitions",
-                span,
-            ));
+            if let Some(access) = effects
+                .iter()
+                .find(|specifier| is_access_specifier_name(specifier))
+            {
+                return Err(VerseError::check_at(
+                    format!("local definition `{name}` cannot use access specifier `<{access}>`"),
+                    span,
+                ));
+            }
+
+            if has_effect(effects, "final") {
+                return Err(VerseError::check_at(
+                    "`final` specifier is not allowed on local definitions",
+                    span,
+                ));
+            }
         }
 
         if annotation.is_none() && matches!(&expr.kind, ExprKind::External) {
@@ -715,6 +778,17 @@ impl Checker {
             ));
         }
 
+        if !self.current_definition_level()
+            && let Some(access) = specifiers
+                .iter()
+                .find(|specifier| is_access_specifier_name(specifier))
+        {
+            return Err(VerseError::check_at(
+                format!("local definition `{name}` cannot use access specifier `<{access}>`"),
+                span,
+            ));
+        }
+
         if specifiers.iter().any(|specifier| specifier == "localizes")
             && !matches!(
                 annotation.map(|annotation| &annotation.name),
@@ -737,16 +811,51 @@ impl Checker {
         specifiers: &[String],
         span: Span,
     ) -> Result<(), VerseError> {
-        let Some(module_name) = self.current_module_name() else {
-            return Ok(());
-        };
         if !self.current_definition_level() {
             return Ok(());
         }
         let access = access_level_from_specifiers(specifiers, "module member", span)?;
+        let scopes = scoped_access_scopes(specifiers).unwrap_or_default();
+        if let Type::Module(qualified) = &value_type {
+            self.update_module_definition_access(qualified, access, &scopes);
+        }
+
+        let Some(module_name) = self.current_module_name() else {
+            return Ok(());
+        };
         if let Some(info) = self.module_types.get_mut(&module_name) {
             info.members.insert(name.to_string(), value_type);
             info.member_access.insert(name.to_string(), access);
+            if !scopes.is_empty() {
+                info.member_scopes.insert(name.to_string(), scopes);
+            } else {
+                info.member_scopes.remove(name);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_module_definition_access(
+        &mut self,
+        name: &str,
+        specifiers: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let access = access_level_from_specifiers(specifiers, "module member", span)?;
+        let scopes = scoped_access_scopes(specifiers).unwrap_or_default();
+        let qualified = self.current_qualified_name(name);
+        self.update_module_definition_access(&qualified, access, &scopes);
+
+        let Some(module_name) = self.current_module_name() else {
+            return Ok(());
+        };
+        if let Some(info) = self.module_types.get_mut(&module_name) {
+            info.member_access.insert(name.to_string(), access);
+            if !scopes.is_empty() {
+                info.member_scopes.insert(name.to_string(), scopes);
+            } else {
+                info.member_scopes.remove(name);
+            }
         }
         Ok(())
     }
@@ -763,8 +872,25 @@ impl Checker {
         let access = access_level_from_specifiers(specifiers, "module member", span)?;
         if let Some(info) = self.module_types.get_mut(&module_name) {
             info.member_access.insert(name.to_string(), access);
+            if let Some(scopes) = scoped_access_scopes(specifiers) {
+                info.member_scopes.insert(name.to_string(), scopes);
+            } else {
+                info.member_scopes.remove(name);
+            }
         }
         Ok(())
+    }
+
+    fn update_module_definition_access(
+        &mut self,
+        qualified: &str,
+        access: AccessLevel,
+        scopes: &[String],
+    ) {
+        if let Some(info) = self.module_types.get_mut(qualified) {
+            info.access = access;
+            info.scopes = scopes.to_vec();
+        }
     }
 
     pub(super) fn check_module_body(
@@ -783,6 +909,7 @@ impl Checker {
             self.predeclare_aggregate_values_in_current_scope(statements)?;
             self.predeclare_extension_methods_in_current_scope(statements)?;
             self.predeclare_functions_in_current_scope(statements)?;
+            self.validate_public_module_surface_access(statements)?;
             self.check_statements(statements)?;
             Ok(())
         })();
@@ -791,4 +918,8 @@ impl Checker {
         self.module_path = previous_module_path;
         result
     }
+}
+
+fn is_access_specifier_name(specifier: &str) -> bool {
+    access_specifier_name(specifier).is_some()
 }

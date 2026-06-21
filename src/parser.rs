@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, ArchetypeField, ArchetypeLet, AssignOp,
     AttributeArgument, BinaryOp, CallArg, CaseArm, CasePattern, ClassBlock, ClassMethod,
@@ -53,6 +55,7 @@ fn render_param_name(param: &Param) -> String {
 struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    scoped_access_levels: HashMap<String, Vec<String>>,
 }
 
 #[derive(Default)]
@@ -63,7 +66,12 @@ struct StructSpecifiers {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, current: 0 }
+        let scoped_access_levels = collect_scoped_access_level_definitions(&tokens);
+        Self {
+            tokens,
+            current: 0,
+            scoped_access_levels,
+        }
     }
 
     fn parse_program(mut self) -> Result<Program, VerseError> {
@@ -186,6 +194,10 @@ impl Parser {
             return self.parse_type_alias_definition();
         }
 
+        if self.is_scoped_access_level_definition() {
+            return self.parse_scoped_access_level_definition();
+        }
+
         if self.is_binding_definition() {
             let (name, name_span) = self.consume_ident("expected binding name")?;
             let specifiers = self.parse_data_specifiers()?;
@@ -223,11 +235,37 @@ impl Parser {
 
     fn parse_type_alias_definition(&mut self) -> Result<Stmt, VerseError> {
         let (name, name_span) = self.consume_ident("expected type alias name")?;
+        let specifiers = self.parse_data_specifiers()?;
         self.consume_colon_equal("expected `:=` after type alias name")?;
         self.skip_separators();
         let target = self.consume_type_name("expected type name after type alias `:=`")?;
         let span = name_span.through(target.span);
-        Ok(Stmt::new(StmtKind::TypeAlias { name, target }, span))
+        Ok(Stmt::new(
+            StmtKind::TypeAlias {
+                name,
+                specifiers,
+                target,
+            },
+            span,
+        ))
+    }
+
+    fn parse_scoped_access_level_definition(&mut self) -> Result<Stmt, VerseError> {
+        let (name, name_span) = self.consume_ident("expected scoped access level name")?;
+        self.consume_colon_equal("expected `:=` after scoped access level name")?;
+        self.skip_separators();
+        let (scoped, scoped_span) = self.consume_ident("expected `scoped` access level")?;
+        if scoped != "scoped" {
+            return Err(VerseError::parse(
+                "expected `scoped` access level",
+                scoped_span,
+            ));
+        }
+        let (scopes, close_span) = self.parse_scoped_access_scope_list("access level")?;
+        Ok(Stmt::new(
+            StmtKind::ScopedAccessLevel { name, scopes },
+            name_span.through(close_span),
+        ))
     }
 
     fn parse_parametric_type_definition(&mut self) -> Result<Stmt, VerseError> {
@@ -2150,53 +2188,83 @@ impl Parser {
     }
 
     fn parse_class_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
-        let mut specifiers = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) = self.consume_ident("expected class specifier after `<`")?;
-            validate_class_specifier(&name, name_span)?;
+            let specifier = if name == "scoped" {
+                self.parse_scoped_access_specifier("class")?
+            } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
+                specifier
+            } else {
+                validate_class_specifier(&name, name_span)?;
+                name
+            };
             self.consume_greater("expected `>` after class specifier")?;
-            if specifiers.iter().any(|specifier| specifier == &name) {
-                return Err(VerseError::parse(
-                    format!("duplicate class specifier `{name}`"),
+            if specifiers.iter().any(|existing| {
+                specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
+            }) {
+                return Err(duplicate_specifier_error(
+                    "class",
+                    specifier_duplicate_key(&specifier),
                     name_span,
                 ));
             }
-            specifiers.push(name);
+            specifiers.push(specifier);
         }
         Ok(specifiers)
     }
 
     fn parse_class_field_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
-        let mut specifiers = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) =
                 self.consume_ident("expected class field specifier after `<`")?;
-            validate_class_field_specifier(&name, name_span)?;
+            let specifier = if name == "scoped" {
+                self.parse_scoped_access_specifier("class field")?
+            } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
+                specifier
+            } else {
+                validate_class_field_specifier(&name, name_span)?;
+                name
+            };
             self.consume_greater("expected `>` after class field specifier")?;
-            if specifiers.iter().any(|specifier| specifier == &name) {
-                return Err(VerseError::parse(
-                    format!("duplicate class field specifier `{name}`"),
+            if specifiers.iter().any(|existing| {
+                specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
+            }) {
+                return Err(duplicate_specifier_error(
+                    "class field",
+                    specifier_duplicate_key(&specifier),
                     name_span,
                 ));
             }
-            specifiers.push(name);
+            specifiers.push(specifier);
         }
         Ok(specifiers)
     }
 
     fn parse_var_field_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
-        let mut specifiers = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) = self.consume_ident("expected var field specifier after `<`")?;
-            validate_var_field_specifier(&name, name_span)?;
+            let specifier = if name == "scoped" {
+                self.parse_scoped_access_specifier("var field")?
+            } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
+                specifier
+            } else {
+                validate_var_field_specifier(&name, name_span)?;
+                name
+            };
             self.consume_greater("expected `>` after var field specifier")?;
-            if specifiers.iter().any(|specifier| specifier == &name) {
-                return Err(VerseError::parse(
-                    format!("duplicate var field specifier `{name}`"),
+            if specifiers.iter().any(|existing| {
+                specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
+            }) {
+                return Err(duplicate_specifier_error(
+                    "var field",
+                    specifier_duplicate_key(&specifier),
                     name_span,
                 ));
             }
-            specifiers.push(name);
+            specifiers.push(specifier);
         }
         Ok(specifiers)
     }
@@ -3400,43 +3468,93 @@ impl Parser {
     }
 
     fn parse_function_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
-        let mut specifiers = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) = self.consume_ident("expected function specifier after `<`")?;
-            validate_function_specifier(&name, name_span)?;
+            let specifier = if name == "scoped" {
+                self.parse_scoped_access_specifier("function")?
+            } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
+                specifier
+            } else {
+                validate_function_specifier(&name, name_span)?;
+                name
+            };
             self.consume_greater("expected `>` after function specifier")?;
-            if specifiers.iter().any(|specifier| specifier == &name) {
-                return Err(VerseError::parse(
-                    format!("duplicate function specifier `{name}`"),
+            if specifiers.iter().any(|existing| {
+                specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
+            }) {
+                return Err(duplicate_specifier_error(
+                    "function",
+                    specifier_duplicate_key(&specifier),
                     name_span,
                 ));
             }
-            specifiers.push(name);
+            specifiers.push(specifier);
         }
         Ok(specifiers)
     }
 
     fn parse_data_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
-        let mut specifiers = Vec::new();
+        let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) = self.consume_ident("expected data specifier after `<`")?;
-            if name == "scoped" {
-                self.consume_lbrace("expected `{` after `scoped` data specifier")?;
-                self.consume_ident("expected scope name inside `scoped {}`")?;
-                self.consume_rbrace("expected `}` after scoped specifier name")?;
+            let specifier = if name == "scoped" {
+                self.parse_scoped_access_specifier("data")?
+            } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
+                specifier
             } else {
                 validate_data_specifier(&name, name_span)?;
-            }
+                name
+            };
             self.consume_greater("expected `>` after data specifier")?;
-            if specifiers.iter().any(|specifier| specifier == &name) {
-                return Err(VerseError::parse(
-                    format!("duplicate data specifier `{name}`"),
+            if specifiers.iter().any(|existing| {
+                specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
+            }) {
+                return Err(duplicate_specifier_error(
+                    "data",
+                    specifier_duplicate_key(&specifier),
                     name_span,
                 ));
             }
-            specifiers.push(name);
+            specifiers.push(specifier);
         }
         Ok(specifiers)
+    }
+
+    fn parse_scoped_access_specifier(&mut self, context: &str) -> Result<String, VerseError> {
+        let (scopes, _) = self.parse_scoped_access_scope_list(&format!("{context} specifier"))?;
+        Ok(scoped_access_specifier_from_scopes(&scopes))
+    }
+
+    fn parse_scoped_access_scope_list(
+        &mut self,
+        context: &str,
+    ) -> Result<(Vec<String>, Span), VerseError> {
+        self.consume_lbrace(&format!("expected `{{` after `scoped` {context}"))?;
+        if self.check_rbrace() {
+            return Err(self.error_at_current("expected scope name inside `scoped {}`"));
+        }
+
+        let mut scopes = Vec::new();
+        loop {
+            scopes.push(self.parse_module_path()?);
+            if self.match_comma() {
+                if self.check_rbrace() {
+                    return Err(self.error_at_current("expected scope name inside `scoped {}`"));
+                }
+                continue;
+            }
+            break;
+        }
+
+        let close_span = self.consume_rbrace("expected `}` after scoped specifier name")?;
+        Ok((scopes, close_span))
+    }
+
+    fn named_scoped_access_specifier(&self, name: &str) -> Option<String> {
+        self.scoped_access_levels
+            .get(name)
+            .map(|scopes| scoped_access_specifier_from_scopes(scopes))
     }
 
     fn match_ignore_unreachable_attribute(&mut self) -> Result<bool, VerseError> {
@@ -3661,6 +3779,25 @@ impl Parser {
     }
 
     fn is_type_alias_definition(&self) -> bool {
+        if !matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            return false;
+        }
+
+        let after_name = self.skip_specifiers_at(self.current + 1);
+        if !matches!(self.kind_at(after_name), Some(TokenKind::ColonEqual)) {
+            return false;
+        }
+
+        let start = self.skip_separators_at(after_name + 1);
+        if !self.is_type_alias_target_start_at(start) {
+            return false;
+        }
+
+        let end = self.skip_type_name_at(start);
+        end != start && self.is_statement_boundary_at(end)
+    }
+
+    fn is_scoped_access_level_definition(&self) -> bool {
         if !matches!(self.peek_kind(), TokenKind::Ident(_))
             || !matches!(self.kind_at(self.current + 1), Some(TokenKind::ColonEqual))
         {
@@ -3668,12 +3805,8 @@ impl Parser {
         }
 
         let start = self.skip_separators_at(self.current + 2);
-        if !self.is_type_alias_target_start_at(start) {
-            return false;
-        }
-
-        let end = self.skip_type_name_at(start);
-        end != start && self.is_statement_boundary_at(end)
+        matches!(self.kind_at(start), Some(TokenKind::Ident(name)) if name == "scoped")
+            && matches!(self.kind_at(start + 1), Some(TokenKind::LBrace))
     }
 
     fn is_parametric_type_definition(&self) -> bool {
@@ -3883,17 +4016,35 @@ impl Parser {
                 && matches!(self.kind_at(index + 2), Some(TokenKind::Greater))
             {
                 index += 3;
-            } else if matches!(self.kind_at(index), Some(TokenKind::Less))
-                && matches!(self.kind_at(index + 1), Some(TokenKind::Ident(_)))
-                && matches!(self.kind_at(index + 2), Some(TokenKind::LBrace))
-                && matches!(self.kind_at(index + 3), Some(TokenKind::Ident(_)))
-                && matches!(self.kind_at(index + 4), Some(TokenKind::RBrace))
-                && matches!(self.kind_at(index + 5), Some(TokenKind::Greater))
-            {
-                index += 6;
+            } else if let Some(after_scoped) = self.skip_scoped_specifier_at(index) {
+                index = after_scoped;
             } else {
                 return index;
             }
+        }
+    }
+
+    fn skip_scoped_specifier_at(&self, index: usize) -> Option<usize> {
+        if !matches!(self.kind_at(index), Some(TokenKind::Less))
+            || !matches!(self.kind_at(index + 1), Some(TokenKind::Ident(name)) if name == "scoped")
+            || !matches!(self.kind_at(index + 2), Some(TokenKind::LBrace))
+        {
+            return None;
+        }
+
+        let mut cursor = index + 3;
+        loop {
+            cursor = self.skip_module_path_at(cursor)?;
+            if matches!(self.kind_at(cursor), Some(TokenKind::Comma)) {
+                cursor += 1;
+                continue;
+            }
+            if matches!(self.kind_at(cursor), Some(TokenKind::RBrace))
+                && matches!(self.kind_at(cursor + 1), Some(TokenKind::Greater))
+            {
+                return Some(cursor + 2);
+            }
+            return None;
         }
     }
 
@@ -4511,6 +4662,124 @@ impl Parser {
     }
 }
 
+fn collect_scoped_access_level_definitions(tokens: &[Token]) -> HashMap<String, Vec<String>> {
+    let mut definitions = HashMap::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let TokenKind::Ident(name) = &token.kind else {
+            continue;
+        };
+        if !matches!(
+            tokens.get(index + 1).map(|token| &token.kind),
+            Some(TokenKind::ColonEqual)
+        ) {
+            continue;
+        }
+        let start = skip_separator_tokens(tokens, index + 2);
+        if !matches!(
+            tokens.get(start).map(|token| &token.kind),
+            Some(TokenKind::Ident(scoped)) if scoped == "scoped"
+        ) || !matches!(
+            tokens.get(start + 1).map(|token| &token.kind),
+            Some(TokenKind::LBrace)
+        ) {
+            continue;
+        }
+
+        if let Some((scopes, _)) = collect_scoped_access_scopes_at(tokens, start + 2) {
+            definitions.entry(name.clone()).or_insert(scopes);
+        }
+    }
+    definitions
+}
+
+fn collect_scoped_access_scopes_at(
+    tokens: &[Token],
+    mut index: usize,
+) -> Option<(Vec<String>, usize)> {
+    if matches!(
+        tokens.get(index).map(|token| &token.kind),
+        Some(TokenKind::RBrace)
+    ) {
+        return None;
+    }
+
+    let mut scopes = Vec::new();
+    loop {
+        let (scope, next) = collect_module_path_at(tokens, index)?;
+        scopes.push(scope);
+        index = next;
+        match tokens.get(index).map(|token| &token.kind) {
+            Some(TokenKind::Comma) => index += 1,
+            Some(TokenKind::RBrace) => return Some((scopes, index + 1)),
+            _ => return None,
+        }
+    }
+}
+
+fn collect_module_path_at(tokens: &[Token], index: usize) -> Option<(String, usize)> {
+    if matches!(
+        tokens.get(index).map(|token| &token.kind),
+        Some(TokenKind::Slash)
+    ) {
+        let (first, mut cursor) = collect_module_path_component_at(tokens, index + 1)?;
+        let mut path = format!("/{first}");
+        while matches!(
+            tokens.get(cursor).map(|token| &token.kind),
+            Some(TokenKind::Slash)
+        ) {
+            let (component, next) = collect_module_path_component_at(tokens, cursor + 1)?;
+            path.push('/');
+            path.push_str(&component);
+            cursor = next;
+        }
+        return Some((path, cursor));
+    }
+
+    collect_module_path_component_at(tokens, index)
+}
+
+fn collect_module_path_component_at(tokens: &[Token], index: usize) -> Option<(String, usize)> {
+    let Some(Token {
+        kind: TokenKind::Ident(first),
+        ..
+    }) = tokens.get(index)
+    else {
+        return None;
+    };
+    let mut component = first.clone();
+    let mut cursor = index + 1;
+    while matches!(
+        tokens.get(cursor).map(|token| &token.kind),
+        Some(TokenKind::Dot)
+    ) {
+        let Some(Token {
+            kind: TokenKind::Ident(next),
+            ..
+        }) = tokens.get(cursor + 1)
+        else {
+            return None;
+        };
+        component.push('.');
+        component.push_str(next);
+        cursor += 2;
+    }
+    Some((component, cursor))
+}
+
+fn skip_separator_tokens(tokens: &[Token], mut index: usize) -> usize {
+    while matches!(
+        tokens.get(index).map(|token| &token.kind),
+        Some(TokenKind::Newline | TokenKind::Semicolon)
+    ) {
+        index += 1;
+    }
+    index
+}
+
+fn scoped_access_specifier_from_scopes(scopes: &[String]) -> String {
+    format!("scoped{{{}}}", scopes.join(","))
+}
+
 fn validate_effect_specifier(name: &str, span: Span) -> Result<(), VerseError> {
     if name == "no_rollback" {
         return Err(VerseError::parse(
@@ -4559,6 +4828,25 @@ fn validate_function_specifier(name: &str, span: Span) -> Result<(), VerseError>
             format!("unknown function specifier `{name}`"),
             span,
         ))
+    }
+}
+
+fn duplicate_specifier_error(context: &str, name: &str, span: Span) -> VerseError {
+    if is_known_access_specifier(name) {
+        VerseError::parse(
+            "Duplicate access levels: [access levels]. Only one access level may be used or omit for default access.",
+            span,
+        )
+    } else {
+        VerseError::parse(format!("duplicate {context} specifier `{name}`"), span)
+    }
+}
+
+fn specifier_duplicate_key(specifier: &str) -> &str {
+    if specifier.starts_with("scoped{") {
+        "scoped"
+    } else {
+        specifier
     }
 }
 
@@ -4802,6 +5090,7 @@ fn stmt_consumed_trailing_separator(statement: &Stmt) -> bool {
             .body
             .as_ref()
             .is_some_and(expr_consumed_trailing_separator),
+        StmtKind::ScopedAccessLevel { .. } => false,
         StmtKind::TypeAlias { .. } => false,
         StmtKind::Using { .. } => false,
         StmtKind::Break => false,

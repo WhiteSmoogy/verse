@@ -179,6 +179,7 @@ impl Checker {
                 }
 
                 if is_make_result_callee(callee) {
+                    self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
                     return self.check_make_result_call(callee, args, &arg_types, expr.span);
                 }
 
@@ -502,7 +503,14 @@ impl Checker {
         }
         for method in &methods {
             let owner = method.owner.as_deref().unwrap_or(&base_name);
-            self.ensure_aggregate_member_accessible(owner, method.access, name, "method", span)?;
+            self.ensure_aggregate_member_accessible(
+                owner,
+                method.access,
+                &method.scopes,
+                name,
+                "method",
+                span,
+            )?;
         }
         let method_type = method_group_type(methods).expect("non-empty method group should type");
         if matches!(method_type, Type::Overload(_)) && !allow_overload {
@@ -679,7 +687,14 @@ impl Checker {
         }
         for method in &methods {
             let owner = method.owner.as_deref().unwrap_or(aggregate_name);
-            self.ensure_aggregate_member_accessible(owner, method.access, name, "method", span)?;
+            self.ensure_aggregate_member_accessible(
+                owner,
+                method.access,
+                &method.scopes,
+                name,
+                "method",
+                span,
+            )?;
         }
         let method_type = method_group_type(methods).expect("non-empty method group should type");
         if matches!(method_type, Type::Overload(_)) && !allow_overload {
@@ -780,6 +795,7 @@ impl Checker {
                                 self.ensure_aggregate_member_accessible(
                                     owner,
                                     field.mutation_access,
+                                    &field.mutation_scopes,
                                     name,
                                     "field",
                                     target.span,
@@ -808,6 +824,7 @@ impl Checker {
                                 self.ensure_aggregate_member_accessible(
                                     owner,
                                     field.mutation_access,
+                                    &field.mutation_scopes,
                                     name,
                                     "field",
                                     target.span,
@@ -1514,7 +1531,7 @@ impl Checker {
         let mut best_match = None;
         let mut saw_defer_suspends_match = false;
         let mut saw_suspends_match = false;
-        let mut saw_no_rollback_match = false;
+        let mut saw_rollback_mismatch = None;
         let mut saw_effect_mismatch = None;
 
         for overload in overloads {
@@ -1560,9 +1577,11 @@ impl Checker {
                 }
             }
 
-            if require_rollback && has_no_rollback_effect(effects) {
-                saw_no_rollback_match = true;
-                continue;
+            if require_rollback {
+                if let Err(error) = ensure_callable_in_failure_context(effects, span) {
+                    saw_rollback_mismatch.get_or_insert(error);
+                    continue;
+                }
             }
 
             if let Err(error) = self.ensure_current_function_allows_call_effects(effects, span) {
@@ -1605,11 +1624,8 @@ impl Checker {
             ));
         }
 
-        if saw_no_rollback_match {
-            return Err(VerseError::check_at(
-                "function with `<no_rollback>` effect cannot be called in a failure context",
-                span,
-            ));
+        if let Some(error) = saw_rollback_mismatch {
+            return Err(error);
         }
 
         if let Some(error) = saw_effect_mismatch {
@@ -1995,8 +2011,28 @@ impl Checker {
                 callee.span,
             ));
         }
+        if info.kind == AggregateKind::Class {
+            self.ensure_class_constructor_accessible(
+                &aggregate_name,
+                info.constructor_access,
+                &info.constructor_scopes,
+                callee.span,
+            )?;
+        }
         if info.kind == AggregateKind::Class && info.unique {
             self.ensure_current_function_allows_allocation(callee.span)?;
+        }
+        if info.kind == AggregateKind::Class && !info.constructor_effects.is_empty() {
+            self.ensure_current_function_allows_call_effects(
+                &info.constructor_effects,
+                callee.span,
+            )?;
+        }
+        if let Some(span) = entries.iter().find_map(archetype_entry_escape) {
+            return Err(VerseError::check_at(
+                "`return` and `break` are disallowed in archetype instantiation.",
+                span,
+            ));
         }
 
         self.push_scope();
@@ -2040,6 +2076,7 @@ impl Checker {
                             self.ensure_aggregate_member_accessible(
                                 owner,
                                 expected.access,
+                                &expected.scopes,
                                 &field.name,
                                 "field",
                                 field.span,
@@ -2186,6 +2223,7 @@ impl Checker {
                     ensure_callable_in_failure_context(&effects, call.span)?;
                 }
                 self.ensure_callable_in_async_context(&effects, call.span)?;
+                self.ensure_current_function_allows_call_effects(&effects, call.span)?;
                 self.check_call_arguments(
                     (arity, arity_range),
                     param_types.as_deref(),
@@ -2538,19 +2576,17 @@ impl Checker {
                     true,
                     statement.span,
                 )?,
-                StmtKind::Return(expr) => {
-                    let Some(expected) = self.function_returns.last().cloned() else {
-                        return Err(VerseError::check_at(
-                            "`return` used outside a function",
-                            statement.span,
-                        ));
-                    };
-
-                    let actual = self.check_failure_expr(expr)?;
-                    self.ensure_expr_assignable(&expected, &actual, expr, || {
-                        format!("cannot return `{actual}` from function returning `{expected}`")
-                    })?;
-                    Type::Never
+                StmtKind::Return(_) => {
+                    return Err(VerseError::check_at(
+                        "Explicit return out of a failure context is not allowed",
+                        statement.span,
+                    ));
+                }
+                StmtKind::Break => {
+                    return Err(VerseError::check_at(
+                        "`break` may not be used in a failure context",
+                        statement.span,
+                    ));
                 }
                 StmtKind::Set { target, op, expr } => {
                     self.check_set_expression(target, *op, expr, true, statement.span)?
@@ -2617,6 +2653,7 @@ impl Checker {
             StmtKind::Using { .. }
             | StmtKind::ParametricType { .. }
             | StmtKind::TypeAlias { .. }
+            | StmtKind::ScopedAccessLevel { .. }
             | StmtKind::ExtensionMethod(_)
             | StmtKind::Defer(_) => false,
         }
@@ -2847,20 +2884,24 @@ impl Checker {
         }
 
         if is_shuffle_callee(callee) && is_shuffle_function_type(&callee_type) {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
             return self.check_shuffle_call(args, &arg_types, span);
         }
 
         if is_concatenate_callee(callee) && is_concatenate_function_type(&callee_type) {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
             return self.check_concatenate_call(args, &arg_types, span);
         }
 
         if is_make_classifiable_subset_callee(callee)
             && is_make_classifiable_subset_function_type(&callee_type)
         {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
             return self.check_make_classifiable_subset_call(args, &arg_types, span);
         }
 
         if is_make_result_callee(callee) {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
             return self.check_make_result_call(callee, args, &arg_types, span);
         }
 
@@ -4295,14 +4336,29 @@ impl Checker {
         &self,
         owner: &str,
         access: AccessLevel,
+        scopes: &[String],
         member_name: &str,
         member_kind: &str,
         span: Span,
     ) -> Result<(), VerseError> {
         if self.interface_types.contains_key(owner) {
-            self.ensure_interface_member_accessible(owner, access, member_name, member_kind, span)
+            self.ensure_interface_member_accessible(
+                owner,
+                access,
+                scopes,
+                member_name,
+                member_kind,
+                span,
+            )
         } else {
-            self.ensure_class_member_accessible(owner, access, member_name, member_kind, span)
+            self.ensure_class_member_accessible(
+                owner,
+                access,
+                scopes,
+                member_name,
+                member_kind,
+                span,
+            )
         }
     }
 
@@ -4310,15 +4366,39 @@ impl Checker {
         &self,
         owner_class: &str,
         access: AccessLevel,
+        scopes: &[String],
         member_name: &str,
         member_kind: &str,
         span: Span,
     ) -> Result<(), VerseError> {
+        if self
+            .inaccessible_scoped_enclosing_aggregate(owner_class)
+            .is_some()
+        {
+            return Err(VerseError::check_at(
+                format!("{member_kind} `{member_name}` is scoped to class `{owner_class}`"),
+                span,
+            ));
+        }
+        if let Some(scope) = self.inaccessible_internal_enclosing_aggregate(owner_class) {
+            let parent = aggregate_module_name(&scope).unwrap_or("<root module>");
+            let hidden_member = aggregate_unqualified_name(&scope);
+            return Err(VerseError::check_at(
+                format!("member `{hidden_member}` is internal to module `{parent}`"),
+                span,
+            ));
+        }
+
         match access {
             AccessLevel::Public => Ok(()),
             AccessLevel::Internal => {
-                let current_module = self.current_module_name();
-                if current_module.as_deref() == aggregate_module_name(owner_class) {
+                if aggregate_module_name(owner_class).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| {
+                        self.current_module_is_same_or_child_of(module)
+                            || self.aggregate_or_parent_scoped_accessible(owner_class)
+                    },
+                ) {
                     Ok(())
                 } else {
                     let module_name = aggregate_module_name(owner_class).unwrap_or("<root module>");
@@ -4326,6 +4406,21 @@ impl Checker {
                         format!(
                             "{member_kind} `{member_name}` is internal to module `{module_name}`"
                         ),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Scoped => {
+                if aggregate_module_name(owner_class).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| self.current_module_is_same_or_child_of(module),
+                ) || self.scoped_accessible(scopes)
+                    || self.aggregate_or_parent_scoped_accessible(owner_class)
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!("{member_kind} `{member_name}` is scoped to class `{owner_class}`"),
                         span,
                     ))
                 }
@@ -4363,19 +4458,170 @@ impl Checker {
         }
     }
 
+    pub(super) fn ensure_class_constructor_accessible(
+        &self,
+        owner_class: &str,
+        access: AccessLevel,
+        scopes: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_class_constructor_accessible_with_protected_subclass(
+            owner_class,
+            access,
+            scopes,
+            false,
+            span,
+        )
+    }
+
+    pub(super) fn ensure_base_class_constructor_accessible(
+        &self,
+        owner_class: &str,
+        access: AccessLevel,
+        scopes: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_class_constructor_accessible_with_protected_subclass(
+            owner_class,
+            access,
+            scopes,
+            true,
+            span,
+        )
+    }
+
+    fn ensure_class_constructor_accessible_with_protected_subclass(
+        &self,
+        owner_class: &str,
+        access: AccessLevel,
+        scopes: &[String],
+        allow_protected_subclass: bool,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if self
+            .inaccessible_scoped_enclosing_aggregate(owner_class)
+            .is_some()
+        {
+            return Err(VerseError::check_at(
+                format!("class constructor `{owner_class}` is scoped to class `{owner_class}`"),
+                span,
+            ));
+        }
+        if let Some(scope) = self.inaccessible_internal_enclosing_aggregate(owner_class) {
+            let parent = aggregate_module_name(&scope).unwrap_or("<root module>");
+            let hidden_member = aggregate_unqualified_name(&scope);
+            return Err(VerseError::check_at(
+                format!("member `{hidden_member}` is internal to module `{parent}`"),
+                span,
+            ));
+        }
+
+        match access {
+            AccessLevel::Public => Ok(()),
+            AccessLevel::Internal => {
+                if aggregate_module_name(owner_class).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| {
+                        self.current_module_is_same_or_child_of(module)
+                            || self.aggregate_or_parent_scoped_accessible(owner_class)
+                    },
+                ) {
+                    Ok(())
+                } else {
+                    let module_name = aggregate_module_name(owner_class).unwrap_or("<root module>");
+                    Err(VerseError::check_at(
+                        format!(
+                            "class constructor `{owner_class}` is internal to module `{module_name}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Scoped => {
+                if aggregate_module_name(owner_class).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| self.current_module_is_same_or_child_of(module),
+                ) || self.scoped_accessible(scopes)
+                    || self.aggregate_or_parent_scoped_accessible(owner_class)
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!(
+                            "class constructor `{owner_class}` is scoped to class `{owner_class}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Private => {
+                if self
+                    .class_context
+                    .last()
+                    .is_some_and(|current| current == owner_class)
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!("class constructor `{owner_class}` is private"),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Protected => {
+                if allow_protected_subclass
+                    || self.class_context.last().is_some_and(|current| {
+                        current == owner_class || self.is_class_subtype(current, owner_class)
+                    })
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!("class constructor `{owner_class}` is protected"),
+                        span,
+                    ))
+                }
+            }
+        }
+    }
+
     pub(super) fn ensure_interface_member_accessible(
         &self,
         owner_interface: &str,
         access: AccessLevel,
+        scopes: &[String],
         member_name: &str,
         member_kind: &str,
         span: Span,
     ) -> Result<(), VerseError> {
+        if self
+            .inaccessible_scoped_enclosing_aggregate(owner_interface)
+            .is_some()
+        {
+            return Err(VerseError::check_at(
+                format!("{member_kind} `{member_name}` is scoped to interface `{owner_interface}`"),
+                span,
+            ));
+        }
+        if let Some(scope) = self.inaccessible_internal_enclosing_aggregate(owner_interface) {
+            let parent = aggregate_module_name(&scope).unwrap_or("<root module>");
+            let hidden_member = aggregate_unqualified_name(&scope);
+            return Err(VerseError::check_at(
+                format!("member `{hidden_member}` is internal to module `{parent}`"),
+                span,
+            ));
+        }
+
         match access {
             AccessLevel::Public => Ok(()),
             AccessLevel::Internal => {
-                let current_module = self.current_module_name();
-                if current_module.as_deref() == aggregate_module_name(owner_interface) {
+                if aggregate_module_name(owner_interface).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| {
+                        self.current_module_is_same_or_child_of(module)
+                            || self.aggregate_or_parent_scoped_accessible(owner_interface)
+                    },
+                ) {
                     Ok(())
                 } else {
                     let module_name =
@@ -4383,6 +4629,23 @@ impl Checker {
                     Err(VerseError::check_at(
                         format!(
                             "{member_kind} `{member_name}` is internal to module `{module_name}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Scoped => {
+                if aggregate_module_name(owner_interface).map_or_else(
+                    || self.current_module_name().is_none(),
+                    |module| self.current_module_is_same_or_child_of(module),
+                ) || self.scoped_accessible(scopes)
+                    || self.aggregate_or_parent_scoped_accessible(owner_interface)
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!(
+                            "{member_kind} `{member_name}` is scoped to interface `{owner_interface}`"
                         ),
                         span,
                     ))
@@ -4418,10 +4681,40 @@ impl Checker {
         member_name: &str,
         span: Span,
     ) -> Result<(), VerseError> {
+        if let Some(scope) = self.inaccessible_scoped_enclosing_module(module_name) {
+            return Err(VerseError::check_at(
+                format!("member `{member_name}` is scoped to `{scope}`"),
+                span,
+            ));
+        }
+        if let Some(scope) = self.inaccessible_internal_enclosing_module(module_name) {
+            let parent = aggregate_module_name(&scope).unwrap_or("<root module>");
+            let hidden_member = aggregate_unqualified_name(&scope);
+            return Err(VerseError::check_at(
+                format!("member `{hidden_member}` is internal to module `{parent}`"),
+                span,
+            ));
+        }
+
         match access {
             AccessLevel::Public => Ok(()),
+            AccessLevel::Scoped => {
+                if self.current_module_is_same_or_child_of(module_name)
+                    || self.module_member_scoped_accessible(module_name, member_name)
+                    || self.module_or_parent_scoped_accessible(module_name)
+                {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!("member `{member_name}` is scoped to `{module_name}`"),
+                        span,
+                    ))
+                }
+            }
             AccessLevel::Internal | AccessLevel::Private | AccessLevel::Protected => {
-                if self.current_module_name().as_deref() == Some(module_name) {
+                if self.current_module_is_same_or_child_of(module_name)
+                    || self.module_or_parent_scoped_accessible(module_name)
+                {
                     Ok(())
                 } else {
                     Err(VerseError::check_at(
@@ -4594,7 +4887,14 @@ impl Checker {
             };
             if let Some(field) = info.fields.iter().find(|field| field.name == name) {
                 let owner = field.owner.as_deref().unwrap_or(interface_name);
-                self.ensure_aggregate_member_accessible(owner, field.access, name, "field", span)?;
+                self.ensure_aggregate_member_accessible(
+                    owner,
+                    field.access,
+                    &field.scopes,
+                    name,
+                    "field",
+                    span,
+                )?;
                 return Ok(field.value_type.clone());
             }
             if let Some(method_type) =
@@ -4605,6 +4905,7 @@ impl Checker {
                     self.ensure_aggregate_member_accessible(
                         owner,
                         method.access,
+                        &method.scopes,
                         name,
                         "method",
                         span,
@@ -4699,6 +5000,7 @@ impl Checker {
                     self.ensure_aggregate_member_accessible(
                         owner,
                         field.access,
+                        &field.scopes,
                         name,
                         "field",
                         span,
@@ -4715,6 +5017,7 @@ impl Checker {
                     self.ensure_aggregate_member_accessible(
                         owner,
                         method.access,
+                        &method.scopes,
                         name,
                         "method",
                         span,
@@ -4851,6 +5154,15 @@ impl Checker {
                     .any(|imports| imports.iter().any(|import| import == module_name));
                 if !imported {
                     return Ok(false);
+                }
+                if method.access == AccessLevel::Scoped {
+                    if self.scoped_accessible(&method.scopes) {
+                        return Ok(true);
+                    }
+                    return Err(VerseError::check_at(
+                        format!("member `{name}` is scoped to `{module_name}`"),
+                        span,
+                    ));
                 }
                 self.ensure_module_member_accessible(module_name, method.access, name, span)?;
                 Ok(true)
