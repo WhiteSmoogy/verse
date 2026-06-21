@@ -603,7 +603,7 @@ Result
 }
 
 #[test]
-fn runtime_errors_on_awaiting_sleep_inf_pending_task_without_scheduler() {
+fn rejects_awaiting_sleep_inf_pending_task_outside_async_context() {
     let source = r#"
 Never()<suspends>:void =
     Sleep(Inf)
@@ -611,14 +611,11 @@ Task:task(void) = spawn{Never()}
 Task.Await()
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
     assert!(
         error
             .to_string()
-            .contains("cannot complete without async scheduling support")
+            .contains("function with `<suspends>` effect can only be called in an async context")
     );
 }
 
@@ -882,15 +879,13 @@ player_profile_data(t:type) := class<final><persistable>:
 
 #[test]
 fn runtime_errors_on_persistable_parametric_class() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+    let error = run_source(
+        r#"
 player_profile_data(t:type) := class<final><persistable>:
     Value:t
 "#,
-        )
-        .expect_err("source should runtime error");
+    )
+    .expect_err("source should runtime error");
 
     assert!(
         error
@@ -1028,15 +1023,13 @@ profile_snapshot(t:type) := struct<persistable>:
 
 #[test]
 fn runtime_errors_on_persistable_parametric_struct() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+    let error = run_source(
+        r#"
 profile_snapshot(t:type) := struct<persistable>:
     Value:t
 "#,
-        )
-        .expect_err("source should runtime error");
+    )
+    .expect_err("source should runtime error");
 
     assert!(
         error

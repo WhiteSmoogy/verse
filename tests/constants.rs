@@ -297,24 +297,21 @@ record{}.Value + thing{}.Value + thing{}.Score
 
 #[test]
 fn runtime_errors_on_recursive_data_member_default_construction() {
-    let mut interpreter = Interpreter::new();
-    interpreter
-        .eval_source(
-            r#"
+    run_source(
+        r#"
 node := class:
     Value : int = 0
 "#,
-        )
-        .expect("initial type should run");
+    )
+    .expect("initial type should run");
 
-    let error = interpreter
-        .eval_source(
-            r#"
+    let error = run_source(
+        r#"
 node := class:
     Child : node = node{}
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
     assert!(
         error
@@ -324,32 +321,27 @@ node := class:
 }
 
 #[test]
-fn runtime_errors_on_data_member_default_no_rollback_call() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+fn rejects_data_member_default_no_rollback_call_through_run_source() {
+    let error = run_source(
+        r#"
 Make():int = 42
 
 bad := class:
     Value:int = Make()
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("data-member default value can only call `<converges>` functions")
-    );
+    assert!(error.to_string().contains(
+        "function with <converges> effect cannot call function requiring <no_rollback> effect"
+    ));
 }
 
 #[test]
 fn evaluates_verse_style_constant_definitions() {
     let source = r#"
 Answer:int = 40
-Truth:logic = true
-if (Truth) {
+if (Answer = 40) {
     Answer + 2
 } else {
     0

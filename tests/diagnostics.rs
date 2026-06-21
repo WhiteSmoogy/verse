@@ -19,16 +19,14 @@ fn check_errors_include_source_locations() {
 }
 
 #[test]
-fn runtime_errors_include_source_locations() {
+fn failable_expression_check_errors_include_source_locations() {
     let source = "1 / 0";
-    let mut interpreter = Interpreter::new();
-    let pretty = interpreter
-        .eval_source(source)
+    let pretty = run_source(source)
         .expect_err("source should fail")
         .pretty(source);
 
-    assert!(pretty.contains("error[V1003]"));
-    assert!(pretty.contains("division by zero at line 1, column 1"));
+    assert!(pretty.contains("error[V1002]"));
+    assert!(pretty.contains("failable expression must be used in a failure context"));
     assert!(pretty.contains("1 / 0"));
     assert!(pretty.contains("^^^^^"));
 }

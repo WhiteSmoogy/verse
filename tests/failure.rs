@@ -708,7 +708,7 @@ else:
 }
 
 #[test]
-fn runtime_errors_on_defer_when_if_failure_context_fails() {
+fn runs_defer_when_if_failure_context_fails() {
     let source = r#"
 if:
     defer:
@@ -725,10 +725,7 @@ else:
         Type::Int
     );
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("failed failure context should run defer");
 
     assert!(error.to_string().contains("defer ran"));
 }
@@ -780,7 +777,7 @@ else:
 }
 
 #[test]
-fn runtime_errors_on_defer_when_decides_function_fails() {
+fn runs_defer_when_decides_function_fails() {
     let source = r#"
 Try()<decides><transacts>:int =
     defer:
@@ -799,10 +796,7 @@ else:
         Type::Int
     );
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("failed decides function should run defer");
 
     assert!(error.to_string().contains("decides defer ran"));
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::ast::{CallArg, Expr, Param, ParamPattern, TypeParam};
 use crate::error::VerseError;
 
-use super::{ClassMethodInfo, ExtensionMethodInfo, ParamSpec, StructInfo, Type};
+use super::*;
 
 pub(super) fn method_binding_types(methods: &[ClassMethodInfo]) -> Vec<(String, Type)> {
     let mut grouped: Vec<(String, Vec<Type>)> = Vec::new();
@@ -777,4 +777,237 @@ pub(super) fn collect_function_type_params_inner(
         }
     }
     Ok(())
+}
+
+impl Checker {
+    pub(super) fn predeclare_top_level_functions(
+        &mut self,
+        program: &Program,
+    ) -> Result<(), VerseError> {
+        self.predeclare_functions_in_current_scope(&program.statements)
+    }
+
+    pub(super) fn predeclare_functions_in_current_scope(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        for statement in statements {
+            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                continue;
+            };
+            let ExprKind::Function {
+                params,
+                effects,
+                return_type,
+                ..
+            } = &expr.kind
+            else {
+                continue;
+            };
+
+            if self.type_aliases.contains_key(name) {
+                return Err(VerseError::check_at(
+                    format!("function `{name}` conflicts with type alias `{name}`"),
+                    statement.span,
+                ));
+            }
+            let type_params = collect_function_type_params(params)?;
+            self.validate_type_parameter_constraints(&type_params, statement.span)?;
+            self.push_type_param_scope(type_params.iter().map(|param| {
+                (
+                    param.name.clone(),
+                    Type::Param(param.name.clone(), param.constraint.clone()),
+                )
+            }));
+            let function_type = (|| {
+                Ok(Type::Function {
+                    arity: Some(params.len()),
+                    arity_range: None,
+                    effects: effects.clone(),
+                    param_types: Some(self.param_types(params)?),
+                    param_specs: Some(self.param_specs(params)?),
+                    return_type: Box::new(self.annotation_to_type(return_type.as_ref())?),
+                })
+            })();
+            self.pop_type_param_scope();
+            let function_type = function_type?;
+            self.define_predeclared_function(name, function_type, statement.span)?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn define_predeclared_function(
+        &mut self,
+        name: &str,
+        function_type: Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let current = self
+            .scopes
+            .last_mut()
+            .expect("checker should always have a scope");
+        let Some(existing) = current.get_mut(name) else {
+            current.insert(name.to_string(), Symbol::immutable(function_type));
+            return Ok(());
+        };
+
+        if existing.mutable {
+            return Err(VerseError::check_at(
+                format!("duplicate definition `{name}`"),
+                span,
+            ));
+        }
+
+        match &mut existing.value_type {
+            Type::Function { .. } => {
+                if function_signatures_conflict(
+                    &existing.value_type,
+                    &function_type,
+                    &self.struct_types,
+                ) {
+                    return Err(VerseError::check_at(
+                        format!("duplicate overload `{name}`"),
+                        span,
+                    ));
+                }
+                let previous = existing.value_type.clone();
+                existing.value_type = Type::Overload(vec![previous, function_type]);
+                Ok(())
+            }
+            Type::Overload(overloads) => {
+                if overloads.iter().any(|overload| {
+                    function_signatures_conflict(overload, &function_type, &self.struct_types)
+                }) {
+                    return Err(VerseError::check_at(
+                        format!("duplicate overload `{name}`"),
+                        span,
+                    ));
+                }
+                overloads.push(function_type);
+                Ok(())
+            }
+            _ => Err(VerseError::check_at(
+                format!("duplicate definition `{name}`"),
+                span,
+            )),
+        }
+    }
+
+    pub(super) fn predeclare_extension_methods_in_current_scope(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        for statement in statements {
+            let StmtKind::ExtensionMethod(method) = &statement.kind else {
+                continue;
+            };
+            self.register_extension_method_signature(method)?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn register_extension_method_signature(
+        &mut self,
+        extension: &ExtensionMethod,
+    ) -> Result<(), VerseError> {
+        let receiver_type = self.extension_receiver_type(extension)?;
+        let method_type = self.extension_method_declared_type(&extension.method)?;
+        let access = access_level_from_specifiers(
+            &extension.method.effects,
+            "extension method",
+            extension.span,
+        )?;
+        let module_name = self.current_module_name();
+        let methods = self
+            .extension_methods
+            .entry(extension.method.name.clone())
+            .or_default();
+
+        if let Some(existing) = methods.iter().find(|method| {
+            method.module_name == module_name && method.receiver_type == receiver_type
+        }) {
+            return Err(VerseError::check_at(
+                format!(
+                    "duplicate extension method `{}` for receiver type `{receiver_type}`",
+                    extension.method.name
+                ),
+                existing.span.through(extension.span),
+            ));
+        }
+
+        methods.push(ExtensionMethodInfo {
+            receiver_type,
+            method_type,
+            module_name,
+            access,
+            span: extension.span,
+        });
+
+        Ok(())
+    }
+
+    pub(super) fn with_local_extension_methods<T>(
+        &mut self,
+        extensions: &[ExtensionMethod],
+        f: impl FnOnce(&mut Self) -> Result<T, VerseError>,
+    ) -> Result<T, VerseError> {
+        let previous = self.extension_methods.clone();
+        let result = self
+            .register_local_extension_method_signatures(extensions)
+            .and_then(|_| f(self));
+        self.extension_methods = previous;
+        result
+    }
+
+    pub(super) fn register_local_extension_method_signatures(
+        &mut self,
+        extensions: &[ExtensionMethod],
+    ) -> Result<(), VerseError> {
+        let mut local = Vec::with_capacity(extensions.len());
+        for extension in extensions {
+            let receiver_type = self.extension_receiver_type(extension)?;
+            if local.iter().any(
+                |(name, existing_receiver, _, _, _): &(String, Type, Type, AccessLevel, Span)| {
+                    name == &extension.method.name && existing_receiver == &receiver_type
+                },
+            ) {
+                return Err(VerseError::check_at(
+                    format!(
+                        "duplicate extension method `{}` for receiver type `{receiver_type}`",
+                        extension.method.name
+                    ),
+                    extension.span,
+                ));
+            }
+            let method_type = self.extension_method_declared_type(&extension.method)?;
+            let access = access_level_from_specifiers(
+                &extension.method.effects,
+                "extension method",
+                extension.span,
+            )?;
+            local.push((
+                extension.method.name.clone(),
+                receiver_type,
+                method_type,
+                access,
+                extension.span,
+            ));
+        }
+
+        for (name, receiver_type, method_type, access, span) in local {
+            let methods = self.extension_methods.entry(name).or_default();
+            methods.retain(|method| method.receiver_type != receiver_type);
+            methods.push(ExtensionMethodInfo {
+                receiver_type,
+                method_type,
+                module_name: None,
+                access,
+                span,
+            });
+        }
+
+        Ok(())
+    }
 }

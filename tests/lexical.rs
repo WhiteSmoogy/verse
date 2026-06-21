@@ -951,7 +951,14 @@ else:
 fn evaluates_verse_array_literal_and_array_type() {
     let source = r#"
 Values:[]int = array{3, 4, 5}
-Values[0] + Values[1] + Values[2]
+if:
+    First := Values[0]
+    Second := Values[1]
+    Third := Values[2]
+then:
+    First + Second + Third
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(12));
@@ -965,7 +972,13 @@ Scores:[string]int = map{
     "bob" => 20,
     "alice" => 15,
 }
-Scores["alice"] + Scores["bob"] + Scores.Length
+if:
+    Alice := Scores["alice"]
+    Bob := Scores["bob"]
+then:
+    Alice + Bob + Scores.Length
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(37));
@@ -1002,7 +1015,7 @@ Pair(-1)
 fn evaluates_option_literals_and_unwrap() {
     let source = r#"
 Maybe:?int = option{40}
-Maybe? + 2
+if (Value := Maybe?). Value + 2 else. 0
 "#;
 
     assert_eq!(eval(source), Value::Int(42));

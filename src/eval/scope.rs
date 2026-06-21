@@ -315,6 +315,7 @@ impl TransactionCollector {
                 self.collect_runtime_class_methods(methods);
             }
             Value::NativeModifierMethod { receiver, .. } => self.collect_value(receiver),
+            Value::NativeArrayMethod { receiver, .. } => self.collect_value(receiver),
             Value::NativeCancelMethod { entries, .. } => {
                 let next_order = Rc::new(RefCell::new(0));
                 self.collect_modifier_stack(entries, &next_order);

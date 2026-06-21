@@ -40,7 +40,7 @@ else:
 }
 
 #[test]
-fn runtime_errors_on_defer_when_option_failure_context_fails() {
+fn runs_defer_in_failed_option_source() {
     let source = r#"
 Maybe := option{block:
     defer:
@@ -59,10 +59,7 @@ else:
         Type::Int
     );
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("defer should run during failed option source");
 
     assert!(error.to_string().contains("option defer ran"));
 }
@@ -271,7 +268,7 @@ var Maybe:?int = false
 set Maybe = option{7}
 set Maybe = false
 set Maybe = option{42}
-Maybe?
+if (Value := Maybe?). Value else. 0
 "#;
 
     assert_eq!(eval(source), Value::Int(42));
@@ -291,15 +288,16 @@ fn rejects_unwrap_on_non_option() {
 }
 
 #[test]
-fn runtime_errors_on_empty_option_unwrap() {
+fn rejects_empty_option_unwrap_outside_failure_context() {
     let source = r#"
 Maybe:?int = false
 Maybe?
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
-    assert!(error.to_string().contains("empty option"));
+    assert!(
+        error
+            .to_string()
+            .contains("failable expression must be used in a failure context")
+    );
 }

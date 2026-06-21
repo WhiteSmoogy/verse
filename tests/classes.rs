@@ -617,7 +617,7 @@ box{}.Reveal()
 }
 
 #[test]
-fn rejects_interface_required_protected_field_without_class_default() {
+fn rejects_class_missing_interface_protected_field_default_through_run_source() {
     let error = check_source(
         r#"
 secret := interface:
@@ -671,22 +671,20 @@ box
 }
 
 #[test]
-fn runtime_errors_on_interface_required_protected_field_without_class_default() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+fn rejects_interface_required_protected_field_without_class_default() {
+    let error = run_source(
+        r#"
 secret := interface:
     Hidden<protected>:int
 
 box := class(secret):
     Score:int = 0
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
     assert!(error.to_string().contains(
-        "class `<anonymous>` must be `abstract` or provide a default value for interface field `Hidden`"
+        "class `box` must be `abstract` or provide a default value for interface field `Hidden`"
     ));
 }
 
@@ -1238,10 +1236,7 @@ child_box(t:type) := class(base_box(t)):
 
 child_box(int)
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
     assert!(
         error
@@ -1281,10 +1276,7 @@ child_view(t:type) := interface(base_view(t)):
 
 child_view(int)
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
     assert!(
         error
@@ -1415,10 +1407,7 @@ Foo(X:t where t:subtype(base_class)):int =
 Foo(other_class{})
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("source should fail at runtime");
 
     assert!(
         error
@@ -1528,22 +1517,20 @@ TagType:castable_subtype(tag) = thing
 }
 
 #[test]
-fn runtime_errors_on_non_castable_class_type_argument() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+fn rejects_non_castable_class_type_argument() {
+    let error = run_source(
+        r#"
 puzzle_light := class(tag){}
 Use(TagType:castable_subtype(tag)):int = 42
 Use(puzzle_light)
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("argument `TagType` expected `castable_subtype(tag)`")
+            .contains("argument 1 expected `castable_subtype(tag)`, got `class<puzzle_light>`")
     );
 }
 
@@ -1628,22 +1615,20 @@ TagType:concrete_subtype(tag) = thing
 }
 
 #[test]
-fn runtime_errors_on_non_concrete_class_type_argument() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+fn rejects_non_concrete_class_type_argument() {
+    let error = run_source(
+        r#"
 puzzle_light := class(tag){}
 Use(TagType:concrete_subtype(tag)):int = 42
 Use(puzzle_light)
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("argument `TagType` expected `concrete_subtype(tag)`")
+            .contains("argument 1 expected `concrete_subtype(tag)`, got `class<puzzle_light>`")
     );
 }
 
@@ -2066,10 +2051,7 @@ player:
     MakeBadge<constructor>()
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("source should fail at runtime");
 
     assert!(error.to_string().contains("not `player` or a superclass"));
 }
@@ -2469,15 +2451,13 @@ bad_component := class<final_super><final_super>(component):
 
 #[test]
 fn runtime_errors_on_component_class_without_final_super() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(
-            r#"
+    let error = run_source(
+        r#"
 bad_component := class(component):
     Value:int = 0
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
     assert!(
         error

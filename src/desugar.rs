@@ -1,5 +1,18 @@
 use crate::ast::*;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Desugarer;
+
+impl Desugarer {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn desugar_program(self, program: &Program) -> Program {
+        desugar_program(program)
+    }
+}
+
 pub fn desugar_program(program: &Program) -> Program {
     Program {
         statements: desugar_statements(&program.statements),

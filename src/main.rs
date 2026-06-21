@@ -2,7 +2,7 @@ use std::env;
 use std::io::{self, Write};
 use std::process;
 
-use verse_rs::{Interpreter, Value, load_project_source, parse_source};
+use verse_rs::{Value, load_project_source, parse_source, run_source};
 
 fn main() {
     if let Err(message) = run_cli() {
@@ -55,19 +55,13 @@ fn run_file(file: &str, mode: Mode) -> Result<(), String> {
             println!("check ok: {value_type}");
             Ok(())
         }
-        Mode::Run => {
-            verse_rs::check_source(&source).map_err(|err| err.pretty(&source))?;
-            let mut interpreter = Interpreter::new();
-            interpreter
-                .eval_source(&source)
-                .map(|_| ())
-                .map_err(|err| err.pretty(&source))
-        }
+        Mode::Run => run_source(&source)
+            .map(|_| ())
+            .map_err(|err| err.pretty(&source)),
     }
 }
 
 fn repl() -> Result<(), String> {
-    let mut interpreter = Interpreter::new();
     let stdin = io::stdin();
 
     println!("verse-rs REPL. Type :help for commands.");
@@ -91,14 +85,14 @@ fn repl() -> Result<(), String> {
             "" => continue,
             ":quit" | ":q" => break,
             ":help" => {
-                println!("Enter expressions, bindings, or function definitions.");
+                println!("Enter complete source snippets.");
                 println!("Examples: x: number := 41, add(a: number, b: number): number := a + b");
                 continue;
             }
             _ => {}
         }
 
-        match interpreter.eval_source(input) {
+        match run_source(input) {
             Ok(value) if value != Value::None => println!("{value}"),
             Ok(_) => {}
             Err(err) => eprintln!("{}", err.pretty(input)),

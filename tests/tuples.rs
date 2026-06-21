@@ -332,7 +332,7 @@ Grid:[tuple(int, int)]string = map{
     (0, 0) => "origin",
     (1, 0) => "east",
 }
-Grid[(1, 0)]
+if (Value := Grid[(1, 0)]). Value else. ""
 "#;
 
     assert_eq!(eval(source), Value::String("east".into()));

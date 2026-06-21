@@ -506,8 +506,14 @@ fn evaluates_official_int_results_as_runtime_ints() {
         );
     }
 
-    assert!(matches!(eval("array{10, 20}.Find[20]"), Value::Int(1)));
-    assert!(matches!(eval(r#""abc".Find['b']"#), Value::Int(1)));
+    assert!(matches!(
+        eval("if (Index := array{10, 20}.Find[20]). Index else. -1"),
+        Value::Int(1)
+    ));
+    assert!(matches!(
+        eval(r#"if (Index := "abc".Find['b']). Index else. -1"#),
+        Value::Int(1)
+    ));
 
     let range_values = eval("for (I := 1..3) { I }");
     let Value::Array(items) = range_values else {

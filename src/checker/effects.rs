@@ -1,6 +1,8 @@
 use crate::error::VerseError;
 use crate::token::Span;
 
+use super::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     NoRollback,
@@ -369,4 +371,214 @@ pub(super) fn validate_function_effect_combination(
     }
 
     Ok(())
+}
+
+impl Checker {
+    pub(super) fn current_function_has_effect(&self, effect: &str) -> bool {
+        self.function_effects
+            .last()
+            .is_some_and(|effects| has_effect(effects, effect))
+    }
+
+    pub(super) fn push_async_expr_marker(&mut self) {
+        self.async_expr_markers.push(AsyncExprMarker {
+            function_depth: self.function_effects.len(),
+            seen: false,
+        });
+    }
+
+    pub(super) fn pop_async_expr_marker(&mut self) -> bool {
+        self.async_expr_markers
+            .pop()
+            .expect("checker async expression marker stack should not underflow")
+            .seen
+    }
+
+    pub(super) fn mark_async_expression(&mut self) {
+        if self.suppressed_async_expr_markers > 0 {
+            return;
+        }
+
+        let function_depth = self.function_effects.len();
+        if let Some(marker) = self.async_expr_markers.last_mut()
+            && marker.function_depth == function_depth
+        {
+            marker.seen = true;
+        }
+    }
+
+    pub(super) fn with_suppressed_async_expr_marker<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.suppressed_async_expr_markers += 1;
+        let result = f(self);
+        self.suppressed_async_expr_markers -= 1;
+        result
+    }
+
+    pub(super) fn ensure_callable_in_async_context(
+        &mut self,
+        effects: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if !has_effect(effects, "suspends") {
+            return Ok(());
+        }
+
+        if self.defer_depth > 0 {
+            return Err(VerseError::check_at(
+                "`defer` block cannot contain suspend expressions",
+                span,
+            ));
+        }
+
+        if !self.current_function_has_effect("suspends") {
+            return Err(VerseError::check_at(
+                "function with `<suspends>` effect can only be called in an async context",
+                span,
+            ));
+        }
+
+        self.mark_async_expression();
+        Ok(())
+    }
+
+    pub(super) fn ensure_callee_type_effects_allowed(
+        &self,
+        callee_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match callee_type {
+            Type::Function { effects, .. } => {
+                self.ensure_current_function_allows_call_effects(effects, span)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) fn ensure_current_function_allows_call_effects(
+        &self,
+        callee_effects: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some(caller_effects) = self.function_effects.last() else {
+            return Ok(());
+        };
+        if !has_explicit_call_effect_specifier(caller_effects) {
+            return Ok(());
+        }
+
+        if has_no_rollback_effect(callee_effects) {
+            if has_effect(caller_effects, "transacts") {
+                return Ok(());
+            }
+            return Err(effect_call_error(caller_effects, "no_rollback", span));
+        }
+
+        let allowed = call_allowed_capabilities(caller_effects);
+        for required in call_required_capabilities(callee_effects) {
+            if !allowed.iter().any(|capability| capability == &required) {
+                return Err(effect_call_error(caller_effects, required, span));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn ensure_current_function_allows_allocation(
+        &self,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some(caller_effects) = self.function_effects.last() else {
+            return Ok(());
+        };
+
+        let allowed = call_allowed_capabilities(caller_effects);
+        if allowed.iter().any(|capability| capability == &"allocates") {
+            Ok(())
+        } else {
+            Err(effect_call_error(caller_effects, "allocates", span))
+        }
+    }
+
+    pub(super) fn in_failure_context(&self) -> bool {
+        self.failure_context_depth > 0
+    }
+
+    pub(super) fn failable_expression_allowed(&self) -> bool {
+        self.in_failure_context() || self.current_function_has_effect("decides")
+    }
+
+    pub(super) fn ensure_failable_expression_allowed(&self, span: Span) -> Result<(), VerseError> {
+        if self.failable_expression_allowed() {
+            Ok(())
+        } else {
+            Err(VerseError::check_at(
+                "failable expression must be used in a failure context",
+                span,
+            ))
+        }
+    }
+
+    pub(super) fn with_range_context<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, VerseError>,
+    ) -> Result<T, VerseError> {
+        self.range_context_depth += 1;
+        let result = f(self);
+        self.range_context_depth -= 1;
+        result
+    }
+
+    pub(super) fn without_enclosing_failure_context<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, VerseError>,
+    ) -> Result<T, VerseError> {
+        let previous = self.failure_context_depth;
+        self.failure_context_depth = 0;
+        let result = f(self);
+        self.failure_context_depth = previous;
+        result
+    }
+
+    pub(super) fn merge_collection_item_type<'a>(
+        &mut self,
+        current: &mut Type,
+        pending_empty_options: &mut Vec<&'a Expr>,
+        expr: &'a Expr,
+    ) -> Result<(), VerseError> {
+        if is_empty_option_candidate(expr) && matches!(current, Type::Unknown) {
+            pending_empty_options.push(expr);
+            return Ok(());
+        }
+
+        let next = self.check_expr(expr)?;
+        if matches!(current, Type::Unknown) {
+            *current = next;
+            finalize_collection_item_type(current, pending_empty_options)?;
+        } else if !is_empty_option_literal(current, expr) {
+            *current = unify_types(current, &next, expr.span)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn ensure_current_function_allows_mutation(
+        &self,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some(caller_effects) = self.function_effects.last() else {
+            return Ok(());
+        };
+
+        let allowed = call_allowed_capabilities(caller_effects);
+        if allowed.iter().any(|capability| capability == &"writes") {
+            Ok(())
+        } else {
+            Err(VerseError::check_at(
+                "mutable assignment in function requires `<writes>` or `<transacts>` effect",
+                span,
+            ))
+        }
+    }
 }

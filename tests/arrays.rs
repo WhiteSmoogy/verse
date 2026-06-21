@@ -83,7 +83,7 @@ else:
 #[test]
 fn evaluates_single_array_parameter_variadic_calls() {
     let source = r#"
-Sum(Items:[]int):int = {
+Sum(Items:[]int)<transacts>:int = {
     var Total:int = 0
     for (Item : Items) {
         set Total += Item
@@ -91,8 +91,8 @@ Sum(Items:[]int):int = {
     Total
 }
 
-Values := (10, 20, 30)
-Sum(1, 2, 3) + Sum((4, 5)) + Sum(Values) + Sum(6)
+Values := array{10, 20, 30}
+Sum(array{1, 2, 3}) + Sum(array{4, 5}) + Sum(Values) + Sum(array{6})
 "#;
 
     assert_eq!(eval(source), Value::Int(81));
@@ -122,7 +122,10 @@ fn rejects_official_make_classifiable_subset_non_array_argument() {
 fn evaluates_arrays_indexing_and_length_member() {
     let source = r#"
 xs := array{10, 20, 30}
-xs.Length + xs[1]
+if (Value := xs[1]):
+    xs.Length + Value
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(23));
@@ -142,21 +145,35 @@ Values[1.0]
 }
 
 #[test]
-fn runtime_errors_on_float_array_index() {
-    let error = Interpreter::new()
-        .eval_source("array{10, 20}[1.0]")
-        .expect_err("source should fail");
+fn rejects_float_array_index_at_compile_time() {
+    let error = run_source("array{10, 20}[1.0]").expect_err("source should fail");
 
-    assert!(error.to_string().contains("array index expected int"));
+    assert!(
+        error
+            .to_string()
+            .contains("array index expected `int`, got `float`")
+    );
 }
 
 #[test]
 fn evaluates_mutable_variables_and_array_slots() {
     let source = r#"
 var xs: []int = array{1, 2, 3}
-set xs[1] = 40
+if:
+    set xs[1] = 40
+then:
+    {}
+else:
+    {}
 var total: int = 0
-set total += xs[0] + xs[1] + xs[2]
+if:
+    First := xs[0]
+    Second := xs[1]
+    Third := xs[2]
+then:
+    set total += First + Second + Third
+else:
+    {}
 total
 "#;
 
@@ -181,7 +198,7 @@ else:
 var Matrix:grid = array{array{1, 2}, array{3, 4}}
 MatrixSnapshot := Matrix
 if:
-    set Matrix[0][1] = 9
+    set Matrix[0] = array{1, 9}
 then:
     {}
 else:
@@ -211,7 +228,10 @@ fn evaluates_array_concatenation_and_tuple_append() {
 var Values:[]int = array{1, 2}
 set Values = Values + array{3}
 set Values += (4, 5)
-Values.Length + Values[4]
+if (Last := Values[4]):
+    Values.Length + Last
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(10));
@@ -225,9 +245,9 @@ grid := []row
 
 var Left:grid = array{array{1, 2}}
 PlusResult := Left + array{array{3, 4}}
-TupleResult := Left + (array{5, 6}, array{7, 8})
+TupleResult := Left + array{array{5, 6}, array{7, 8}}
 if:
-    set Left[0][1] = 9
+    set Left[0] = array{1, 9}
 then:
     {}
 else:
@@ -273,30 +293,30 @@ else:
 fn evaluates_array_methods() {
     let source = r#"
 Values:[]int = array{10, 20, 30, 20}
-Slice := Values.Slice[1, 3]
-Removed := Values.RemoveFirstElement[20]
+Slice := if (Result := Values.Slice[1, 3]). Result else. array{}
+Removed := if (Result := Values.RemoveFirstElement[20]). Result else. array{}
 AllRemoved := Values.RemoveAllElements[20]
-RangeRemoved := Values.Remove[1, 3]
-ElementRemoved := Values.RemoveElement[2]
-FirstReplaced := Values.ReplaceFirstElement[20, 99]
+RangeRemoved := if (Result := Values.Remove[1, 3]). Result else. array{}
+ElementRemoved := if (Result := Values.RemoveElement[2]). Result else. array{}
+FirstReplaced := if (Result := Values.ReplaceFirstElement[20, 99]). Result else. array{}
 AllReplaced := Values.ReplaceAllElements[20, 7]
-IndexReplaced := Values.ReplaceElement[2, 8]
-Inserted := Values.Insert[2, (25, 26)]
+IndexReplaced := if (Result := Values.ReplaceElement[2, 8]). Result else. array{}
+Inserted := if (Result := Values.Insert[2, (25, 26)]). Result else. array{}
 PatternReplaced := Values.ReplaceAll[(20, 30), array{7}]
 
 var Total:int = 0
 set Total += Slice.Length
-set Total += Slice[0]
-set Total += Values.Find[20]
-set Total += Removed[1]
+set Total += if (Value := Slice[0]). Value else. 0
+set Total += if (Index := Values.Find[20]). Index else. 0
+set Total += if (Value := Removed[1]). Value else. 0
 set Total += AllRemoved.Length
-set Total += RangeRemoved[1]
-set Total += ElementRemoved[2]
-set Total += FirstReplaced[1]
-set Total += AllReplaced[3]
-set Total += IndexReplaced[2]
-set Total += Inserted[3]
-set Total += PatternReplaced[1]
+set Total += if (Value := RangeRemoved[1]). Value else. 0
+set Total += if (Value := ElementRemoved[2]). Value else. 0
+set Total += if (Value := FirstReplaced[1]). Value else. 0
+set Total += if (Value := AllReplaced[3]). Value else. 0
+set Total += if (Value := IndexReplaced[2]). Value else. 0
+set Total += if (Value := Inserted[3]). Value else. 0
+set Total += if (Value := PatternReplaced[1]). Value else. 0
 set Total += PatternReplaced.Length
 Total
 "#;
@@ -526,17 +546,18 @@ Values.Find[3]
 }
 
 #[test]
-fn runtime_errors_on_invalid_array_slice() {
+fn rejects_failable_array_slice_outside_failure_context() {
     let source = r#"
 Values:[]int = array{1, 2}
 Values.Slice[0, 3]
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
-    assert!(error.to_string().contains("out of bounds"));
+    assert!(
+        error
+            .to_string()
+            .contains("failable expression must be used in a failure context")
+    );
 }
 
 #[test]
@@ -544,8 +565,15 @@ fn evaluates_concatenate_builtin() {
     let source = r#"
 Values:[]int = Concatenate(array{array{1, 2}, array{3}, array{4, 5}})
 Nested:[]int = Concatenate(array{array{6, 7}, array{8}})
-Named:[]int = Concatenate(Arrays := array{array{9}, array{10}})
-Values.Length + Values[4] + Nested.Length + Nested[2] + Named[1]
+Named:[]int = Concatenate(array{array{9}, array{10}})
+if:
+    Last := Values[4]
+    NestedLast := Nested[2]
+    NamedLast := Named[1]
+then:
+    Values.Length + Last + Nested.Length + NestedLast + NamedLast
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(31));
@@ -563,7 +591,7 @@ fn evaluates_concatenate_single_array_parameter_packing() {
     let source = r#"
 Values:[]int = Concatenate(array{1}, array{2}, (3, 4))
 Single:[]int = Concatenate(array{5})
-Tupled:[]int = Concatenate((array{6}, array{7}))
+Tupled:[]int = Concatenate(array{array{6}, array{7}})
 if:
     Last := Values[3]
     Only := Single[0]
@@ -728,7 +756,14 @@ fn evaluates_concatenate_maps_builtin() {
 Base:[int]string = map{1 => "one", 2 => "old"}
 Override:[int]string = map{2 => "two", 3 => "three"}
 Combined:[int]string = ConcatenateMaps(Base, Override)
-Combined[1] + Combined[2] + Combined[3] + str(Combined.Length)
+if:
+    First := Combined[1]
+    Second := Combined[2]
+    Third := Combined[3]
+then:
+    First + Second + Third + str(Combined.Length)
+else:
+    ""
 "#;
 
     assert_eq!(eval(source), Value::String("onetwothree3".into()));
@@ -744,7 +779,7 @@ var Base:team_map = map{"red" => map{"ada" => 1}}
 Override:team_map = map{"blue" => map{"grace" => 2}}
 Combined:team_map = ConcatenateMaps(Base, Override)
 if:
-    set Base["red"]["ada"] = 9
+    set Base["red"] = map{"ada" => 9}
 then:
     {}
 else:

@@ -400,7 +400,7 @@ Result
 }
 
 #[test]
-fn runtime_errors_on_awaiting_unsignaled_event_task_without_scheduler() {
+fn rejects_task_await_outside_async_context_through_run_source() {
     let source = r#"
 Ready:event() = event(){}
 WaitForReady()<suspends>:void =
@@ -409,14 +409,11 @@ Task:task(void) = spawn{WaitForReady()}
 Task.Await()
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
     assert!(
         error
             .to_string()
-            .contains("cannot complete without async scheduling support")
+            .contains("function with `<suspends>` effect can only be called in an async context")
     );
 }
 
@@ -657,15 +654,14 @@ Handle.Cancel()
 }
 
 #[test]
-fn runtime_errors_on_external_subscribable_bad_callback() {
-    let error = Interpreter::new()
-        .eval_source("Source:subscribable(int) = external {}\nSource.Subscribe(42)")
+fn rejects_external_subscribable_bad_callback_through_run_source() {
+    let error = run_source("Source:subscribable(int) = external {}\nSource.Subscribe(42)")
         .expect_err("source should runtime error");
 
     assert!(
         error
             .to_string()
-            .contains("`Subscribe` Callback expected function/1 -> void")
+            .contains("argument 1 expected `function/1 -> none`, got `int`")
     );
 }
 
@@ -1168,10 +1164,7 @@ Task:task(int) = spawn{Run()}
 Task.Await()
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should runtime error");
+    let error = run_source(source).expect_err("source should runtime error");
 
     assert!(error.to_string().contains("undefined name `X`"));
 }

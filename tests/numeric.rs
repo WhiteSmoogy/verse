@@ -52,8 +52,14 @@ fn evaluates_official_numeric_helper_runtime_value_types() {
         }
     }
 
-    expect_int("Mod[5, 3]", 2);
-    expect_int("Quotient[10, -3]", -3);
+    expect_int(
+        "Result := if (Value := Mod[5, 3]). Value else. 0\nResult",
+        2,
+    );
+    expect_int(
+        "Result := if (Value := Quotient[10, -3]). Value else. 0\nResult",
+        -3,
+    );
     expect_int("Abs(-5)", 5);
     expect_float("Abs(-5.0)", 5.0);
     expect_int("Min(10, 3)", 3);
@@ -63,10 +69,22 @@ fn evaluates_official_numeric_helper_runtime_value_types() {
     expect_int("Clamp(12, 10, 0)", 10);
     expect_float("Clamp(12.0, 10.0, 0.0)", 10.0);
     expect_float("Lerp(10.0, 20.0, 0.25)", 12.5);
-    expect_int("Ceil(1 / 2)", 1);
-    expect_int("Floor(7 / 3)", 2);
-    expect_int("Round[2.5]", 2);
-    expect_int("Int[-3.7]", -3);
+    expect_int(
+        "Result := if (Value := 1 / 2). Ceil(Value) else. 0\nResult",
+        1,
+    );
+    expect_int(
+        "Result := if (Value := 7 / 3). Floor(Value) else. 0\nResult",
+        2,
+    );
+    expect_int(
+        "Result := if (Value := Round[2.5]). Value else. 0\nResult",
+        2,
+    );
+    expect_int(
+        "Result := if (Value := Int[-3.7]). Value else. 0\nResult",
+        -3,
+    );
 }
 
 #[test]
@@ -119,10 +137,8 @@ ValueNaNHigh + BoundNaNHigh + TwoNaNs
 }
 
 #[test]
-fn runtime_errors_on_lerp_non_finite_argument() {
-    let error = Interpreter::new()
-        .eval_source("Lerp(0.0, Inf, 0.5)")
-        .expect_err("source should fail");
+fn rejects_lerp_non_finite_arguments() {
+    let error = run_source("Lerp(0.0, Inf, 0.5)").expect_err("source should fail");
 
     assert!(
         error
@@ -132,16 +148,20 @@ fn runtime_errors_on_lerp_non_finite_argument() {
 }
 
 #[test]
-fn runtime_errors_on_ceil_floor_non_finite_arguments() {
-    let ceil_error = Interpreter::new()
-        .eval_source("Ceil[NaN]")
-        .expect_err("source should fail");
-    let floor_error = Interpreter::new()
-        .eval_source("Floor[Inf]")
-        .expect_err("source should fail");
+fn rejects_ceil_floor_non_finite_arguments_outside_failure_context() {
+    let ceil_error = run_source("Ceil[NaN]").expect_err("source should fail");
+    let floor_error = run_source("Floor[Inf]").expect_err("source should fail");
 
-    assert!(ceil_error.to_string().contains("`Ceil` failed"));
-    assert!(floor_error.to_string().contains("`Floor` failed"));
+    assert!(
+        ceil_error
+            .to_string()
+            .contains("failable expression must be used in a failure context")
+    );
+    assert!(
+        floor_error
+            .to_string()
+            .contains("failable expression must be used in a failure context")
+    );
 }
 
 #[test]
@@ -164,23 +184,19 @@ fn rejects_round_and_int_rational_arguments() {
 }
 
 #[test]
-fn runtime_errors_on_round_and_int_rational_arguments() {
-    let round_error = Interpreter::new()
-        .eval_source("Round[1 / 2]")
-        .expect_err("source should fail");
-    let int_error = Interpreter::new()
-        .eval_source("Int[1 / 2]")
-        .expect_err("source should fail");
+fn rejects_round_and_int_rational_expressions_outside_failure_context() {
+    let round_error = run_source("Round[1 / 2]").expect_err("source should fail");
+    let int_error = run_source("Int[1 / 2]").expect_err("source should fail");
 
     assert!(
         round_error
             .to_string()
-            .contains("`Round` expected `float`, got rational")
+            .contains("failable expression must be used in a failure context")
     );
     assert!(
         int_error
             .to_string()
-            .contains("`Int` expected `float`, got rational")
+            .contains("failable expression must be used in a failure context")
     );
 }
 
@@ -654,17 +670,18 @@ set Name -= "v"
 }
 
 #[test]
-fn runtime_errors_on_divide_assignment_by_zero() {
+fn rejects_int_divide_assignment_by_zero_as_rational_result() {
     let source = r#"
 var Value:int = 10
 set Value /= 0
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
-    assert!(error.to_string().contains("division by zero"));
+    assert!(
+        error
+            .to_string()
+            .contains("cannot assign compound result `rational` to target of type `int`")
+    );
 }
 
 #[test]

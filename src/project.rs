@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::ast::{ExprKind, Program, Stmt, StmtKind};
 use crate::checker::{Type, check_source};
 use crate::error::VerseError;
-use crate::eval::{Interpreter, Value};
 use crate::parser::parse_source;
+use crate::pipeline::run_source;
+use crate::runtime::Value;
 use crate::token::Span;
 
 pub fn load_project_source(path: impl AsRef<Path>) -> Result<String, VerseError> {
@@ -20,9 +21,7 @@ pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
 
 pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
     let source = load_project_source(path)?;
-    check_source(&source)?;
-    let mut interpreter = Interpreter::new();
-    interpreter.eval_source(&source)
+    run_source(&source)
 }
 
 #[derive(Debug, Clone)]

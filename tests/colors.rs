@@ -131,26 +131,31 @@ Blended.Color.R * 3.0 + Blended.Color.B * 3.0 + Blended.A * 4.0
 }
 
 #[test]
-fn rejects_make_color_from_srgb_values_out_of_range() {
-    let error = Interpreter::new()
-        .eval_source("MakeColorFromSRGBValues(256, 0, 0)")
-        .expect_err("source should fail");
+fn rejects_make_color_from_srgb_values_component_out_of_range_at_runtime() {
+    let error = run_source("MakeColorFromSRGBValues(256, 0, 0)").expect_err("source should fail");
 
-    assert!(error.to_string().contains("0..255"));
+    assert!(
+        error
+            .to_string()
+            .contains("`MakeColorFromSRGBValues` red expected a value in 0..255")
+    );
 }
 
 #[test]
-fn rejects_over_with_zero_alpha_colors() {
-    let error = Interpreter::new()
-        .eval_source(
-            r#"
+fn rejects_over_with_zero_alpha_components_at_runtime() {
+    let error = run_source(
+        r#"
 using { /Verse.org/Colors }
 Over(MakeColorAlpha(1.0, 0.0, 0.0, 0.0), MakeColorAlpha(0.0, 0.0, 1.0, 0.0))
 "#,
-        )
-        .expect_err("source should fail");
+    )
+    .expect_err("source should fail");
 
-    assert!(error.to_string().contains("`Over` failed"));
+    assert!(
+        error
+            .to_string()
+            .contains("`Over` failed: both alpha components are zero")
+    );
 }
 
 #[test]

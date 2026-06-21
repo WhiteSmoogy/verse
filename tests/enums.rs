@@ -102,7 +102,7 @@ fn evaluates_open_enum_values() {
     let source = r#"
 weapon := enum<open>{Sword, Bow}
 Current:weapon = weapon.Sword
-Current = weapon.Sword
+if (Current = weapon.Sword). true else. false
 "#;
 
     assert_eq!(eval(source), Value::Bool(true));
@@ -297,8 +297,8 @@ StateID:[state]int = map{
     state.Playing => 1,
     state.Paused => 2,
 }
-IsPlaying(Value:state):logic = if (Value = state.Playing). true else. false
-if (PausedID := StateID[state.Paused]). PausedID + if (IsPlaying(state.Playing)) { 40 } else { 0 } else. 0
+IsPlaying<computes>(Value:state):logic = if (Value = state.Playing). true else. false
+if (PausedID := StateID[state.Paused]). PausedID + if (IsPlaying(state.Playing)?) { 40 } else { 0 } else. 0
 "#;
 
     assert_eq!(eval(source), Value::Int(42));

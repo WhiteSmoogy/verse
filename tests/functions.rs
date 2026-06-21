@@ -308,7 +308,7 @@ Default():int = 40
 Custom():int = 42
 var Handler:?type{_():int} = false
 set Handler = option{Custom}
-Handler?()
+if (Fn := Handler?). Fn() else. 0
 "#;
 
     assert_eq!(eval(source), Value::Int(42));
@@ -1142,10 +1142,7 @@ fn rejects_bare_return_outside_function() {
 
 #[test]
 fn runtime_errors_on_return_outside_function() {
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source("return 1")
-        .expect_err("source should fail");
+    let error = run_source("return 1").expect_err("source should fail");
 
     assert!(error.to_string().contains("outside a function"));
 }
@@ -1345,10 +1342,7 @@ MakeNumber():int =
 RequireComparable(holder{Callback := MakeNumber})
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("source should fail at runtime");
 
     assert!(
         error
@@ -1558,10 +1552,7 @@ character:
     Level := 42
 "#;
 
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail at runtime");
+    let error = run_source(source).expect_err("source should fail at runtime");
 
     assert!(
         error

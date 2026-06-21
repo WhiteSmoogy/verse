@@ -655,10 +655,7 @@ internal_device := class<epic_internal>:
 
 internal_device{}
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
     assert!(
         error
@@ -729,10 +726,7 @@ entity := class:
 
 entity{ID := 2}
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
     assert!(
         error

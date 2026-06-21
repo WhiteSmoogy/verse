@@ -5,15 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use verse_rs::{
-    DiagnosticCode, DiagnosticSeverity, Effect, EffectSet, IntRange, Interpreter, SourceProject,
-    Type, TypeVariable, Value, check_project_file, check_source, check_source_with_diagnostics,
+    DiagnosticCode, DiagnosticSeverity, Effect, EffectSet, IntRange, SourceProject, Type,
+    TypeVariable, Value, check_project_file, check_source, check_source_with_diagnostics,
     check_source_with_recovery, generate_digest, generate_project_digest, parse_source,
-    run_project_file,
+    run_project_file, run_source,
 };
 
 pub fn eval(source: &str) -> Value {
-    let mut interpreter = Interpreter::new();
-    interpreter.eval_source(source).expect("source should run")
+    run_source(source).expect("source should run")
 }
 pub fn assert_failable_context_error(source: &str) {
     let error = check_source(source).expect_err("source should fail");

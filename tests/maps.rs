@@ -160,9 +160,20 @@ Values.Length + Scores.Length
 fn evaluates_map_mutation_and_insert() {
     let source = r#"
 var Scores:[string]int = map{"alice" => 10}
-set Scores["alice"] += 10
-set Scores["bob"] = 5
-Scores["alice"] + Scores["bob"] + Scores.Length
+if:
+    set Scores["alice"] += 10
+    set Scores["bob"] = 5
+then:
+    {}
+else:
+    {}
+if:
+    Alice := Scores["alice"]
+    Bob := Scores["bob"]
+then:
+    Alice + Bob + Scores.Length
+else:
+    0
 "#;
 
     assert_eq!(eval(source), Value::Int(27));
@@ -293,17 +304,18 @@ fn rejects_concatenate_maps_non_map_arguments() {
 }
 
 #[test]
-fn runtime_errors_on_missing_map_plus_equal_key() {
+fn rejects_missing_map_plus_equal_key_outside_failure_context() {
     let source = r#"
 var Scores:[string]int = map{"alice" => 10}
 set Scores["bob"] += 5
 "#;
-    let mut interpreter = Interpreter::new();
-    let error = interpreter
-        .eval_source(source)
-        .expect_err("source should fail");
+    let error = run_source(source).expect_err("source should fail");
 
-    assert!(error.to_string().contains("not found"));
+    assert!(
+        error
+            .to_string()
+            .contains("failable expression must be used in a failure context")
+    );
 }
 
 #[test]

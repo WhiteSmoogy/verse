@@ -9,7 +9,7 @@ pub struct RationalValue {
 }
 
 impl RationalValue {
-    pub(super) fn new(numerator: i64, denominator: i64) -> Self {
+    pub(crate) fn new(numerator: i64, denominator: i64) -> Self {
         debug_assert!(denominator != 0, "rational denominator cannot be zero");
         let mut numerator = numerator;
         let mut denominator = denominator;
@@ -24,43 +24,53 @@ impl RationalValue {
         }
     }
 
-    pub(super) fn from_int(value: i64) -> Self {
+    pub(crate) fn from_int(value: i64) -> Self {
         Self {
             numerator: value,
             denominator: 1,
         }
     }
 
-    pub(super) fn to_f64(self) -> f64 {
+    pub(crate) fn to_f64(self) -> f64 {
         self.numerator as f64 / self.denominator as f64
     }
 
-    pub(super) fn is_integer(self) -> bool {
+    pub(crate) fn is_integer(self) -> bool {
         self.denominator == 1
     }
 
-    pub(super) fn add(self, other: Self) -> Self {
+    pub(crate) fn is_zero(self) -> bool {
+        self.numerator == 0
+    }
+
+    pub(crate) fn checked_neg(self) -> Option<Self> {
+        self.numerator
+            .checked_neg()
+            .map(|numerator| Self::new(numerator, self.denominator))
+    }
+
+    pub(crate) fn add(self, other: Self) -> Self {
         Self::new(
             self.numerator * other.denominator + other.numerator * self.denominator,
             self.denominator * other.denominator,
         )
     }
 
-    pub(super) fn subtract(self, other: Self) -> Self {
+    pub(crate) fn subtract(self, other: Self) -> Self {
         Self::new(
             self.numerator * other.denominator - other.numerator * self.denominator,
             self.denominator * other.denominator,
         )
     }
 
-    pub(super) fn multiply(self, other: Self) -> Self {
+    pub(crate) fn multiply(self, other: Self) -> Self {
         Self::new(
             self.numerator * other.numerator,
             self.denominator * other.denominator,
         )
     }
 
-    pub(super) fn divide(self, other: Self) -> Option<Self> {
+    pub(crate) fn divide(self, other: Self) -> Option<Self> {
         (other.numerator != 0).then(|| {
             Self::new(
                 self.numerator * other.denominator,
@@ -124,7 +134,7 @@ pub(super) fn numeric_values_equal(left: &Value, right: &Value) -> Option<bool> 
     Some(runtime_number_to_f64(left) == runtime_number_to_f64(right))
 }
 
-pub(super) fn rational_or_int(value: RationalValue) -> Value {
+pub(crate) fn rational_or_int(value: RationalValue) -> Value {
     if value.is_integer() {
         Value::Int(value.numerator)
     } else {

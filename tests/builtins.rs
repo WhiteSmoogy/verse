@@ -199,15 +199,13 @@ fn rejects_to_string_rational_argument() {
 }
 
 #[test]
-fn runtime_errors_on_to_string_rational_argument() {
-    let error = Interpreter::new()
-        .eval_source("ToString(1 / 2)")
-        .expect_err("source should fail");
+fn rejects_to_string_rational_expression_outside_failure_context() {
+    let error = run_source("ToString(1 / 2)").expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("`ToString` expected `float`, `int`, `[]char`, or `char`, got rational")
+            .contains("failable expression must be used in a failure context")
     );
 }
 
@@ -325,10 +323,8 @@ Value:int = Err("fatal")
 }
 
 #[test]
-fn runtime_errors_on_err_function() {
-    let error = Interpreter::new()
-        .eval_source(r#"Err("fatal stop")"#)
-        .expect_err("source should fail");
+fn err_function_raises_runtime_error_through_vm() {
+    let error = run_source(r#"Err("fatal stop")"#).expect_err("source should fail");
 
     assert!(error.to_string().contains("fatal stop"));
 }
@@ -474,7 +470,7 @@ Combined:grid = Concatenate(array{Rows, array{array{3, 4}}})
 Flattened:[]int = Concatenate(array{array{5, 6}})
 Shuffled:grid = Shuffle(Rows)
 if:
-    set Rows[0][1] = 9
+    set Rows[0] = array{1, 9}
 then:
     {}
 else:
