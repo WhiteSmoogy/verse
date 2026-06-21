@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
@@ -11,7 +11,7 @@ use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, AssignOp, BinaryOp, CallArg, CaseArm, CasePattern,
     ClassBlock, ClassMethod, ConcurrentOp, Expr, ExprKind, ExtensionMethod, ForBinding, ForClause,
     InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind, StructField,
-    TypeAnnotation, TypeName, TypeParam, UnaryOp,
+    TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::colors::NAMED_COLORS;
 use crate::error::VerseError;
@@ -24,6 +24,7 @@ type SuspensionCancel = dyn Fn(&Interpreter) -> Result<(), VerseError>;
 type ValueContinuation = dyn Fn(&Interpreter, Value) -> Result<Flow, VerseError>;
 type ValuesContinuation = dyn Fn(&Interpreter, Vec<Value>) -> Result<Flow, VerseError>;
 type CallArgsContinuation = dyn Fn(&Interpreter, Vec<CallValue>) -> Result<Flow, VerseError>;
+type FailureContinuation = dyn Fn(&Interpreter, Option<Value>) -> Result<Flow, VerseError>;
 
 thread_local! {
     static CURRENT_EPOCH_SECONDS: RefCell<Option<f64>> = const { RefCell::new(None) };
@@ -42,6 +43,7 @@ pub enum NativeResult {
 pub struct RuntimeTask {
     state: RefCell<RuntimeTaskState>,
     awaiters: RefCell<Vec<RuntimeTaskAwaiter>>,
+    scoped_children: RefCell<Vec<Rc<RuntimeTask>>>,
 }
 
 enum RuntimeTaskAwaiter {
@@ -91,9 +93,32 @@ struct StructuredFirstState {
     completed: bool,
 }
 
+struct ForIterationState {
+    clauses: Vec<ForClause>,
+    index: usize,
+    body: Expr,
+    env: Env,
+    results: Rc<RefCell<Vec<Value>>>,
+    bindings: Vec<Vec<(String, Value)>>,
+}
+
+struct ForClauseState {
+    clauses: Vec<ForClause>,
+    index: usize,
+    body: Expr,
+    env: Env,
+    results: Rc<RefCell<Vec<Value>>>,
+}
+
+enum FailureEval {
+    Ready(Option<Value>),
+    Pending(RuntimeSuspension),
+}
+
 struct RuntimeScheduler {
     sleepers: RefCell<Vec<Rc<RuntimeTask>>>,
     timed_sleepers: RefCell<Vec<(Instant, Rc<RuntimeTask>)>>,
+    detached_tasks: RefCell<Vec<Rc<RuntimeTask>>>,
 }
 
 impl RuntimeScheduler {
@@ -101,6 +126,7 @@ impl RuntimeScheduler {
         Self {
             sleepers: RefCell::new(Vec::new()),
             timed_sleepers: RefCell::new(Vec::new()),
+            detached_tasks: RefCell::new(Vec::new()),
         }
     }
 
@@ -141,6 +167,23 @@ impl RuntimeScheduler {
             .filter(|(_, task)| task.is_suspended())
             .map(|(deadline, _)| *deadline)
             .min()
+    }
+
+    fn track_detached_task(&self, task: Rc<RuntimeTask>) {
+        if task.is_complete() {
+            return;
+        }
+        let mut tasks = self.detached_tasks.borrow_mut();
+        if tasks.iter().any(|existing| Rc::ptr_eq(existing, &task)) {
+            return;
+        }
+        tasks.push(task);
+    }
+
+    fn cleanup_detached_tasks(&self) {
+        self.detached_tasks
+            .borrow_mut()
+            .retain(|task| !task.is_complete());
     }
 }
 
@@ -280,6 +323,8 @@ pub enum Value {
         abstract_class: bool,
         epic_internal_class: bool,
         final_class: bool,
+        concrete: bool,
+        castable: bool,
         fields: Vec<RuntimeClassField>,
         methods: Vec<RuntimeClassMethod>,
         blocks: Vec<RuntimeClassBlock>,
@@ -430,7 +475,17 @@ pub struct RuntimeClassField {
     name: String,
     mutable: bool,
     final_member: bool,
+    access: RuntimeAccessLevel,
+    owner: Option<String>,
     default: Option<Value>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeAccessLevel {
+    Public,
+    Internal,
+    Protected,
+    Private,
 }
 
 #[derive(Clone, PartialEq)]
@@ -438,6 +493,12 @@ pub struct RuntimeClassInstanceField {
     name: String,
     mutable: bool,
     value: Value,
+}
+
+#[derive(Clone)]
+struct RuntimeDataMemberDefaultContext {
+    aggregate_name: String,
+    field_name: String,
 }
 
 #[derive(Clone)]
@@ -456,6 +517,7 @@ pub struct RuntimeClassMethod {
 #[derive(Clone)]
 pub struct RuntimeExtensionMethod {
     name: String,
+    module_name: Option<String>,
     receiver: Param,
     params: Vec<Param>,
     effects: Vec<String>,
@@ -498,6 +560,13 @@ struct RuntimeClassDefinitionParts<'a> {
     methods: &'a [ClassMethod],
     extension_methods: &'a [ExtensionMethod],
     blocks: &'a [ClassBlock],
+}
+
+struct RuntimeParametricTypeTemplate<'a> {
+    name: &'a str,
+    params: &'a [TypeParam],
+    body: &'a Expr,
+    closure: &'a Env,
 }
 
 struct EvaluatedArchetypeField {
@@ -1074,6 +1143,8 @@ fn builtin_interface_types() -> Vec<(&'static str, Value)> {
                     name: "Show".to_string(),
                     mutable: true,
                     final_member: false,
+                    access: RuntimeAccessLevel::Public,
+                    owner: Some("showable".to_string()),
                     default: None,
                 }],
                 Vec::new(),
@@ -1139,6 +1210,9 @@ pub struct Interpreter {
     globals: Env,
     scheduler: Rc<RuntimeScheduler>,
     active_tasks: RefCell<usize>,
+    task_stack: RefCell<Vec<Rc<RuntimeTask>>>,
+    data_member_default_depth: Cell<usize>,
+    data_member_default_stack: RefCell<Vec<RuntimeDataMemberDefaultContext>>,
 }
 
 impl Interpreter {
@@ -1638,6 +1712,9 @@ impl Interpreter {
             globals,
             scheduler: Rc::new(RuntimeScheduler::new()),
             active_tasks: RefCell::new(0),
+            task_stack: RefCell::new(Vec::new()),
+            data_member_default_depth: Cell::new(0),
+            data_member_default_stack: RefCell::new(Vec::new()),
         }
     }
 
@@ -1738,19 +1815,15 @@ impl Interpreter {
                     let cancel_defers = defers.clone();
                     return Ok(Flow::Pending(
                         suspension
-                            .map(move |interpreter, flow| match flow {
-                                Flow::Value(value) => interpreter.eval_statements_from(
+                            .map(move |interpreter, flow| {
+                                interpreter.continue_statements_after_pending(
+                                    flow,
                                     remaining.clone(),
                                     index + 1,
                                     continuation_env.clone(),
                                     continuation_defers.clone(),
-                                    value,
                                     drive_scheduler,
-                                ),
-                                Flow::Return(_) | Flow::Break => {
-                                    interpreter.finish_statements_flow(flow, &continuation_defers)
-                                }
-                                Flow::Pending(suspension) => Ok(Flow::Pending(suspension)),
+                                )
                             })
                             .on_cancel(move |interpreter| interpreter.run_defers(&cancel_defers)),
                     ));
@@ -1760,6 +1833,40 @@ impl Interpreter {
         }
 
         self.finish_statements_flow(Flow::Value(last), &defers)
+    }
+
+    fn continue_statements_after_pending(
+        &self,
+        flow: Flow,
+        statements: Vec<Stmt>,
+        next_index: usize,
+        env: Env,
+        defers: Vec<Deferred>,
+        drive_scheduler: bool,
+    ) -> Result<Flow, VerseError> {
+        match flow {
+            Flow::Value(value) => self.eval_statements_from(
+                statements,
+                next_index,
+                env,
+                defers,
+                value,
+                drive_scheduler,
+            ),
+            Flow::Return(_) | Flow::Break => self.finish_statements_flow(flow, &defers),
+            Flow::Pending(suspension) => {
+                Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    interpreter.continue_statements_after_pending(
+                        flow,
+                        statements.clone(),
+                        next_index,
+                        env.clone(),
+                        defers.clone(),
+                        drive_scheduler,
+                    )
+                })))
+            }
+        }
     }
 
     fn finish_statements_flow(&self, flow: Flow, defers: &[Deferred]) -> Result<Flow, VerseError> {
@@ -1774,6 +1881,7 @@ impl Interpreter {
             return;
         }
 
+        self.scheduler.cleanup_detached_tasks();
         let mut ready = self.scheduler.take_next_tick_sleepers();
         ready.extend(self.scheduler.take_ready_timed_sleepers(Instant::now()));
 
@@ -1790,20 +1898,51 @@ impl Interpreter {
         for task in ready {
             task.resume(self, Value::None);
         }
+        self.scheduler.cleanup_detached_tasks();
     }
 
-    fn eval_in_task_context(&self, expr: &Expr, env: &Env) -> Result<Flow, VerseError> {
-        self.eval_with_task_context(|| self.eval_expr(expr, env))
+    fn eval_in_task_context(
+        &self,
+        task: Rc<RuntimeTask>,
+        expr: &Expr,
+        env: &Env,
+    ) -> Result<Flow, VerseError> {
+        self.eval_with_task_context(task, || self.eval_expr(expr, env))
     }
 
     fn eval_with_task_context<T>(
         &self,
+        task: Rc<RuntimeTask>,
         action: impl FnOnce() -> Result<T, VerseError>,
     ) -> Result<T, VerseError> {
         *self.active_tasks.borrow_mut() += 1;
+        self.task_stack.borrow_mut().push(task);
         let result = action();
+        self.task_stack.borrow_mut().pop();
         *self.active_tasks.borrow_mut() -= 1;
         result
+    }
+
+    fn track_scoped_task(&self, task: Rc<RuntimeTask>) {
+        if let Some(parent) = self.task_stack.borrow().last().cloned() {
+            if !Rc::ptr_eq(&parent, &task) {
+                parent.track_scoped_child(task);
+            }
+        } else {
+            self.scheduler.track_detached_task(task);
+        }
+    }
+
+    fn track_scoped_tasks_except(
+        &self,
+        tasks: &[(usize, Rc<RuntimeTask>)],
+        completed_index: usize,
+    ) {
+        for (index, task) in tasks {
+            if *index != completed_index && !task.is_complete() {
+                self.track_scoped_task(task.clone());
+            }
+        }
     }
 
     fn run_defers(&self, defers: &[Deferred]) -> Result<(), VerseError> {
@@ -1870,6 +2009,11 @@ impl Interpreter {
                 computes,
                 fields,
             },
+            value @ Value::ClassType { .. }
+                if should_coerce_class_type_for_annotation(env, annotation) =>
+            {
+                coerce_annotated_value(env, annotation, value)
+            }
             Value::ClassType {
                 base,
                 interfaces,
@@ -1877,6 +2021,8 @@ impl Interpreter {
                 abstract_class,
                 epic_internal_class,
                 final_class,
+                concrete,
+                castable,
                 fields,
                 methods,
                 blocks,
@@ -1889,6 +2035,8 @@ impl Interpreter {
                 abstract_class,
                 epic_internal_class,
                 final_class,
+                concrete,
+                castable,
                 fields,
                 methods,
                 blocks,
@@ -1901,11 +2049,15 @@ impl Interpreter {
             } => Value::InterfaceType {
                 name: name.to_string(),
                 parents,
-                fields,
+                fields: qualify_runtime_interface_fields(name, fields),
                 methods: qualify_runtime_interface_methods(name, methods),
             },
             Value::Module { env, .. } => Value::Module {
-                name: name.to_string(),
+                name: {
+                    let module_name = env.qualified_module_name(name);
+                    env.qualify_module_scope(&module_name);
+                    name.to_string()
+                },
                 env,
             },
             other => coerce_annotated_value(env, annotation, other),
@@ -1916,6 +2068,55 @@ impl Interpreter {
             env.define(name, value.clone(), false);
         }
         value
+    }
+
+    fn eval_named_type_definition(
+        &self,
+        name: &str,
+        expr: &Expr,
+        env: &Env,
+    ) -> Result<Option<Value>, VerseError> {
+        let runtime_name = env.qualified_module_name(name);
+        match &expr.kind {
+            ExprKind::StructDefinition {
+                computes, fields, ..
+            } => self
+                .eval_struct_definition(Some(&runtime_name), *computes, fields, env)
+                .map(Some),
+            ExprKind::ClassDefinition {
+                specifiers,
+                base,
+                interfaces,
+                fields,
+                methods,
+                extension_methods,
+                blocks,
+                ..
+            } => self
+                .eval_class_definition(
+                    Some(&runtime_name),
+                    RuntimeClassDefinitionParts {
+                        specifiers,
+                        base: base.as_ref(),
+                        interfaces,
+                        fields,
+                        methods,
+                        extension_methods,
+                        blocks,
+                    },
+                    env,
+                )
+                .map(Some),
+            ExprKind::InterfaceDefinition {
+                parents,
+                fields,
+                methods,
+                ..
+            } => self
+                .eval_interface_definition(Some(&runtime_name), parents, fields, methods, env)
+                .map(Some),
+            _ => Ok(None),
+        }
     }
 
     fn eval_stmt(&self, statement: &Stmt, env: &Env) -> Result<Flow, VerseError> {
@@ -1935,7 +2136,13 @@ impl Interpreter {
             } => {
                 let is_function_expr = matches!(&expr.kind, ExprKind::Function { .. });
                 let expr_span = expr.span;
-                let value = match self.eval_expr(expr, env)? {
+                let value_flow =
+                    if let Some(value) = self.eval_named_type_definition(name, expr, env)? {
+                        Flow::Value(value)
+                    } else {
+                        self.eval_expr(expr, env)?
+                    };
+                let value = match value_flow {
                     Flow::Value(value) => value,
                     Flow::Pending(suspension) => {
                         let name = name.clone();
@@ -1977,6 +2184,28 @@ impl Interpreter {
             StmtKind::ParametricType {
                 name, params, expr, ..
             } => {
+                if matches!(
+                    &expr.kind,
+                    ExprKind::ClassDefinition { specifiers, .. }
+                        if class_has_specifier(specifiers, "persistable")
+                ) {
+                    return Err(VerseError::runtime_at(
+                        format!("persistable class `{name}` cannot be parametric"),
+                        statement.span,
+                    ));
+                }
+                if matches!(
+                    &expr.kind,
+                    ExprKind::StructDefinition {
+                        persistable: true,
+                        ..
+                    }
+                ) {
+                    return Err(VerseError::runtime_at(
+                        format!("persistable struct `{name}` cannot be parametric"),
+                        statement.span,
+                    ));
+                }
                 let value = Value::ParametricType {
                     name: name.clone(),
                     params: params.clone(),
@@ -2069,6 +2298,7 @@ impl Interpreter {
             extension.method.name.clone(),
             RuntimeExtensionMethod {
                 name: extension.method.name.clone(),
+                module_name: env.module_name(),
                 receiver: extension.receiver.clone(),
                 params: extension.method.params.clone(),
                 effects: extension.method.effects.clone(),
@@ -2133,6 +2363,42 @@ impl Interpreter {
             Flow::Pending(suspension) => {
                 Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
                     Self::continue_when_value(interpreter, flow, span, continuation.clone())
+                })))
+            }
+        }
+    }
+
+    fn continue_when_failure_result(
+        interpreter: &Interpreter,
+        flow: Flow,
+        span: Span,
+        continuation: Rc<FailureContinuation>,
+    ) -> Result<Flow, VerseError> {
+        match flow {
+            Flow::Value(Value::Result { succeeded, value }) => {
+                if succeeded {
+                    continuation(interpreter, Some(*value))
+                } else {
+                    continuation(interpreter, None)
+                }
+            }
+            Flow::Value(other) => Err(VerseError::runtime_at(
+                format!("internal failure continuation expected result, got `{other}`"),
+                span,
+            )),
+            Flow::Return(_) => Err(VerseError::runtime_at(
+                "`return` used outside a function",
+                span,
+            )),
+            Flow::Break => Err(VerseError::runtime_at("`break` used outside a loop", span)),
+            Flow::Pending(suspension) => {
+                Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    Self::continue_when_failure_result(
+                        interpreter,
+                        flow,
+                        span,
+                        continuation.clone(),
+                    )
                 })))
             }
         }
@@ -2268,17 +2534,12 @@ impl Interpreter {
     fn eval_spawn(&self, body: &Expr, env: &Env) -> Result<Value, VerseError> {
         let spawned_expr = runtime_spawn_body_expr(body)?;
         let task_env = Env::child(env);
-        let task = match self.eval_in_task_context(spawned_expr, &task_env) {
-            Ok(flow) => RuntimeTask::from_flow(flow),
-            Err(error) => {
-                let task = Rc::new(RuntimeTask {
-                    state: RefCell::new(RuntimeTaskState::Running),
-                    awaiters: RefCell::new(Vec::new()),
-                });
-                task.complete_with_error(error, None);
-                task
-            }
-        };
+        let task = RuntimeTask::new_running();
+        match self.eval_in_task_context(task.clone(), spawned_expr, &task_env) {
+            Ok(flow) => task.set_from_flow(flow, Some(self)),
+            Err(error) => task.complete_with_error(error, Some(self)),
+        }
+        self.scheduler.track_detached_task(task.clone());
         Ok(Value::Task(task))
     }
 
@@ -2288,12 +2549,17 @@ impl Interpreter {
         env: &Env,
     ) -> Result<Rc<RuntimeTask>, VerseError> {
         let branch_env = Env::child(env);
-        let flow = self.eval_with_task_context(|| self.eval_stmt(statement, &branch_env))?;
-        Ok(RuntimeTask::from_flow(flow))
+        let task = RuntimeTask::new_running();
+        match self.eval_with_task_context(task.clone(), || self.eval_stmt(statement, &branch_env)) {
+            Ok(flow) => task.set_from_flow(flow, Some(self)),
+            Err(error) => task.complete_with_error(error, Some(self)),
+        }
+        Ok(task)
     }
 
     fn eval_branch_task(&self, statement: &Stmt, env: &Env) -> Result<(), VerseError> {
-        self.eval_concurrent_task(statement, env)?;
+        let task = self.eval_concurrent_task(statement, env)?;
+        self.track_scoped_task(task);
         Ok(())
     }
 
@@ -2439,7 +2705,8 @@ impl Interpreter {
             }
         }
 
-        if let Some((_, value)) = winner {
+        if let Some((winner_index, value)) = winner {
+            self.track_scoped_tasks_except(&tasks, winner_index);
             return Ok(Flow::Value(value));
         }
 
@@ -2485,6 +2752,8 @@ impl Interpreter {
         };
         if cancel_losers {
             self.cancel_structured_losers(&tasks, winner_index)?;
+        } else {
+            self.track_scoped_tasks_except(&tasks, winner_index);
         }
         Ok(Flow::Value(value))
     }
@@ -2773,6 +3042,7 @@ impl Interpreter {
                 .eval_parametric_type_call(callee, args, env, span)
                 .map(flow_from_value);
         }
+        self.ensure_data_member_default_callee_allowed(&callee, span)?;
 
         let callee = value_copy(&callee);
         let continuation: Rc<CallArgsContinuation> = Rc::new(move |interpreter, values| {
@@ -2911,18 +3181,20 @@ impl Interpreter {
         let object_span = object.span;
         match self.eval_expr(object, env)? {
             Flow::Value(object) => self
-                .qualified_member_value(object, qualifier, name, span)
+                .qualified_member_value(object, qualifier, name, span, env)
                 .map(Flow::Value),
             Flow::Pending(suspension) => {
                 let qualifier = qualifier.to_string();
                 let name = name.to_string();
+                let env = env.clone();
                 Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
                     let qualifier = qualifier.clone();
                     let name = name.clone();
+                    let env = env.clone();
                     let value_continuation: Rc<ValueContinuation> =
                         Rc::new(move |interpreter, object| {
                             interpreter
-                                .qualified_member_value(object, &qualifier, &name, span)
+                                .qualified_member_value(object, &qualifier, &name, span, &env)
                                 .map(Flow::Value)
                         });
                     Self::continue_when_value(interpreter, flow, object_span, value_continuation)
@@ -3078,17 +3350,12 @@ impl Interpreter {
                 then_branch,
                 else_branch,
             } => {
-                let condition_env = Env::child(env);
-                if self
-                    .eval_failure_condition_transactional(condition, &condition_env)?
-                    .is_some()
-                {
-                    return self.eval_expr(then_branch, &condition_env);
-                }
-                if let Some(else_branch) = else_branch {
-                    return self.eval_expr(else_branch, env);
-                }
-                Value::None
+                return self.eval_if_expression(
+                    condition,
+                    then_branch,
+                    else_branch.as_deref(),
+                    env,
+                );
             }
             ExprKind::FailureBind { .. } | ExprKind::FailureSequence(_) => {
                 return Err(VerseError::runtime_at(
@@ -3161,7 +3428,7 @@ impl Interpreter {
             },
             ExprKind::StructDefinition {
                 computes, fields, ..
-            } => self.eval_struct_definition(*computes, fields, env)?,
+            } => self.eval_struct_definition(None, *computes, fields, env)?,
             ExprKind::ClassDefinition {
                 specifiers,
                 base,
@@ -3172,6 +3439,7 @@ impl Interpreter {
                 blocks,
                 ..
             } => self.eval_class_definition(
+                None,
                 RuntimeClassDefinitionParts {
                     specifiers,
                     base: base.as_ref(),
@@ -3188,7 +3456,7 @@ impl Interpreter {
                 fields,
                 methods,
                 ..
-            } => self.eval_interface_definition(parents, fields, methods, env)?,
+            } => self.eval_interface_definition(None, parents, fields, methods, env)?,
             ExprKind::ModuleDefinition { statements, .. } => {
                 self.eval_module_definition(statements, env)?
             }
@@ -3202,14 +3470,7 @@ impl Interpreter {
                 return self.eval_tuple_expression(items, env);
             }
             ExprKind::Option(value) => {
-                if let Some(value) = value {
-                    match self.eval_failure_expr_transactional(value, env)? {
-                        Some(value) => Value::Option(Some(Box::new(value))),
-                        None => Value::Option(None),
-                    }
-                } else {
-                    Value::Option(None)
-                }
+                return self.eval_option_expression(value.as_deref(), env);
             }
             ExprKind::UnwrapOption(value) => {
                 return self.eval_unwrap_option_expression(value, expr.span, env);
@@ -3295,6 +3556,280 @@ impl Interpreter {
         result
     }
 
+    fn eval_failure_condition_transactional_maybe_pending(
+        &self,
+        condition: &Expr,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        let transaction = Rc::new(RefCell::new(Some(EnvTransaction::capture(env))));
+        let result = self.eval_failure_condition_maybe_pending(condition, env)?;
+        Ok(wrap_failure_transaction(
+            result,
+            transaction,
+            condition.span,
+        ))
+    }
+
+    fn eval_failure_expr_transactional_maybe_pending(
+        &self,
+        expr: &Expr,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        let transaction = Rc::new(RefCell::new(Some(EnvTransaction::capture(env))));
+        let result = self.eval_failure_expr_maybe_pending(expr, env)?;
+        Ok(wrap_failure_transaction(result, transaction, expr.span))
+    }
+
+    fn eval_failure_condition_maybe_pending(
+        &self,
+        condition: &Expr,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        match &condition.kind {
+            ExprKind::FailureSequence(clauses) => self.eval_failure_sequence_maybe_pending(
+                clauses.to_vec(),
+                0,
+                Value::Bool(true),
+                env,
+                condition.span,
+            ),
+            ExprKind::FailureBind { name, expr } => {
+                let expr_span = expr.span;
+                match self.eval_failure_expr_maybe_pending(expr, env)? {
+                    FailureEval::Ready(Some(value)) => {
+                        env.define(name, value.clone(), false);
+                        Ok(FailureEval::Ready(Some(value)))
+                    }
+                    FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+                    FailureEval::Pending(suspension) => {
+                        let name = name.clone();
+                        let env = env.clone();
+                        Ok(FailureEval::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let name = name.clone();
+                                let env = env.clone();
+                                let continuation: Rc<FailureContinuation> =
+                                    Rc::new(move |_, result| {
+                                        if let Some(value) = result {
+                                            env.define(&name, value.clone(), false);
+                                            Ok(failure_result_flow(Some(value)))
+                                        } else {
+                                            Ok(failure_result_flow(None))
+                                        }
+                                    });
+                                Self::continue_when_failure_result(
+                                    interpreter,
+                                    flow,
+                                    expr_span,
+                                    continuation,
+                                )
+                            },
+                        )))
+                    }
+                }
+            }
+            ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => self
+                .eval_failure_statements(statements, env)
+                .map(FailureEval::Ready),
+            _ => self.eval_failure_expr_maybe_pending(condition, env),
+        }
+    }
+
+    fn eval_failure_sequence_maybe_pending(
+        &self,
+        clauses: Vec<Expr>,
+        index: usize,
+        last: Value,
+        env: &Env,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        let Some(clause) = clauses.get(index) else {
+            return Ok(FailureEval::Ready(Some(last)));
+        };
+
+        match self.eval_failure_condition_maybe_pending(clause, env)? {
+            FailureEval::Ready(Some(value)) => {
+                self.eval_failure_sequence_maybe_pending(clauses, index + 1, value, env, span)
+            }
+            FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+            FailureEval::Pending(suspension) => {
+                let env = env.clone();
+                let next_index = index + 1;
+                Ok(FailureEval::Pending(suspension.map(
+                    move |interpreter, flow| {
+                        let clauses = clauses.clone();
+                        let env = env.clone();
+                        let continuation: Rc<FailureContinuation> =
+                            Rc::new(move |interpreter, result| {
+                                let Some(value) = result else {
+                                    return Ok(failure_result_flow(None));
+                                };
+                                failure_eval_to_flow(
+                                    interpreter.eval_failure_sequence_maybe_pending(
+                                        clauses.clone(),
+                                        next_index,
+                                        value,
+                                        &env,
+                                        span,
+                                    )?,
+                                )
+                            });
+                        Self::continue_when_failure_result(interpreter, flow, span, continuation)
+                    },
+                )))
+            }
+        }
+    }
+
+    fn eval_failure_expr_maybe_pending(
+        &self,
+        expr: &Expr,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        match &expr.kind {
+            ExprKind::UnwrapOption(value) => {
+                self.eval_failure_unwrap_option_maybe_pending(value, expr.span, env)
+            }
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                expr: operand,
+            } => {
+                let operand_span = operand.span;
+                match self.eval_failure_expr_transactional_maybe_pending(operand, env)? {
+                    FailureEval::Ready(result) => {
+                        Ok(FailureEval::Ready(invert_failure_result(result)))
+                    }
+                    FailureEval::Pending(suspension) => Ok(FailureEval::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let continuation: Rc<FailureContinuation> =
+                                Rc::new(move |_, result| {
+                                    Ok(failure_result_flow(invert_failure_result(result)))
+                                });
+                            Self::continue_when_failure_result(
+                                interpreter,
+                                flow,
+                                operand_span,
+                                continuation,
+                            )
+                        },
+                    ))),
+                }
+            }
+            ExprKind::Binary { left, op, right } if *op == BinaryOp::And => {
+                self.eval_failure_and_maybe_pending(left, right, expr.span, env)
+            }
+            ExprKind::Binary { left, op, right } if *op == BinaryOp::Or => {
+                self.eval_failure_or_maybe_pending(left, right, expr.span, env)
+            }
+            ExprKind::Profile { description, body } => {
+                let description = self.eval_value(description, env)?;
+                expect_profile_description(&description, expr.span)?;
+                self.eval_failure_expr_maybe_pending(body, env)
+            }
+            ExprKind::BracketCall { callee, args } => {
+                self.eval_failure_bracket_call_maybe_pending(callee, args, env, expr.span)
+            }
+            ExprKind::Set {
+                target,
+                op,
+                expr: value,
+            } => self.eval_failure_set_expression_maybe_pending(target, *op, value, env),
+            _ => self.eval_failure_expr(expr, env).map(FailureEval::Ready),
+        }
+    }
+
+    fn eval_failure_and_maybe_pending(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        match self.eval_failure_expr_maybe_pending(left, env)? {
+            FailureEval::Ready(Some(_)) => self.eval_failure_expr_maybe_pending(right, env),
+            FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+            FailureEval::Pending(suspension) => {
+                let right = right.clone();
+                let env = env.clone();
+                Ok(FailureEval::Pending(suspension.map(
+                    move |interpreter, flow| {
+                        let right = right.clone();
+                        let env = env.clone();
+                        let continuation: Rc<FailureContinuation> =
+                            Rc::new(move |interpreter, result| {
+                                if result.is_none() {
+                                    return Ok(failure_result_flow(None));
+                                }
+                                failure_eval_to_flow(
+                                    interpreter.eval_failure_expr_maybe_pending(&right, &env)?,
+                                )
+                            });
+                        Self::continue_when_failure_result(interpreter, flow, span, continuation)
+                    },
+                )))
+            }
+        }
+    }
+
+    fn eval_failure_or_maybe_pending(
+        &self,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        match self.eval_failure_expr_transactional_maybe_pending(left, env)? {
+            FailureEval::Ready(Some(value)) => Ok(FailureEval::Ready(Some(value))),
+            FailureEval::Ready(None) => self.eval_failure_expr_maybe_pending(right, env),
+            FailureEval::Pending(suspension) => {
+                let right = right.clone();
+                let env = env.clone();
+                Ok(FailureEval::Pending(suspension.map(
+                    move |interpreter, flow| {
+                        let right = right.clone();
+                        let env = env.clone();
+                        let continuation: Rc<FailureContinuation> =
+                            Rc::new(move |interpreter, result| {
+                                if let Some(value) = result {
+                                    return Ok(failure_result_flow(Some(value)));
+                                }
+                                failure_eval_to_flow(
+                                    interpreter.eval_failure_expr_maybe_pending(&right, &env)?,
+                                )
+                            });
+                        Self::continue_when_failure_result(interpreter, flow, span, continuation)
+                    },
+                )))
+            }
+        }
+    }
+
+    fn eval_failure_unwrap_option_maybe_pending(
+        &self,
+        value: &Expr,
+        span: Span,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        let value_span = value.span;
+        match self.eval_expr(value, env)? {
+            Flow::Value(value) => {
+                let result = unwrap_option_failure_value(value, span)?;
+                Ok(FailureEval::Ready(result))
+            }
+            Flow::Pending(suspension) => Ok(FailureEval::Pending(suspension.map(
+                move |interpreter, flow| {
+                    let value_continuation: Rc<ValueContinuation> = Rc::new(move |_, value| {
+                        unwrap_option_failure_value(value, span).map(failure_result_flow)
+                    });
+                    Self::continue_when_value(interpreter, flow, value_span, value_continuation)
+                },
+            ))),
+            flow => self
+                .flow_value_or_error(flow, value_span)
+                .map(|value| FailureEval::Ready(Some(value))),
+        }
+    }
+
     fn eval_failure_statements(
         &self,
         statements: &[Stmt],
@@ -3328,6 +3863,14 @@ impl Interpreter {
                                 computes,
                                 fields,
                             },
+                            value @ Value::ClassType { .. }
+                                if should_coerce_class_type_for_annotation(
+                                    env,
+                                    annotation.as_ref(),
+                                ) =>
+                            {
+                                coerce_annotated_value(env, annotation.as_ref(), value)
+                            }
                             Value::ClassType {
                                 base,
                                 interfaces,
@@ -3335,6 +3878,8 @@ impl Interpreter {
                                 abstract_class,
                                 epic_internal_class,
                                 final_class,
+                                concrete,
+                                castable,
                                 fields,
                                 methods,
                                 blocks,
@@ -3347,6 +3892,8 @@ impl Interpreter {
                                 abstract_class,
                                 epic_internal_class,
                                 final_class,
+                                concrete,
+                                castable,
                                 fields,
                                 methods,
                                 blocks,
@@ -3359,7 +3906,7 @@ impl Interpreter {
                             } => Value::InterfaceType {
                                 name: name.clone(),
                                 parents,
-                                fields,
+                                fields: qualify_runtime_interface_fields(name, fields),
                                 methods: qualify_runtime_interface_methods(name, methods),
                             },
                             Value::Module { env, .. } => Value::Module {
@@ -3472,7 +4019,7 @@ impl Interpreter {
                 op: UnaryOp::Not,
                 expr,
             } => {
-                if self.eval_failure_expr(expr, env)?.is_some() {
+                if self.eval_failure_expr_transactional(expr, env)?.is_some() {
                     Ok(None)
                 } else {
                     Ok(Some(Value::Bool(true)))
@@ -3579,7 +4126,7 @@ impl Interpreter {
                 self.eval_failure_expr(right, env)
             }
             ExprKind::Binary { left, op, right } if *op == BinaryOp::Or => {
-                if let Some(value) = self.eval_failure_expr(left, env)? {
+                if let Some(value) = self.eval_failure_expr_transactional(left, env)? {
                     return Ok(Some(value));
                 }
                 self.eval_failure_expr(right, env)
@@ -3752,6 +4299,7 @@ impl Interpreter {
 
     fn eval_struct_definition(
         &self,
+        name: Option<&str>,
         computes: bool,
         fields: &[StructField],
         env: &Env,
@@ -3761,7 +4309,7 @@ impl Interpreter {
             let default = field
                 .default
                 .as_ref()
-                .map(|default| self.eval_value(default, env))
+                .map(|default| self.eval_data_member_default(name, &field.name, default, env))
                 .transpose()?;
             runtime_fields.push(RuntimeStructField {
                 name: field.name.clone(),
@@ -3770,14 +4318,87 @@ impl Interpreter {
         }
 
         Ok(Value::StructType {
-            name: "<anonymous>".to_string(),
+            name: name.unwrap_or("<anonymous>").to_string(),
             computes,
             fields: runtime_fields,
         })
     }
 
+    fn eval_data_member_default(
+        &self,
+        owner: Option<&str>,
+        field_name: &str,
+        default: &Expr,
+        env: &Env,
+    ) -> Result<Value, VerseError> {
+        let depth = self.data_member_default_depth.get();
+        self.data_member_default_depth.set(depth + 1);
+        if let Some(owner) = owner {
+            self.data_member_default_stack
+                .borrow_mut()
+                .push(RuntimeDataMemberDefaultContext {
+                    aggregate_name: owner.to_string(),
+                    field_name: field_name.to_string(),
+                });
+        }
+        let result = self.eval_value(default, env);
+        if owner.is_some() {
+            self.data_member_default_stack.borrow_mut().pop();
+        }
+        self.data_member_default_depth.set(depth);
+        result
+    }
+
+    fn ensure_data_member_default_callee_allowed(
+        &self,
+        callee: &Value,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if self.data_member_default_depth.get() == 0 {
+            return Ok(());
+        }
+
+        match callee {
+            Value::Function { effects, .. } | Value::BoundMethod { effects, .. } => {
+                self.ensure_data_member_default_effects_allowed(effects, span)
+            }
+            Value::Overload(_) | Value::Tuple(_) => Ok(()),
+            Value::NativeFunction { .. }
+            | Value::NativeResultMethod { .. }
+            | Value::NativeEventMethod { .. }
+            | Value::NativeTaskMethod { .. }
+            | Value::NativeModifierMethod { .. }
+            | Value::NativeCancelMethod { .. }
+            | Value::NativeSubscribableMethod { .. }
+            | Value::NativeSubscriptionCancelMethod { .. } => {
+                Err(data_member_default_call_error(span))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn ensure_data_member_default_effects_allowed(
+        &self,
+        effects: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if self.data_member_default_depth.get() == 0 {
+            return Ok(());
+        }
+
+        if has_runtime_effect(effects, "converges")
+            && !has_runtime_effect(effects, "suspends")
+            && !has_runtime_effect(effects, "decides")
+        {
+            Ok(())
+        } else {
+            Err(data_member_default_call_error(span))
+        }
+    }
+
     fn eval_class_definition(
         &self,
+        name: Option<&str>,
         parts: RuntimeClassDefinitionParts<'_>,
         env: &Env,
     ) -> Result<Value, VerseError> {
@@ -3808,6 +4429,7 @@ impl Interpreter {
             mut runtime_blocks,
             super_type,
             base_unique,
+            base_castable,
             base_name,
             mut implemented_interfaces,
         ) = if let Some(base) = base {
@@ -3821,73 +4443,63 @@ impl Interpreter {
                     Vec::new(),
                     None,
                     false,
+                    false,
                     None,
                     vec![render_runtime_parametric_type_name(name, args)],
                 )
             } else {
-                let TypeName::Named(base_name) = &base.name else {
-                    return Err(VerseError::runtime_at(
-                        "class parent must be a class or interface",
-                        base.span,
-                    ));
-                };
-                match env.get(base_name) {
-                    Some(base_value) => match &base_value {
-                        Value::ClassType {
-                            unique,
-                            final_class,
-                            fields,
-                            methods,
-                            blocks,
-                            interfaces,
-                            ..
-                        } => {
-                            if *final_class {
-                                return Err(VerseError::runtime_at(
-                                    format!(
-                                        "class `{base_name}` is `final` and cannot be inherited"
-                                    ),
-                                    base.span,
-                                ));
-                            }
-                            (
-                                fields.clone(),
-                                methods.clone(),
-                                blocks.clone(),
-                                Some(Box::new(base_value.clone())),
-                                *unique,
-                                Some(base_name.clone()),
-                                interfaces.clone(),
-                            )
-                        }
-                        Value::InterfaceType {
-                            name,
-                            parents,
-                            fields,
-                            methods,
-                        } => (
-                            fields.clone(),
-                            methods.clone(),
-                            Vec::new(),
-                            None,
-                            false,
-                            None,
-                            {
-                                let mut interfaces = parents.clone();
-                                interfaces.push(name.clone());
-                                interfaces
-                            },
-                        ),
-                        other => {
+                let base_value = self.eval_type_annotation_value(base, env)?;
+                match &base_value {
+                    Value::ClassType {
+                        name,
+                        unique,
+                        castable,
+                        final_class,
+                        fields,
+                        methods,
+                        blocks,
+                        interfaces,
+                        ..
+                    } => {
+                        if *final_class {
                             return Err(VerseError::runtime_at(
-                                format!("class parent must be a class or interface, got `{other}`"),
+                                format!("class `{name}` is `final` and cannot be inherited"),
                                 base.span,
                             ));
                         }
-                    },
-                    None => {
+                        (
+                            fields.clone(),
+                            methods.clone(),
+                            blocks.clone(),
+                            Some(Box::new(base_value.clone())),
+                            *unique,
+                            *castable,
+                            Some(name.clone()),
+                            interfaces.clone(),
+                        )
+                    }
+                    Value::InterfaceType {
+                        name,
+                        parents,
+                        fields,
+                        methods,
+                    } => (
+                        fields.clone(),
+                        methods.clone(),
+                        Vec::new(),
+                        None,
+                        false,
+                        false,
+                        None,
+                        {
+                            let mut interfaces = parents.clone();
+                            interfaces.push(name.clone());
+                            interfaces
+                        },
+                    ),
+                    other => {
                         return Err(VerseError::runtime_at(
-                            format!("unknown class `{base_name}`"),
+                            format!("class parent must be a class or interface, got `{other}`"),
                             base.span,
                         ));
                     }
@@ -3900,10 +4512,25 @@ impl Interpreter {
                 Vec::new(),
                 None,
                 false,
+                false,
                 None,
                 Vec::new(),
             )
         };
+        let has_final_super = class_has_specifier(specifiers, "final_super");
+        let class_span = runtime_class_definition_diagnostic_span(base, fields, methods, blocks);
+        if has_final_super && base_name.as_deref() != Some("component") {
+            return Err(VerseError::runtime_at(
+                "class with `<final_super>` must directly inherit from `component`",
+                class_span,
+            ));
+        }
+        if base_name.as_deref() == Some("component") && !has_final_super {
+            return Err(VerseError::runtime_at(
+                "class directly inheriting from `component` must specify `<final_super>`",
+                class_span,
+            ));
+        }
         for interface in interfaces {
             implemented_interfaces
                 .extend(self.eval_interface_names_from_annotation(interface, env)?);
@@ -3935,6 +4562,7 @@ impl Interpreter {
         }
         implemented_interfaces = dedupe_runtime_strings(implemented_interfaces);
         let unique = class_has_specifier(specifiers, "unique") || base_unique;
+        let castable = class_has_specifier(specifiers, "castable") || base_castable;
 
         for field in fields {
             let override_field = field_has_specifier(&field.specifiers, "override");
@@ -3966,12 +4594,14 @@ impl Interpreter {
                 let default = field
                     .default
                     .as_ref()
-                    .map(|default| self.eval_value(default, env))
+                    .map(|default| self.eval_data_member_default(name, &field.name, default, env))
                     .transpose()?;
                 runtime_fields[index] = RuntimeClassField {
                     name: field.name.clone(),
                     mutable: field.mutable,
                     final_member: field_has_specifier(&field.specifiers, "final"),
+                    access: runtime_access_level_from_specifiers(&field.specifiers),
+                    owner: None,
                     default,
                 };
                 continue;
@@ -4002,14 +4632,31 @@ impl Interpreter {
             let default = field
                 .default
                 .as_ref()
-                .map(|default| self.eval_value(default, env))
+                .map(|default| self.eval_data_member_default(name, &field.name, default, env))
                 .transpose()?;
             runtime_fields.push(RuntimeClassField {
                 name: field.name.clone(),
                 mutable: field.mutable,
                 final_member: field_has_specifier(&field.specifiers, "final"),
+                access: runtime_access_level_from_specifiers(&field.specifiers),
+                owner: None,
                 default,
             });
+        }
+
+        if !class_has_specifier(specifiers, "abstract") {
+            ensure_runtime_interface_required_fields_initializable(
+                "<anonymous>",
+                specifiers,
+                &runtime_fields,
+                fields.first().map_or_else(
+                    || {
+                        base.as_ref()
+                            .map_or(Span::new(0, 0, 1, 1), |base| base.span)
+                    },
+                    |field| field.span,
+                ),
+            )?;
         }
 
         if class_has_specifier(specifiers, "concrete") {
@@ -4044,6 +4691,7 @@ impl Interpreter {
                     };
                     Ok(RuntimeExtensionMethod {
                         name: extension.method.name.clone(),
+                        module_name: None,
                         receiver: extension.receiver.clone(),
                         params: extension.method.params.clone(),
                         effects: extension.method.effects.clone(),
@@ -4170,13 +4818,15 @@ impl Interpreter {
         runtime_blocks = local_blocks;
 
         Ok(Value::ClassType {
-            name: "<anonymous>".to_string(),
+            name: name.unwrap_or("<anonymous>").to_string(),
             base: base_name,
             interfaces: implemented_interfaces,
             unique,
             abstract_class: class_has_specifier(specifiers, "abstract"),
             epic_internal_class: class_has_specifier(specifiers, "epic_internal"),
             final_class: class_has_specifier(specifiers, "final"),
+            concrete: class_has_specifier(specifiers, "concrete"),
+            castable,
             fields: runtime_fields,
             methods: runtime_methods,
             blocks: runtime_blocks,
@@ -4185,6 +4835,7 @@ impl Interpreter {
 
     fn eval_interface_definition(
         &self,
+        name: Option<&str>,
         parents: &[TypeAnnotation],
         fields: &[StructField],
         methods: &[ClassMethod],
@@ -4194,33 +4845,21 @@ impl Interpreter {
         let mut runtime_fields = Vec::new();
         let mut runtime_methods = Vec::new();
         for parent in parents {
-            let TypeName::Named(parent_name) = &parent.name else {
-                return Err(VerseError::runtime_at(
-                    "interface parent must be an interface",
-                    parent.span,
-                ));
-            };
-            match env.get(parent_name) {
-                Some(Value::InterfaceType {
+            match self.eval_type_annotation_value(parent, env)? {
+                Value::InterfaceType {
                     name,
                     parents,
                     fields,
                     methods,
-                }) => {
+                } => {
                     parent_names.extend(parents);
                     parent_names.push(name);
                     runtime_fields.extend(fields);
                     runtime_methods.extend(methods);
                 }
-                Some(other) => {
+                other => {
                     return Err(VerseError::runtime_at(
                         format!("interface parent must be an interface, got `{other}`"),
-                        parent.span,
-                    ));
-                }
-                None => {
-                    return Err(VerseError::runtime_at(
-                        format!("unknown interface `{parent_name}`"),
                         parent.span,
                     ));
                 }
@@ -4231,16 +4870,27 @@ impl Interpreter {
             let default = field
                 .default
                 .as_ref()
-                .map(|default| self.eval_value(default, env))
+                .map(|default| self.eval_data_member_default(name, &field.name, default, env))
                 .transpose()?;
             if let Some(index) = runtime_fields
                 .iter()
                 .position(|existing: &RuntimeClassField| existing.name == field.name)
             {
+                if runtime_fields[index].final_member {
+                    return Err(VerseError::runtime_at(
+                        format!(
+                            "field `{}` overrides final inherited field `{}`",
+                            field.name, runtime_fields[index].name
+                        ),
+                        field.span,
+                    ));
+                }
                 runtime_fields[index] = RuntimeClassField {
                     name: field.name.clone(),
                     mutable: field.mutable,
                     final_member: field_has_specifier(&field.specifiers, "final"),
+                    access: runtime_access_level_from_specifiers(&field.specifiers),
+                    owner: None,
                     default,
                 };
                 continue;
@@ -4249,6 +4899,8 @@ impl Interpreter {
                 name: field.name.clone(),
                 mutable: field.mutable,
                 final_member: field_has_specifier(&field.specifiers, "final"),
+                access: runtime_access_level_from_specifiers(&field.specifiers),
+                owner: None,
                 default,
             });
         }
@@ -4276,7 +4928,7 @@ impl Interpreter {
         }
 
         Ok(Value::InterfaceType {
-            name: "<anonymous>".to_string(),
+            name: name.unwrap_or("<anonymous>").to_string(),
             parents: dedupe_runtime_strings(parent_names),
             fields: runtime_fields,
             methods: runtime_methods,
@@ -4294,20 +4946,10 @@ impl Interpreter {
         {
             return Ok(vec![runtime_modifier_method(args[0].clone())]);
         }
-        let TypeName::Named(interface_name) = &interface.name else {
-            return Err(VerseError::runtime_at(
-                "additional class parent must be an interface",
-                interface.span,
-            ));
-        };
-        match env.get(interface_name) {
-            Some(Value::InterfaceType { methods, .. }) => Ok(methods),
-            Some(other) => Err(VerseError::runtime_at(
+        match self.eval_type_annotation_value(interface, env)? {
+            Value::InterfaceType { methods, .. } => Ok(methods),
+            other => Err(VerseError::runtime_at(
                 format!("additional class parent must be an interface, got `{other}`"),
-                interface.span,
-            )),
-            None => Err(VerseError::runtime_at(
-                format!("unknown interface `{interface_name}`"),
                 interface.span,
             )),
         }
@@ -4324,20 +4966,10 @@ impl Interpreter {
         {
             return Ok(Vec::new());
         }
-        let TypeName::Named(interface_name) = &interface.name else {
-            return Err(VerseError::runtime_at(
-                "additional class parent must be an interface",
-                interface.span,
-            ));
-        };
-        match env.get(interface_name) {
-            Some(Value::InterfaceType { fields, .. }) => Ok(fields),
-            Some(other) => Err(VerseError::runtime_at(
+        match self.eval_type_annotation_value(interface, env)? {
+            Value::InterfaceType { fields, .. } => Ok(fields),
+            other => Err(VerseError::runtime_at(
                 format!("additional class parent must be an interface, got `{other}`"),
-                interface.span,
-            )),
-            None => Err(VerseError::runtime_at(
-                format!("unknown interface `{interface_name}`"),
                 interface.span,
             )),
         }
@@ -4354,24 +4986,14 @@ impl Interpreter {
         {
             return Ok(vec![render_runtime_parametric_type_name(name, args)]);
         }
-        let TypeName::Named(interface_name) = &interface.name else {
-            return Err(VerseError::runtime_at(
-                "additional class parent must be an interface",
-                interface.span,
-            ));
-        };
-        match env.get(interface_name) {
-            Some(Value::InterfaceType { name, parents, .. }) => {
+        match self.eval_type_annotation_value(interface, env)? {
+            Value::InterfaceType { name, parents, .. } => {
                 let mut names = parents;
                 names.push(name);
                 Ok(names)
             }
-            Some(other) => Err(VerseError::runtime_at(
+            other => Err(VerseError::runtime_at(
                 format!("additional class parent must be an interface, got `{other}`"),
-                interface.span,
-            )),
-            None => Err(VerseError::runtime_at(
-                format!("unknown interface `{interface_name}`"),
                 interface.span,
             )),
         }
@@ -4408,6 +5030,7 @@ impl Interpreter {
                 computes,
                 fields: template_fields,
             } => {
+                self.ensure_data_member_default_archetype_not_recursive(&name, callee.span)?;
                 let fields = self.eval_archetype_entries(entries, env, None)?;
                 self.eval_struct_archetype(name, computes, template_fields, &fields, callee.span)
             }
@@ -4421,6 +5044,7 @@ impl Interpreter {
                 blocks,
                 ..
             } => {
+                self.ensure_data_member_default_archetype_not_recursive(&name, callee.span)?;
                 if abstract_class {
                     return Err(VerseError::runtime_at(
                         format!("abstract class `{name}` cannot be instantiated"),
@@ -4448,6 +5072,32 @@ impl Interpreter {
                 callee.span,
             )),
         }
+    }
+
+    fn ensure_data_member_default_archetype_not_recursive(
+        &self,
+        aggregate_name: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let context = self
+            .data_member_default_stack
+            .borrow()
+            .iter()
+            .rev()
+            .find(|context| runtime_names_match(&context.aggregate_name, aggregate_name))
+            .cloned();
+
+        if let Some(context) = context {
+            return Err(VerseError::runtime_at(
+                format!(
+                    "field default `{}.{}` recursively constructs `{aggregate_name}`",
+                    context.aggregate_name, context.field_name
+                ),
+                span,
+            ));
+        }
+
+        Ok(())
     }
 
     fn eval_event_archetype(
@@ -4520,23 +5170,59 @@ impl Interpreter {
             ));
         }
 
-        let instance_env = Env::child(&closure);
         let mut type_args = Vec::with_capacity(args.len());
-        for (param, arg) in params.iter().zip(args) {
+        for arg in args {
             let CallArg::Positional(expr) = arg else {
                 return Err(VerseError::runtime_at(
                     "parametric type arguments do not accept named arguments",
                     call_arg_expr(arg).span,
                 ));
             };
-            let type_name = expr_to_type_name(expr)?;
-            let resolved = env.resolve_type_name(&type_name);
-            instance_env.define_type_alias(&param.name, resolved.clone());
-            type_args.push(resolved);
+            type_args.push(expr_to_type_name(expr)?);
         }
 
-        let value = self.eval_value(&body, &instance_env)?;
-        let instance_name = render_runtime_parametric_type_name(&name, &type_args);
+        self.eval_parametric_type_instance(
+            RuntimeParametricTypeTemplate {
+                name: &name,
+                params: &params,
+                body: &body,
+                closure: &closure,
+            },
+            &type_args,
+            env,
+            span,
+        )
+    }
+
+    fn eval_parametric_type_instance(
+        &self,
+        template: RuntimeParametricTypeTemplate<'_>,
+        args: &[TypeName],
+        env: &Env,
+        span: Span,
+    ) -> Result<Value, VerseError> {
+        if args.len() != template.params.len() {
+            return Err(VerseError::runtime_at(
+                format!(
+                    "parametric type `{}` expected {} type arguments, got {}",
+                    template.name,
+                    template.params.len(),
+                    args.len()
+                ),
+                span,
+            ));
+        }
+
+        let instance_env = Env::child(template.closure);
+        let mut resolved_args = Vec::with_capacity(args.len());
+        for (param, arg) in template.params.iter().zip(args) {
+            let resolved = env.resolve_type_name(arg);
+            instance_env.define_type_alias(&param.name, resolved.clone());
+            resolved_args.push(resolved);
+        }
+
+        let value = self.eval_value(template.body, &instance_env)?;
+        let instance_name = render_runtime_parametric_type_name(template.name, &resolved_args);
         match value {
             Value::StructType {
                 computes, fields, ..
@@ -4552,6 +5238,8 @@ impl Interpreter {
                 abstract_class,
                 epic_internal_class,
                 final_class,
+                concrete,
+                castable,
                 fields,
                 methods,
                 blocks,
@@ -4564,6 +5252,8 @@ impl Interpreter {
                 abstract_class,
                 epic_internal_class,
                 final_class,
+                concrete,
+                castable,
                 fields,
                 methods,
                 blocks,
@@ -4576,12 +5266,67 @@ impl Interpreter {
             } => Ok(Value::InterfaceType {
                 name: instance_name.clone(),
                 parents,
-                fields,
+                fields: qualify_runtime_interface_fields(&instance_name, fields),
                 methods: qualify_runtime_interface_methods(&instance_name, methods),
             }),
             other => Err(VerseError::runtime_at(
-                format!("parametric type `{name}` produced `{other}`"),
+                format!("parametric type `{}` produced `{other}`", template.name),
                 span,
+            )),
+        }
+    }
+
+    fn eval_type_annotation_value(
+        &self,
+        annotation: &TypeAnnotation,
+        env: &Env,
+    ) -> Result<Value, VerseError> {
+        match &annotation.name {
+            TypeName::Named(name) => {
+                if runtime_builtin_class_base_name(name) {
+                    runtime_builtin_class_type(name).ok_or_else(|| {
+                        VerseError::runtime_at(format!("unknown type `{name}`"), annotation.span)
+                    })
+                } else {
+                    env.get_qualified_path(name).ok_or_else(|| {
+                        VerseError::runtime_at(format!("unknown type `{name}`"), annotation.span)
+                    })
+                }
+            }
+            TypeName::Applied { name, args } => {
+                let Some(value) = env.get_qualified_path(name) else {
+                    return Err(VerseError::runtime_at(
+                        format!("unknown parametric type `{name}`"),
+                        annotation.span,
+                    ));
+                };
+                let Value::ParametricType {
+                    name,
+                    params,
+                    body,
+                    closure,
+                } = value
+                else {
+                    return Err(VerseError::runtime_at(
+                        format!("`{name}` is not a parametric type"),
+                        annotation.span,
+                    ));
+                };
+                self.eval_parametric_type_instance(
+                    RuntimeParametricTypeTemplate {
+                        name: &name,
+                        params: &params,
+                        body: &body,
+                        closure: &closure,
+                    },
+                    args,
+                    env,
+                    annotation.span,
+                )
+            }
+            _ => Err(VerseError::runtime_at(
+                "expected named or parametric type annotation",
+                annotation.span,
             )),
         }
     }
@@ -4643,7 +5388,18 @@ impl Interpreter {
                         ));
                     };
 
-                    if class_name == target_class {
+                    let same_class = runtime_names_match(&class_name, target_class);
+                    if !same_class && !runtime_class_is_subtype(target_class, &class_name, env) {
+                        return Err(VerseError::runtime_at(
+                            format!(
+                                "constructor `{}` returns `{class_name}`, which is not `{target_class}` or a superclass",
+                                call.name
+                            ),
+                            call.span,
+                        ));
+                    }
+
+                    if same_class {
                         fields.clear();
                     }
                     constructor_delegation_seen = true;
@@ -5005,6 +5761,77 @@ impl Interpreter {
         }
     }
 
+    fn eval_if_expression(
+        &self,
+        condition: &Expr,
+        then_branch: &Expr,
+        else_branch: Option<&Expr>,
+        env: &Env,
+    ) -> Result<Flow, VerseError> {
+        let condition_env = Env::child(env);
+        match self.eval_failure_condition_transactional_maybe_pending(condition, &condition_env)? {
+            FailureEval::Ready(Some(_)) => self.eval_expr(then_branch, &condition_env),
+            FailureEval::Ready(None) => {
+                if let Some(else_branch) = else_branch {
+                    self.eval_expr(else_branch, env)
+                } else {
+                    Ok(Flow::Value(Value::None))
+                }
+            }
+            FailureEval::Pending(suspension) => {
+                let condition_env = condition_env.clone();
+                let outer_env = env.clone();
+                let then_branch = then_branch.clone();
+                let else_branch = else_branch.cloned();
+                let condition_span = condition.span;
+                Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    let condition_env = condition_env.clone();
+                    let outer_env = outer_env.clone();
+                    let then_branch = then_branch.clone();
+                    let else_branch = else_branch.clone();
+                    let continuation: Rc<FailureContinuation> =
+                        Rc::new(move |interpreter, result| {
+                            if result.is_some() {
+                                interpreter.eval_expr(&then_branch, &condition_env)
+                            } else if let Some(else_branch) = &else_branch {
+                                interpreter.eval_expr(else_branch, &outer_env)
+                            } else {
+                                Ok(Flow::Value(Value::None))
+                            }
+                        });
+                    Self::continue_when_failure_result(
+                        interpreter,
+                        flow,
+                        condition_span,
+                        continuation,
+                    )
+                })))
+            }
+        }
+    }
+
+    fn eval_option_expression(&self, value: Option<&Expr>, env: &Env) -> Result<Flow, VerseError> {
+        let Some(value) = value else {
+            return Ok(Flow::Value(Value::Option(None)));
+        };
+
+        match self.eval_failure_expr_transactional_maybe_pending(value, env)? {
+            FailureEval::Ready(Some(value)) => {
+                Ok(Flow::Value(Value::Option(Some(Box::new(value)))))
+            }
+            FailureEval::Ready(None) => Ok(Flow::Value(Value::Option(None))),
+            FailureEval::Pending(suspension) => {
+                let value_span = value.span;
+                Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    let continuation: Rc<FailureContinuation> = Rc::new(move |_, result| {
+                        Ok(Flow::Value(Value::Option(result.map(Box::new))))
+                    });
+                    Self::continue_when_failure_result(interpreter, flow, value_span, continuation)
+                })))
+            }
+        }
+    }
+
     fn eval_case(
         &self,
         subject: &Expr,
@@ -5012,7 +5839,38 @@ impl Interpreter {
         env: &Env,
         span: Span,
     ) -> Result<Flow, VerseError> {
-        let subject_value = self.eval_value(subject, env)?;
+        let subject_span = subject.span;
+        let subject_value = match self.eval_expr(subject, env)? {
+            Flow::Value(value) => value,
+            Flow::Pending(suspension) => {
+                let arms = arms.to_vec();
+                let env = env.clone();
+                return Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    let arms = arms.clone();
+                    let env = env.clone();
+                    let value_continuation: Rc<ValueContinuation> =
+                        Rc::new(move |interpreter, subject_value| {
+                            interpreter.eval_case_after_subject(subject_value, &arms, &env, span)
+                        });
+                    Self::continue_when_value(interpreter, flow, subject_span, value_continuation)
+                })));
+            }
+            flow => {
+                return self
+                    .flow_value_or_error(flow, subject_span)
+                    .map(Flow::Value);
+            }
+        };
+        self.eval_case_after_subject(subject_value, arms, env, span)
+    }
+
+    fn eval_case_after_subject(
+        &self,
+        subject_value: Value,
+        arms: &[CaseArm],
+        env: &Env,
+        span: Span,
+    ) -> Result<Flow, VerseError> {
         for arm in arms {
             let matched = match &arm.pattern {
                 CasePattern::Wildcard { .. } => true,
@@ -5216,6 +6074,24 @@ impl Interpreter {
                 let callee_value = self.member_value(other, name, env, callee_span)?;
                 self.call(callee_value, values_to_call_values(values, span), span)
             }
+            Value::Module {
+                name: module_name,
+                env: module_env,
+            } => {
+                let Some(callee_value) = module_env.get_local(name) else {
+                    return Err(VerseError::runtime_at(
+                        format!("module `{module_name}` has no member `{name}`"),
+                        callee_span,
+                    ));
+                };
+                let qualified_name = format!("{module_name}.{name}");
+                self.eval_bracket_call_values(
+                    qualify_runtime_named_value(callee_value, &qualified_name),
+                    values_to_call_values(values, span),
+                    env,
+                    span,
+                )
+            }
             Value::ClassifiableSubset(items) if is_classifiable_subset_method_name(name) => {
                 eval_classifiable_subset_method(
                     name,
@@ -5249,6 +6125,7 @@ impl Interpreter {
         env: &Env,
         span: Span,
     ) -> Result<Flow, VerseError> {
+        self.ensure_data_member_default_callee_allowed(&callee_value, span)?;
         let callee_value = value_copy(&callee_value);
         let eval_env = env.clone();
         let closure_env = env.clone();
@@ -5420,6 +6297,35 @@ impl Interpreter {
                         .collect();
                     self.call_failure(callee_value, call_values, span)
                 }
+                Value::Module {
+                    name: module_name,
+                    env: module_env,
+                } => {
+                    let Some(callee_value) = module_env.get_local(name) else {
+                        return Err(VerseError::runtime_at(
+                            format!("module `{module_name}` has no member `{name}`"),
+                            callee.span,
+                        ));
+                    };
+                    let qualified_name = format!("{module_name}.{name}");
+                    let call_values = values
+                        .into_iter()
+                        .map(|value| CallValue {
+                            name: None,
+                            optional: false,
+                            value,
+                            span,
+                        })
+                        .collect();
+                    match qualify_runtime_named_value(callee_value, &qualified_name) {
+                        Value::ClassType { name, .. } => {
+                            self.eval_class_cast(&name, call_values, env, span)
+                        }
+                        other => self
+                            .eval_bracket_call_values(other, call_values, env, span)
+                            .map(Some),
+                    }
+                }
                 Value::ClassifiableSubset(items) if is_classifiable_subset_method_name(name) => {
                     match eval_classifiable_subset_method(
                         name,
@@ -5511,6 +6417,337 @@ impl Interpreter {
         }
     }
 
+    fn eval_failure_bracket_call_maybe_pending(
+        &self,
+        callee: &Expr,
+        args: &[Expr],
+        env: &Env,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        if let ExprKind::Member { object, name } = &callee.kind {
+            if let Some(result) = self.eval_failure_member_bracket_call_maybe_pending(
+                object,
+                name,
+                args,
+                env,
+                span,
+                callee.span,
+            )? {
+                return Ok(result);
+            }
+            return self
+                .eval_failure_bracket_call(callee, args, env, span)
+                .map(FailureEval::Ready);
+        }
+
+        let callee_span = callee.span;
+        if is_failable_condition_expr(callee) {
+            return match self.eval_failure_expr_maybe_pending(callee, env)? {
+                FailureEval::Ready(Some(callee_value)) => {
+                    self.eval_failure_bracket_args_maybe_pending(callee_value, args, env, span)
+                }
+                FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+                FailureEval::Pending(suspension) => {
+                    let args = args.to_vec();
+                    let env = env.clone();
+                    Ok(FailureEval::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let args = args.clone();
+                            let env = env.clone();
+                            let continuation: Rc<FailureContinuation> =
+                                Rc::new(move |interpreter, result| {
+                                    let Some(callee_value) = result else {
+                                        return Ok(failure_result_flow(None));
+                                    };
+                                    failure_eval_to_flow(
+                                        interpreter.eval_failure_bracket_args_maybe_pending(
+                                            callee_value,
+                                            &args,
+                                            &env,
+                                            span,
+                                        )?,
+                                    )
+                                });
+                            Self::continue_when_failure_result(
+                                interpreter,
+                                flow,
+                                callee_span,
+                                continuation,
+                            )
+                        },
+                    )))
+                }
+            };
+        }
+
+        match self.eval_expr(callee, env)? {
+            Flow::Value(callee_value) => {
+                self.eval_failure_bracket_args_maybe_pending(callee_value, args, env, span)
+            }
+            Flow::Pending(suspension) => {
+                let args = args.to_vec();
+                let env = env.clone();
+                Ok(FailureEval::Pending(suspension.map(
+                    move |interpreter, flow| {
+                        let args = args.clone();
+                        let env = env.clone();
+                        let value_continuation: Rc<ValueContinuation> =
+                            Rc::new(move |interpreter, callee_value| {
+                                failure_eval_to_flow(
+                                    interpreter.eval_failure_bracket_args_maybe_pending(
+                                        callee_value,
+                                        &args,
+                                        &env,
+                                        span,
+                                    )?,
+                                )
+                            });
+                        Self::continue_when_value(
+                            interpreter,
+                            flow,
+                            callee_span,
+                            value_continuation,
+                        )
+                    },
+                )))
+            }
+            flow => self
+                .flow_value_or_error(flow, callee_span)
+                .map(|value| FailureEval::Ready(Some(value))),
+        }
+    }
+
+    fn eval_failure_member_bracket_call_maybe_pending(
+        &self,
+        object: &Expr,
+        name: &str,
+        args: &[Expr],
+        env: &Env,
+        span: Span,
+        callee_span: Span,
+    ) -> Result<Option<FailureEval>, VerseError> {
+        let object_span = object.span;
+        if is_failable_condition_expr(object) {
+            return match self.eval_failure_expr_maybe_pending(object, env)? {
+                FailureEval::Ready(Some(object_value)) => self
+                    .eval_failure_member_bracket_after_object_maybe_pending(
+                        object_value,
+                        name,
+                        args,
+                        env,
+                        span,
+                        callee_span,
+                    )
+                    .map(Some),
+                FailureEval::Ready(None) => Ok(Some(FailureEval::Ready(None))),
+                FailureEval::Pending(suspension) => {
+                    let name = name.to_string();
+                    let args = args.to_vec();
+                    let env = env.clone();
+                    Ok(Some(FailureEval::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let name = name.clone();
+                            let args = args.clone();
+                            let env = env.clone();
+                            let continuation: Rc<FailureContinuation> =
+                                Rc::new(move |interpreter, result| {
+                                    let Some(object_value) = result else {
+                                        return Ok(failure_result_flow(None));
+                                    };
+                                    failure_eval_to_flow(
+                                        interpreter
+                                            .eval_failure_member_bracket_after_object_maybe_pending(
+                                                object_value,
+                                                &name,
+                                                &args,
+                                                &env,
+                                                span,
+                                                callee_span,
+                                            )?,
+                                    )
+                                });
+                            Self::continue_when_failure_result(
+                                interpreter,
+                                flow,
+                                object_span,
+                                continuation,
+                            )
+                        },
+                    ))))
+                }
+            };
+        }
+
+        match self.eval_expr(object, env)? {
+            Flow::Value(object_value) => {
+                if runtime_failure_member_bracket_supports_pending(&object_value, name) {
+                    self.eval_failure_member_bracket_after_object_maybe_pending(
+                        object_value,
+                        name,
+                        args,
+                        env,
+                        span,
+                        callee_span,
+                    )
+                    .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            Flow::Pending(suspension) => {
+                let name = name.to_string();
+                let args = args.to_vec();
+                let env = env.clone();
+                Ok(Some(FailureEval::Pending(suspension.map(
+                    move |interpreter, flow| {
+                        let name = name.clone();
+                        let args = args.clone();
+                        let env = env.clone();
+                        let value_continuation: Rc<ValueContinuation> =
+                            Rc::new(move |interpreter, object_value| {
+                                failure_eval_to_flow(
+                                    interpreter
+                                        .eval_failure_member_bracket_after_object_maybe_pending(
+                                            object_value,
+                                            &name,
+                                            &args,
+                                            &env,
+                                            span,
+                                            callee_span,
+                                        )?,
+                                )
+                            });
+                        Self::continue_when_value(
+                            interpreter,
+                            flow,
+                            object_span,
+                            value_continuation,
+                        )
+                    },
+                ))))
+            }
+            flow => self
+                .flow_value_or_error(flow, object_span)
+                .map(|value| Some(FailureEval::Ready(Some(value)))),
+        }
+    }
+
+    fn eval_failure_member_bracket_after_object_maybe_pending(
+        &self,
+        object_value: Value,
+        name: &str,
+        args: &[Expr],
+        env: &Env,
+        span: Span,
+        callee_span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        match object_value {
+            other @ (Value::StructInstance { .. }
+            | Value::ClassInstance { .. }
+            | Value::Result { .. }) => {
+                let callee_value = self.member_value(other, name, env, callee_span)?;
+                self.eval_failure_bracket_args_maybe_pending(callee_value, args, env, span)
+            }
+            Value::Module {
+                name: module_name,
+                env: module_env,
+            } => {
+                let Some(callee_value) = module_env.get_local(name) else {
+                    return Err(VerseError::runtime_at(
+                        format!("module `{module_name}` has no member `{name}`"),
+                        callee_span,
+                    ));
+                };
+                let qualified_name = format!("{module_name}.{name}");
+                self.eval_failure_bracket_args_maybe_pending(
+                    qualify_runtime_named_value(callee_value, &qualified_name),
+                    args,
+                    env,
+                    span,
+                )
+            }
+            other => Err(VerseError::runtime_at(
+                format!("value `{other}` has no bracket method `{name}`"),
+                callee_span,
+            )),
+        }
+    }
+
+    fn eval_failure_bracket_args_maybe_pending(
+        &self,
+        callee_value: Value,
+        args: &[Expr],
+        env: &Env,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        let callee_value = value_copy(&callee_value);
+        let eval_env = env.clone();
+        let closure_env = env.clone();
+        let continuation: Rc<ValuesContinuation> = Rc::new(move |interpreter, values| {
+            failure_eval_to_flow(interpreter.eval_failure_bracket_values_maybe_pending(
+                value_copy(&callee_value),
+                values_to_call_values(values, span),
+                &closure_env,
+                span,
+            )?)
+        });
+        match self.eval_values_then(args, 0, &eval_env, Vec::new(), continuation)? {
+            Flow::Value(Value::Result { succeeded, value }) => {
+                if succeeded {
+                    Ok(FailureEval::Ready(Some(*value)))
+                } else {
+                    Ok(FailureEval::Ready(None))
+                }
+            }
+            Flow::Pending(suspension) => Ok(FailureEval::Pending(suspension)),
+            flow => self
+                .flow_value_or_error(flow, span)
+                .map(|value| FailureEval::Ready(Some(value))),
+        }
+    }
+
+    fn eval_failure_bracket_values_maybe_pending(
+        &self,
+        callee_value: Value,
+        values: Vec<CallValue>,
+        env: &Env,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        match callee_value {
+            value @ (Value::Array(_) | Value::Map(_) | Value::String(_)) => {
+                if values.len() != 1 {
+                    return Err(VerseError::runtime_at(
+                        format!("`[]` lookup expected 1 argument, got {}", values.len()),
+                        span,
+                    ));
+                }
+                let index = values.into_iter().next().unwrap().value;
+                self.index_value_failable(value, index, span)
+                    .map(FailureEval::Ready)
+            }
+            value @ (Value::Function { .. }
+            | Value::Overload(_)
+            | Value::BoundMethod { .. }
+            | Value::NativeFunction { .. }
+            | Value::NativeResultMethod { .. }
+            | Value::NativeEventMethod { .. }
+            | Value::NativeSubscribableMethod { .. }
+            | Value::NativeTaskMethod { .. }
+            | Value::NativeModifierMethod { .. }
+            | Value::NativeCancelMethod { .. }
+            | Value::NativeSubscriptionCancelMethod { .. }) => {
+                self.call_failure_maybe_pending(value, values, span)
+            }
+            Value::ClassType { name, .. } => self
+                .eval_class_cast(&name, values, env, span)
+                .map(FailureEval::Ready),
+            other => Err(VerseError::runtime_at(
+                format!("cannot use `[]` with value `{other}`"),
+                span,
+            )),
+        }
+    }
+
     fn eval_class_cast(
         &self,
         target: &str,
@@ -5549,10 +6786,10 @@ impl Interpreter {
     ) -> Result<bool, VerseError> {
         let mut current = Some(actual.to_string());
         while let Some(name) = current {
-            if name == target {
+            if runtime_names_match(&name, target) {
                 return Ok(true);
             }
-            current = match env.get(&name) {
+            current = match runtime_named_type_value(&name, env) {
                 Some(Value::ClassType { base, .. }) => base,
                 Some(other) => {
                     return Err(VerseError::runtime_at(
@@ -5720,6 +6957,114 @@ impl Interpreter {
             return Ok(None);
         };
         Ok(Some(Value::None))
+    }
+
+    fn eval_failure_set_expression_maybe_pending(
+        &self,
+        target: &Expr,
+        op: AssignOp,
+        expr: &Expr,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        match op {
+            AssignOp::Assign => match self.eval_failure_expr_maybe_pending(expr, env)? {
+                FailureEval::Ready(Some(value)) => {
+                    self.finish_failure_set_value(target, value, env)
+                }
+                FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+                FailureEval::Pending(suspension) => {
+                    let target = target.clone();
+                    let env = env.clone();
+                    let expr_span = expr.span;
+                    Ok(FailureEval::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let target = target.clone();
+                            let env = env.clone();
+                            let continuation: Rc<FailureContinuation> =
+                                Rc::new(move |interpreter, result| {
+                                    let Some(value) = result else {
+                                        return Ok(failure_result_flow(None));
+                                    };
+                                    failure_eval_to_flow(
+                                        interpreter
+                                            .finish_failure_set_value(&target, value, &env)?,
+                                    )
+                                });
+                            Self::continue_when_failure_result(
+                                interpreter,
+                                flow,
+                                expr_span,
+                                continuation,
+                            )
+                        },
+                    )))
+                }
+            },
+            AssignOp::AddAssign
+            | AssignOp::SubAssign
+            | AssignOp::MulAssign
+            | AssignOp::DivAssign => {
+                let span = target.span.through(expr.span);
+                let Some(left) = self.read_assignment_target_failable(target, env)? else {
+                    return Ok(FailureEval::Ready(None));
+                };
+                match self.eval_failure_expr_maybe_pending(expr, env)? {
+                    FailureEval::Ready(Some(right)) => {
+                        let value = Self::eval_compound_assignment_value(op, left, right, span)?;
+                        self.finish_failure_set_value(target, value, env)
+                    }
+                    FailureEval::Ready(None) => Ok(FailureEval::Ready(None)),
+                    FailureEval::Pending(suspension) => {
+                        let target = target.clone();
+                        let env = env.clone();
+                        let left = value_copy(&left);
+                        let expr_span = expr.span;
+                        Ok(FailureEval::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let target = target.clone();
+                                let env = env.clone();
+                                let left = value_copy(&left);
+                                let continuation: Rc<FailureContinuation> =
+                                    Rc::new(move |interpreter, result| {
+                                        let Some(right) = result else {
+                                            return Ok(failure_result_flow(None));
+                                        };
+                                        let value = Self::eval_compound_assignment_value(
+                                            op,
+                                            value_copy(&left),
+                                            right,
+                                            span,
+                                        )?;
+                                        failure_eval_to_flow(
+                                            interpreter
+                                                .finish_failure_set_value(&target, value, &env)?,
+                                        )
+                                    });
+                                Self::continue_when_failure_result(
+                                    interpreter,
+                                    flow,
+                                    expr_span,
+                                    continuation,
+                                )
+                            },
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_failure_set_value(
+        &self,
+        target: &Expr,
+        value: Value,
+        env: &Env,
+    ) -> Result<FailureEval, VerseError> {
+        if self.assign_target_failable(target, value, env)?.is_some() {
+            Ok(FailureEval::Ready(Some(Value::None)))
+        } else {
+            Ok(FailureEval::Ready(None))
+        }
     }
 
     fn assign_target(&self, target: &Expr, value: Value, env: &Env) -> Result<(), VerseError> {
@@ -6188,11 +7533,16 @@ impl Interpreter {
     }
 
     fn eval_for(&self, clauses: &[ForClause], body: &Expr, env: &Env) -> Result<Flow, VerseError> {
-        let mut results = Vec::new();
-        if let Some(signal) = self.eval_for_clauses(clauses, 0, body, env, &mut results)? {
-            return Ok(signal);
+        let results = Rc::new(RefCell::new(Vec::new()));
+        match self.eval_for_clauses(clauses, 0, body, env, results.clone())? {
+            Some(Flow::Pending(suspension)) => {
+                Ok(Flow::Pending(suspension.map(move |_, flow| {
+                    finish_for_pending_flow(flow, results.clone())
+                })))
+            }
+            Some(signal) => Ok(signal),
+            None => Ok(Flow::Value(for_results_value(&results))),
         }
-        Ok(Flow::Value(Value::Array(Rc::new(RefCell::new(results)))))
     }
 
     fn eval_for_clauses(
@@ -6201,12 +7551,12 @@ impl Interpreter {
         index: usize,
         body: &Expr,
         env: &Env,
-        results: &mut Vec<Value>,
+        results: Rc<RefCell<Vec<Value>>>,
     ) -> Result<Option<Flow>, VerseError> {
         let Some(clause) = clauses.get(index) else {
             return match self.eval_expr(body, env)? {
                 Flow::Value(value) => {
-                    results.push(value);
+                    results.borrow_mut().push(value);
                     Ok(None)
                 }
                 Flow::Break => Err(VerseError::runtime_at(
@@ -6214,79 +7564,348 @@ impl Interpreter {
                     body.span,
                 )),
                 Flow::Return(value) => Ok(Some(Flow::Return(value))),
-                Flow::Pending(suspension) => Ok(Some(Flow::Pending(suspension))),
+                Flow::Pending(suspension) => {
+                    let body_span = body.span;
+                    Ok(Some(Flow::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let results = results.clone();
+                            let value_continuation: Rc<ValueContinuation> =
+                                Rc::new(move |_, value| {
+                                    results.borrow_mut().push(value);
+                                    Ok(Flow::Value(Value::None))
+                                });
+                            Self::continue_when_value(
+                                interpreter,
+                                flow,
+                                body_span,
+                                value_continuation,
+                            )
+                        },
+                    ))))
+                }
             };
+        };
+
+        let clause_state = ForClauseState {
+            clauses: clauses.to_vec(),
+            index,
+            body: body.clone(),
+            env: env.clone(),
+            results: results.clone(),
         };
 
         match clause {
             ForClause::Generator {
                 binding, iterable, ..
             } => {
-                let iterable_value = self.eval_value(iterable, env)?;
-                let bindings = self.iter_bindings(binding, iterable_value, iterable.span)?;
-                for iteration in bindings {
-                    let iteration_env = Env::child(env);
-                    for (name, value) in iteration {
-                        iteration_env.define(name, value, false);
+                let iterable_span = iterable.span;
+                match self.eval_expr(iterable, env)? {
+                    Flow::Value(iterable_value) => self.eval_for_generator_clause(
+                        binding,
+                        iterable_span,
+                        iterable_value,
+                        clause_state,
+                    ),
+                    Flow::Pending(suspension) => {
+                        let binding = binding.clone();
+                        Ok(Some(Flow::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let clause_state = clone_for_clause_state(&clause_state);
+                                let binding = binding.clone();
+                                let value_continuation: Rc<ValueContinuation> =
+                                    Rc::new(move |interpreter, iterable_value| {
+                                        for_clause_flow(interpreter.eval_for_generator_clause(
+                                            &binding,
+                                            iterable_span,
+                                            iterable_value,
+                                            clone_for_clause_state(&clause_state),
+                                        )?)
+                                    });
+                                Self::continue_when_value(
+                                    interpreter,
+                                    flow,
+                                    iterable_span,
+                                    value_continuation,
+                                )
+                            },
+                        ))))
                     }
-                    if let Some(signal) =
-                        self.eval_for_clauses(clauses, index + 1, body, &iteration_env, results)?
-                    {
-                        return Ok(Some(signal));
-                    }
+                    flow => self
+                        .flow_value_or_error(flow, iterable_span)
+                        .map(|value| Some(Flow::Value(value))),
                 }
-                Ok(None)
             }
             ForClause::RangeOrLet { name, expr, .. } => {
-                let value = if is_failable_condition_expr(expr) {
-                    let Some(value) = self.eval_failure_expr_transactional(expr, env)? else {
-                        return Ok(None);
-                    };
-                    value
-                } else {
-                    self.eval_value(expr, env)?
-                };
-                if matches!(value, Value::Range { .. }) {
-                    let bindings =
-                        self.iter_bindings(&ForBinding::Value(name.clone()), value, expr.span)?;
-                    for iteration in bindings {
-                        let iteration_env = Env::child(env);
-                        for (name, value) in iteration {
-                            iteration_env.define(name, value, false);
+                if is_failable_condition_expr(expr) {
+                    let expr_span = expr.span;
+                    match self.eval_failure_expr_transactional_maybe_pending(expr, env)? {
+                        FailureEval::Ready(Some(value)) => {
+                            return self.eval_for_range_or_let_clause(
+                                name,
+                                expr_span,
+                                value,
+                                clause_state,
+                            );
                         }
-                        if let Some(signal) = self.eval_for_clauses(
-                            clauses,
-                            index + 1,
-                            body,
-                            &iteration_env,
-                            results,
-                        )? {
-                            return Ok(Some(signal));
+                        FailureEval::Ready(None) => return Ok(None),
+                        FailureEval::Pending(suspension) => {
+                            let name = name.clone();
+                            return Ok(Some(Flow::Pending(suspension.map(
+                                move |interpreter, flow| {
+                                    let clause_state = clone_for_clause_state(&clause_state);
+                                    let name = name.clone();
+                                    let continuation: Rc<FailureContinuation> =
+                                        Rc::new(move |interpreter, result| {
+                                            let Some(value) = result else {
+                                                return Ok(Flow::Value(Value::None));
+                                            };
+                                            for_clause_flow(
+                                                interpreter.eval_for_range_or_let_clause(
+                                                    &name,
+                                                    expr_span,
+                                                    value,
+                                                    clone_for_clause_state(&clause_state),
+                                                )?,
+                                            )
+                                        });
+                                    Self::continue_when_failure_result(
+                                        interpreter,
+                                        flow,
+                                        expr_span,
+                                        continuation,
+                                    )
+                                },
+                            ))));
                         }
                     }
-                    Ok(None)
-                } else {
-                    let let_env = Env::child(env);
-                    let_env.define(name, value, false);
-                    self.eval_for_clauses(clauses, index + 1, body, &let_env, results)
                 }
+
+                let expr_span = expr.span;
+                let value = match self.eval_expr(expr, env)? {
+                    Flow::Value(value) => value,
+                    Flow::Pending(suspension) => {
+                        let name = name.clone();
+                        return Ok(Some(Flow::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let clause_state = clone_for_clause_state(&clause_state);
+                                let name = name.clone();
+                                let continuation_name = name.clone();
+                                let value_continuation: Rc<ValueContinuation> =
+                                    Rc::new(move |interpreter, value| {
+                                        for_clause_flow(interpreter.eval_for_range_or_let_clause(
+                                            &continuation_name,
+                                            expr_span,
+                                            value,
+                                            clone_for_clause_state(&clause_state),
+                                        )?)
+                                    });
+                                Self::continue_when_value(
+                                    interpreter,
+                                    flow,
+                                    expr_span,
+                                    value_continuation,
+                                )
+                            },
+                        ))));
+                    }
+                    flow => {
+                        return self
+                            .flow_value_or_error(flow, expr_span)
+                            .map(|value| Some(Flow::Value(value)));
+                    }
+                };
+                self.eval_for_range_or_let_clause(name, expr_span, value, clause_state)
             }
             ForClause::Let { name, expr, .. } => {
-                let value = self.eval_value(expr, env)?;
-                let let_env = Env::child(env);
-                let_env.define(name, value, false);
-                self.eval_for_clauses(clauses, index + 1, body, &let_env, results)
-            }
-            ForClause::Filter(expr) => {
-                if self
-                    .eval_failure_condition_transactional(expr, env)?
-                    .is_some()
-                {
-                    self.eval_for_clauses(clauses, index + 1, body, env, results)
-                } else {
-                    Ok(None)
+                let expr_span = expr.span;
+                match self.eval_expr(expr, env)? {
+                    Flow::Value(value) => self.eval_for_let_clause(name, value, clause_state),
+                    Flow::Pending(suspension) => {
+                        let name = name.clone();
+                        Ok(Some(Flow::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let clause_state = clone_for_clause_state(&clause_state);
+                                let name = name.clone();
+                                let continuation_name = name.clone();
+                                let value_continuation: Rc<ValueContinuation> =
+                                    Rc::new(move |interpreter, value| {
+                                        for_clause_flow(interpreter.eval_for_let_clause(
+                                            &continuation_name,
+                                            value,
+                                            clone_for_clause_state(&clause_state),
+                                        )?)
+                                    });
+                                Self::continue_when_value(
+                                    interpreter,
+                                    flow,
+                                    expr_span,
+                                    value_continuation,
+                                )
+                            },
+                        ))))
+                    }
+                    flow => self
+                        .flow_value_or_error(flow, expr_span)
+                        .map(|value| Some(Flow::Value(value))),
                 }
             }
+            ForClause::Filter(expr) => {
+                let filter_span = expr.span;
+                match self.eval_failure_expr_transactional_maybe_pending(expr, env)? {
+                    FailureEval::Ready(Some(_)) => {
+                        self.eval_for_clauses(clauses, index + 1, body, env, results)
+                    }
+                    FailureEval::Ready(None) => Ok(None),
+                    FailureEval::Pending(suspension) => Ok(Some(Flow::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            let clause_state = clone_for_clause_state(&clause_state);
+                            let continuation: Rc<FailureContinuation> =
+                                Rc::new(move |interpreter, result| {
+                                    if result.is_none() {
+                                        return Ok(Flow::Value(Value::None));
+                                    }
+                                    for_clause_flow(interpreter.eval_for_clauses(
+                                        &clause_state.clauses,
+                                        clause_state.index + 1,
+                                        &clause_state.body,
+                                        &clause_state.env,
+                                        clause_state.results.clone(),
+                                    )?)
+                                });
+                            Self::continue_when_failure_result(
+                                interpreter,
+                                flow,
+                                filter_span,
+                                continuation,
+                            )
+                        },
+                    )))),
+                }
+            }
+        }
+    }
+
+    fn eval_for_generator_clause(
+        &self,
+        binding: &ForBinding,
+        iterable_span: Span,
+        iterable_value: Value,
+        state: ForClauseState,
+    ) -> Result<Option<Flow>, VerseError> {
+        let bindings = self.iter_bindings(binding, iterable_value, iterable_span)?;
+        self.eval_for_iteration_bindings(
+            ForIterationState {
+                clauses: state.clauses,
+                index: state.index,
+                body: state.body,
+                env: state.env,
+                results: state.results,
+                bindings,
+            },
+            0,
+        )
+    }
+
+    fn eval_for_range_or_let_clause(
+        &self,
+        name: &str,
+        expr_span: Span,
+        value: Value,
+        state: ForClauseState,
+    ) -> Result<Option<Flow>, VerseError> {
+        if matches!(value, Value::Range { .. }) {
+            let bindings =
+                self.iter_bindings(&ForBinding::Value(name.to_string()), value, expr_span)?;
+            self.eval_for_iteration_bindings(
+                ForIterationState {
+                    clauses: state.clauses,
+                    index: state.index,
+                    body: state.body,
+                    env: state.env,
+                    results: state.results,
+                    bindings,
+                },
+                0,
+            )
+        } else {
+            self.eval_for_let_clause(name, value, state)
+        }
+    }
+
+    fn eval_for_let_clause(
+        &self,
+        name: &str,
+        value: Value,
+        state: ForClauseState,
+    ) -> Result<Option<Flow>, VerseError> {
+        let let_env = Env::child(&state.env);
+        let_env.define(name, value, false);
+        self.eval_for_clauses(
+            &state.clauses,
+            state.index + 1,
+            &state.body,
+            &let_env,
+            state.results,
+        )
+    }
+
+    fn eval_for_iteration_bindings(
+        &self,
+        state: ForIterationState,
+        start: usize,
+    ) -> Result<Option<Flow>, VerseError> {
+        for iteration_index in start..state.bindings.len() {
+            let iteration_env = Env::child(&state.env);
+            for (name, value) in &state.bindings[iteration_index] {
+                iteration_env.define(name, value_copy(value), false);
+            }
+            if let Some(signal) = self.eval_for_clauses(
+                &state.clauses,
+                state.index + 1,
+                &state.body,
+                &iteration_env,
+                state.results.clone(),
+            )? {
+                if let Flow::Pending(suspension) = signal {
+                    let state = clone_for_iteration_state(&state);
+                    let next_iteration = iteration_index + 1;
+                    return Ok(Some(Flow::Pending(suspension.map(
+                        move |interpreter, flow| {
+                            interpreter.continue_for_after_iteration(
+                                flow,
+                                clone_for_iteration_state(&state),
+                                next_iteration,
+                            )
+                        },
+                    ))));
+                }
+                return Ok(Some(signal));
+            }
+        }
+        Ok(None)
+    }
+
+    fn continue_for_after_iteration(
+        &self,
+        flow: Flow,
+        state: ForIterationState,
+        next_iteration: usize,
+    ) -> Result<Flow, VerseError> {
+        match flow {
+            Flow::Value(_) => match self.eval_for_iteration_bindings(state, next_iteration)? {
+                Some(flow) => Ok(flow),
+                None => Ok(Flow::Value(Value::None)),
+            },
+            Flow::Pending(suspension) => {
+                Ok(Flow::Pending(suspension.map(move |interpreter, flow| {
+                    interpreter.continue_for_after_iteration(
+                        flow,
+                        clone_for_iteration_state(&state),
+                        next_iteration,
+                    )
+                })))
+            }
+            signal => Ok(signal),
         }
     }
 
@@ -6797,12 +8416,45 @@ impl Interpreter {
         None
     }
 
+    fn qualified_extension_method_value(
+        &self,
+        object: Value,
+        qualifier: &str,
+        name: &str,
+        env: &Env,
+    ) -> Option<Value> {
+        for method in env.get_extension_methods(name) {
+            if !runtime_extension_method_has_qualifier(&method, qualifier) {
+                continue;
+            }
+            if !runtime_value_matches_annotation(
+                &object,
+                method.receiver.annotation.as_ref(),
+                &method.closure,
+            ) {
+                continue;
+            }
+
+            let call_closure = Env::child(&method.closure);
+            call_closure.define(&method.receiver.name, object, false);
+            return Some(Value::Function {
+                params: method.params,
+                effects: method.effects,
+                body: method.body,
+                closure: call_closure,
+            });
+        }
+
+        None
+    }
+
     fn qualified_member_value(
         &self,
         object: Value,
         qualifier: &str,
         name: &str,
         span: Span,
+        env: &Env,
     ) -> Result<Value, VerseError> {
         if let Value::ClassInstance {
             class_name,
@@ -6811,23 +8463,33 @@ impl Interpreter {
             methods,
         } = &object
         {
-            return self
-                .bound_method_group_value(
-                    methods.iter().filter(|method| {
-                        method.name == name && runtime_method_has_qualifier(method, qualifier)
-                    }),
-                    class_name.clone(),
-                    *unique,
-                    fields.clone(),
-                    methods.clone(),
-                    span,
-                )?
-                .ok_or_else(|| {
-                    VerseError::runtime_at(
-                        format!("class `{class_name}` has no method `({qualifier}:){name}`"),
-                        span,
-                    )
-                });
+            if let Some(method) = self.bound_method_group_value(
+                methods.iter().filter(|method| {
+                    method.name == name && runtime_method_has_qualifier(method, qualifier)
+                }),
+                class_name.clone(),
+                *unique,
+                fields.clone(),
+                methods.clone(),
+                span,
+            )? {
+                return Ok(method);
+            }
+            if let Some(method) =
+                self.qualified_extension_method_value(object.clone(), qualifier, name, env)
+            {
+                return Ok(method);
+            }
+            return Err(VerseError::runtime_at(
+                format!("class `{class_name}` has no method `({qualifier}:){name}`"),
+                span,
+            ));
+        }
+
+        if let Some(method) =
+            self.qualified_extension_method_value(object.clone(), qualifier, name, env)
+        {
+            return Ok(method);
         }
 
         Err(VerseError::runtime_at(
@@ -6844,10 +8506,10 @@ impl Interpreter {
         span: Span,
     ) -> Result<Value, VerseError> {
         if qualifier != "super" {
-            return Err(VerseError::runtime_at(
-                format!("unknown qualifier `{qualifier}`"),
-                span,
-            ));
+            let qualified = format!("{qualifier}.{name}");
+            return env.get_qualified_path(&qualified).ok_or_else(|| {
+                VerseError::runtime_at(format!("unknown qualified name `{qualified}`"), span)
+            });
         }
 
         let Value::ClassType {
@@ -6921,10 +8583,11 @@ impl Interpreter {
             }
             Value::Function {
                 params,
-                effects: _,
+                effects,
                 body,
                 closure,
             } => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
                 let call_env = Env::child(&closure);
                 self.bind_function_args(&params, args, &call_env, span)?;
 
@@ -6946,7 +8609,7 @@ impl Interpreter {
             Value::Overload(overloads) => self.call_overload(overloads, args, false, span),
             Value::BoundMethod {
                 params,
-                effects: _,
+                effects,
                 body,
                 closure,
                 super_type,
@@ -6957,6 +8620,7 @@ impl Interpreter {
                 methods,
                 ..
             } => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
                 let field_env = Env::child(&closure);
                 let initial_fields = fields.borrow().clone();
                 let instance_class_name = class_name.clone();
@@ -7100,6 +8764,7 @@ impl Interpreter {
                 body,
                 closure,
             } if has_runtime_effect(&effects, "decides") => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
                 let call_env = Env::child(&closure);
                 self.bind_function_args(&params, args, &call_env, span)?;
                 self.eval_failure_expr_transactional(&body, &call_env)
@@ -7118,6 +8783,7 @@ impl Interpreter {
                 methods,
                 ..
             } if has_runtime_effect(&effects, "decides") => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
                 let field_env = Env::child(&closure);
                 let initial_fields = fields.borrow().clone();
                 let instance_class_name = class_name.clone();
@@ -7240,6 +8906,205 @@ impl Interpreter {
         }
     }
 
+    fn call_failure_maybe_pending(
+        &self,
+        callee: Value,
+        args: Vec<CallValue>,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        match callee {
+            Value::Function {
+                params,
+                effects,
+                body,
+                closure,
+            } if has_runtime_effect(&effects, "decides") => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
+                let call_env = Env::child(&closure);
+                self.bind_function_args(&params, args, &call_env, span)?;
+                self.eval_failure_expr_transactional_maybe_pending(&body, &call_env)
+            }
+            Value::Overload(overloads) => {
+                self.call_overload_failure_maybe_pending(overloads, args, span)
+            }
+            Value::BoundMethod {
+                params,
+                effects,
+                body,
+                closure,
+                super_type,
+                extension_methods,
+                class_name,
+                unique,
+                fields,
+                methods,
+                ..
+            } if has_runtime_effect(&effects, "decides") => {
+                self.ensure_data_member_default_effects_allowed(&effects, span)?;
+                let field_env = Env::child(&closure);
+                let initial_fields = fields.borrow().clone();
+                let instance_class_name = class_name.clone();
+                field_env.define(
+                    "Self",
+                    Value::ClassInstance {
+                        class_name: instance_class_name.clone(),
+                        unique,
+                        fields: fields.clone(),
+                        methods: methods.clone(),
+                    },
+                    false,
+                );
+                if let Some(super_type) = super_type {
+                    field_env.define("super", *super_type, false);
+                }
+                for field in &initial_fields {
+                    field_env.define(&field.name, field.value.clone(), field.mutable);
+                }
+                self.bind_instance_methods(
+                    &field_env,
+                    &instance_class_name,
+                    unique,
+                    &fields,
+                    &methods,
+                );
+                self.bind_instance_extension_methods(&field_env, &extension_methods);
+
+                let call_env = Env::child(&field_env);
+                self.bind_function_args(&params, args, &call_env, span)?;
+                match self.eval_failure_expr_transactional_maybe_pending(&body, &call_env)? {
+                    FailureEval::Ready(result) => {
+                        if result.is_some() {
+                            self.sync_instance_fields(&fields, &field_env, &initial_fields);
+                        }
+                        Ok(FailureEval::Ready(result))
+                    }
+                    FailureEval::Pending(suspension) => {
+                        let fields = fields.clone();
+                        let field_env = field_env.clone();
+                        let initial_fields = initial_fields.clone();
+                        Ok(FailureEval::Pending(suspension.map(
+                            move |interpreter, flow| {
+                                let fields = fields.clone();
+                                let field_env = field_env.clone();
+                                let initial_fields = initial_fields.clone();
+                                let continuation: Rc<FailureContinuation> =
+                                    Rc::new(move |interpreter, result| {
+                                        if result.is_some() {
+                                            interpreter.sync_instance_fields(
+                                                &fields,
+                                                &field_env,
+                                                &initial_fields,
+                                            );
+                                        }
+                                        Ok(failure_result_flow(result))
+                                    });
+                                Self::continue_when_failure_result(
+                                    interpreter,
+                                    flow,
+                                    span,
+                                    continuation,
+                                )
+                            },
+                        )))
+                    }
+                }
+            }
+            Value::NativeFunction {
+                name,
+                arity,
+                decides: true,
+                function,
+            } => match call_native_function(name, arity, function, args, span)? {
+                NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+            },
+            Value::NativeResultMethod { name, result } => {
+                match call_native_result_method(name, &result, args, span)? {
+                    NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                    NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+                }
+            }
+            Value::NativeEventMethod {
+                name,
+                payload,
+                waiters,
+            } => match call_native_event_method(
+                self,
+                name,
+                payload.as_ref(),
+                waiters.as_ref(),
+                args,
+                span,
+            )? {
+                NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+            },
+            Value::NativeSubscribableMethod {
+                name,
+                payload,
+                subscribers,
+                next_subscriber_id,
+            } => match call_native_subscribable_method(
+                name,
+                payload.as_ref(),
+                &subscribers,
+                &next_subscriber_id,
+                args,
+                span,
+            )? {
+                NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+            },
+            Value::NativeTaskMethod { name, task } => {
+                match call_native_task_method(name, &task, args, span)? {
+                    NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                    NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+                }
+            }
+            Value::NativeModifierMethod { name, receiver } => {
+                match self.call_native_modifier_method(name, *receiver, args, span)? {
+                    NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                    NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+                }
+            }
+            Value::NativeCancelMethod {
+                name,
+                entries,
+                entry_id,
+            } => match call_native_cancel_method(name, &entries, entry_id, args, span)? {
+                NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+            },
+            Value::NativeSubscriptionCancelMethod {
+                name,
+                subscribers,
+                subscriber_id,
+            } => match call_native_subscription_cancel_method(
+                name,
+                &subscribers,
+                subscriber_id,
+                args,
+                span,
+            )? {
+                NativeResult::Value(value) => Ok(FailureEval::Ready(Some(value))),
+                NativeResult::Failure(_) => Ok(FailureEval::Ready(None)),
+            },
+            other => match self.call(other, args, span)? {
+                Value::Suspended(suspension) => Ok(FailureEval::Pending(suspension.map(
+                    move |_, flow| match flow {
+                        Flow::Value(value) => Ok(failure_result_flow(Some(value))),
+                        Flow::Pending(suspension) => Ok(Flow::Pending(suspension)),
+                        Flow::Return(value) => Ok(failure_result_flow(Some(value))),
+                        Flow::Break => {
+                            Err(VerseError::runtime_at("`break` escaped function", span))
+                        }
+                    },
+                ))),
+                value => Ok(FailureEval::Ready(Some(value))),
+            },
+        }
+    }
+
     fn call_overload(
         &self,
         overloads: Vec<Value>,
@@ -7267,6 +9132,18 @@ impl Interpreter {
             return Err(VerseError::runtime_at("no overload matches [] call", span));
         };
         self.call_failure(overload, args, span)
+    }
+
+    fn call_overload_failure_maybe_pending(
+        &self,
+        overloads: Vec<Value>,
+        args: Vec<CallValue>,
+        span: Span,
+    ) -> Result<FailureEval, VerseError> {
+        let Some(overload) = self.select_overload(&overloads, &args, true) else {
+            return Err(VerseError::runtime_at("no overload matches [] call", span));
+        };
+        self.call_failure_maybe_pending(overload, args, span)
     }
 
     fn select_overload(
@@ -7309,20 +9186,56 @@ impl Interpreter {
         args: &[CallValue],
         env: &Env,
     ) -> Option<usize> {
+        let type_params = runtime_type_param_constraints(params);
+        let match_env = Env::child(env);
+        if let [param] = params
+            && let ParamPattern::Tuple(items) = &param.pattern
+            && tuple_params_have_named_or_default(items)
+        {
+            if args.len() == 1 && args[0].name.is_none() && matches!(args[0].value, Value::Tuple(_))
+            {
+                self.infer_runtime_type_params_for_param(
+                    param,
+                    &args[0].value,
+                    &match_env,
+                    &type_params,
+                    args[0].span,
+                )
+                .ok()?;
+                return runtime_type_match_score(
+                    &args[0].value,
+                    param.annotation.as_ref(),
+                    &match_env,
+                );
+            }
+            return self.function_call_match_score(items, args, &match_env);
+        }
+
         if args.iter().all(|arg| arg.name.is_none()) && params.iter().all(|param| !param.named) {
             let values = function_call_values(
                 params,
                 args.iter().map(|arg| value_copy(&arg.value)).collect(),
-                env,
+                &match_env,
                 args.first()
                     .map_or_else(|| Span::new(0, 0, 1, 1), |arg| arg.span),
             )
             .ok()?;
+            for (param, value) in params.iter().zip(&values) {
+                self.infer_runtime_type_params_for_param(
+                    param,
+                    value,
+                    &match_env,
+                    &type_params,
+                    args.first()
+                        .map_or_else(|| Span::new(0, 0, 1, 1), |arg| arg.span),
+                )
+                .ok()?;
+            }
             return params
                 .iter()
                 .zip(values)
                 .try_fold(0usize, |score, (param, value)| {
-                    runtime_type_match_score(&value, param.annotation.as_ref(), env)
+                    runtime_type_match_score(&value, param.annotation.as_ref(), &match_env)
                         .map(|next| score + next)
                 });
         }
@@ -7344,7 +9257,19 @@ impl Interpreter {
                         return None;
                     }
                     assigned[param_index] = true;
-                    score += runtime_type_match_score(&arg.value, param.annotation.as_ref(), env)?;
+                    self.infer_runtime_type_params_for_param(
+                        param,
+                        &arg.value,
+                        &match_env,
+                        &type_params,
+                        arg.span,
+                    )
+                    .ok()?;
+                    score += runtime_type_match_score(
+                        &arg.value,
+                        param.annotation.as_ref(),
+                        &match_env,
+                    )?;
                 }
                 Some(name) => {
                     let (param_index, param) = params
@@ -7355,7 +9280,19 @@ impl Interpreter {
                         return None;
                     }
                     assigned[param_index] = true;
-                    score += runtime_type_match_score(&arg.value, param.annotation.as_ref(), env)?;
+                    self.infer_runtime_type_params_for_param(
+                        param,
+                        &arg.value,
+                        &match_env,
+                        &type_params,
+                        arg.span,
+                    )
+                    .ok()?;
+                    score += runtime_type_match_score(
+                        &arg.value,
+                        param.annotation.as_ref(),
+                        &match_env,
+                    )?;
                 }
             }
         }
@@ -7538,6 +9475,19 @@ impl Interpreter {
         call_env: &Env,
         span: Span,
     ) -> Result<(), VerseError> {
+        let type_params = runtime_type_param_constraints(params);
+        if let [param] = params
+            && let ParamPattern::Tuple(items) = &param.pattern
+            && tuple_params_have_named_or_default(items)
+        {
+            if args.len() == 1 && args[0].name.is_none() && matches!(args[0].value, Value::Tuple(_))
+            {
+                let arg = args.into_iter().next().expect("length checked");
+                return self.bind_param_value(param, arg.value, call_env, arg.span, &type_params);
+            }
+            return self.bind_function_args(items, args, call_env, span);
+        }
+
         if args.iter().all(|arg| arg.name.is_none()) && params.iter().all(|param| !param.named) {
             let values = function_call_values(
                 params,
@@ -7546,7 +9496,7 @@ impl Interpreter {
                 span,
             )?;
             for (param, value) in params.iter().zip(values) {
-                self.bind_param_value(param, value, call_env, span)?;
+                self.bind_param_value(param, value, call_env, span, &type_params)?;
             }
             return Ok(());
         }
@@ -7570,7 +9520,7 @@ impl Interpreter {
                     };
                     positional_index = param_index + 1;
                     assigned[param_index] = true;
-                    self.bind_param_value(param, arg.value, call_env, arg.span)?;
+                    self.bind_param_value(param, arg.value, call_env, arg.span, &type_params)?;
                 }
                 Some(name) => {
                     let Some((param_index, param)) = params
@@ -7598,7 +9548,7 @@ impl Interpreter {
                         ));
                     }
                     assigned[param_index] = true;
-                    self.bind_param_value(param, arg.value, call_env, arg.span)?;
+                    self.bind_param_value(param, arg.value, call_env, arg.span, &type_params)?;
                 }
             }
         }
@@ -7619,7 +9569,7 @@ impl Interpreter {
                 ));
             };
             let value = self.eval_value(default, call_env)?;
-            self.bind_param_value(param, value, call_env, span)?;
+            self.bind_param_value(param, value, call_env, span, &type_params)?;
         }
 
         Ok(())
@@ -7631,8 +9581,34 @@ impl Interpreter {
         value: Value,
         call_env: &Env,
         span: Span,
+        type_params: &HashMap<String, TypeParamConstraint>,
     ) -> Result<(), VerseError> {
+        self.infer_runtime_type_params_for_param(param, &value, call_env, type_params, span)?;
         let value = coerce_annotated_value(call_env, param.annotation.as_ref(), value);
+        if let Some(annotation) = param.annotation.as_ref()
+            && !runtime_annotation_has_unresolved_type_params(
+                &annotation.name,
+                type_params,
+                call_env,
+            )
+            && !runtime_value_matches_annotation(&value, Some(annotation), call_env)
+        {
+            let resolved = call_env.resolve_type_name(&annotation.name);
+            let rendered = if param.named {
+                format!("?{}", param.name)
+            } else if param.name.is_empty() {
+                "argument".to_string()
+            } else {
+                param.name.clone()
+            };
+            return Err(VerseError::runtime_at(
+                format!(
+                    "argument `{rendered}` expected `{}`, got `{value}`",
+                    render_runtime_type_name(&resolved)
+                ),
+                span,
+            ));
+        }
         match &param.pattern {
             ParamPattern::Binding => {
                 call_env.define(&param.name, value, false);
@@ -7660,10 +9636,195 @@ impl Interpreter {
                     ));
                 }
                 for (param, value) in params.iter().zip(items) {
-                    self.bind_param_value(param, value, call_env, span)?;
+                    self.bind_param_value(param, value, call_env, span, type_params)?;
                 }
                 Ok(())
             }
+        }
+    }
+
+    fn infer_runtime_type_params_for_param(
+        &self,
+        param: &Param,
+        value: &Value,
+        env: &Env,
+        type_params: &HashMap<String, TypeParamConstraint>,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if let Some(annotation) = &param.annotation {
+            self.infer_runtime_type_params_from_type_name(
+                &annotation.name,
+                value,
+                env,
+                type_params,
+                span,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn infer_runtime_type_params_from_type_name(
+        &self,
+        type_name: &TypeName,
+        value: &Value,
+        env: &Env,
+        type_params: &HashMap<String, TypeParamConstraint>,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match type_name {
+            TypeName::Named(name) if type_params.contains_key(name) => {
+                if let Some(actual) = runtime_type_name_for_value(value, env) {
+                    self.bind_runtime_type_param(name, &actual, value, env, type_params, span)?;
+                }
+                Ok(())
+            }
+            TypeName::Array(Some(item_type)) => match value {
+                Value::String(_) if type_name_is_string_char(item_type) => Ok(()),
+                Value::Array(items) => {
+                    for item in items.borrow().iter() {
+                        self.infer_runtime_type_params_from_type_name(
+                            item_type,
+                            item,
+                            env,
+                            type_params,
+                            span,
+                        )?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            TypeName::Map(key_type, value_type) | TypeName::WeakMap(key_type, value_type) => {
+                if let Value::Map(entries) = value {
+                    for (key, item) in entries.borrow().iter() {
+                        self.infer_runtime_type_params_from_type_name(
+                            key_type,
+                            key,
+                            env,
+                            type_params,
+                            span,
+                        )?;
+                        self.infer_runtime_type_params_from_type_name(
+                            value_type,
+                            item,
+                            env,
+                            type_params,
+                            span,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            TypeName::Tuple(item_types) => {
+                if let Value::Tuple(items) = value {
+                    for (item_type, item) in item_types.iter().zip(items) {
+                        self.infer_runtime_type_params_from_type_name(
+                            item_type,
+                            item,
+                            env,
+                            type_params,
+                            span,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            TypeName::Option(item_type) => {
+                if let Value::Option(Some(item)) = value {
+                    self.infer_runtime_type_params_from_type_name(
+                        item_type,
+                        item,
+                        env,
+                        type_params,
+                        span,
+                    )?;
+                }
+                Ok(())
+            }
+            TypeName::Applied { name, args } if name == "result" && args.len() == 2 => {
+                if let Value::Result { succeeded, value } = value {
+                    let item_type = if *succeeded { &args[0] } else { &args[1] };
+                    self.infer_runtime_type_params_from_type_name(
+                        item_type,
+                        value,
+                        env,
+                        type_params,
+                        span,
+                    )?;
+                }
+                Ok(())
+            }
+            TypeName::Applied { .. } | TypeName::FunctionSignature { .. } => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn bind_runtime_type_param(
+        &self,
+        name: &str,
+        actual: &TypeName,
+        value: &Value,
+        env: &Env,
+        type_params: &HashMap<String, TypeParamConstraint>,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some(constraint) = type_params.get(name) else {
+            return Ok(());
+        };
+        self.ensure_runtime_type_param_constraint(name, actual, value, constraint, env, span)?;
+
+        if let Some(existing) = env.get_local_type_alias(name) {
+            if let Some(merged) = merge_runtime_type_names(&existing, actual, env) {
+                env.define_type_alias(name, merged);
+                return Ok(());
+            }
+            return Err(VerseError::runtime_at(
+                format!(
+                    "type argument `{}` for `{name}` conflicts with inferred `{}`",
+                    render_runtime_type_name(actual),
+                    render_runtime_type_name(&existing)
+                ),
+                span,
+            ));
+        }
+
+        env.define_type_alias(name, actual.clone());
+        Ok(())
+    }
+
+    fn ensure_runtime_type_param_constraint(
+        &self,
+        name: &str,
+        actual: &TypeName,
+        value: &Value,
+        constraint: &TypeParamConstraint,
+        env: &Env,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let satisfies = match constraint {
+            TypeParamConstraint::Type => true,
+            TypeParamConstraint::Subtype(expected) => {
+                let expected = env.resolve_type_name(expected);
+                runtime_type_name_satisfies_constraint(actual, value, &expected, env)
+            }
+        };
+
+        if satisfies {
+            Ok(())
+        } else {
+            let expected = match constraint {
+                TypeParamConstraint::Type => TypeName::Any,
+                TypeParamConstraint::Subtype(expected) => env.resolve_type_name(expected),
+            };
+            Err(VerseError::runtime_at(
+                format!(
+                    "type argument `{}` for `{name}` must be a subtype of `{}`",
+                    render_runtime_type_name(actual),
+                    render_runtime_type_name(&expected)
+                ),
+                span,
+            ))
         }
     }
 }
@@ -7682,6 +9843,7 @@ struct Scope {
     type_aliases: HashMap<String, TypeName>,
     extension_methods: HashMap<String, Vec<RuntimeExtensionMethod>>,
     module_imports: Vec<Env>,
+    module_name: Option<String>,
     parent: Option<Env>,
 }
 
@@ -7716,6 +9878,7 @@ struct ScopeSnapshot {
     type_aliases: HashMap<String, TypeName>,
     extension_methods: HashMap<String, Vec<RuntimeExtensionMethod>>,
     module_imports: Vec<Env>,
+    module_name: Option<String>,
 }
 
 struct EnvTransaction {
@@ -7780,6 +9943,7 @@ impl EnvTransaction {
             scope.type_aliases = snapshot.type_aliases;
             scope.extension_methods = snapshot.extension_methods;
             scope.module_imports = snapshot.module_imports;
+            scope.module_name = snapshot.module_name;
         }
     }
 }
@@ -7813,6 +9977,7 @@ impl TransactionCollector {
         let type_aliases = scope.type_aliases.clone();
         let extension_methods = scope.extension_methods.clone();
         let module_imports = scope.module_imports.clone();
+        let module_name = scope.module_name.clone();
         let parent = scope.parent.clone();
         drop(scope);
 
@@ -7822,6 +9987,7 @@ impl TransactionCollector {
             type_aliases,
             extension_methods: extension_methods.clone(),
             module_imports: module_imports.clone(),
+            module_name,
         });
 
         for binding in values.values() {
@@ -8104,18 +10270,58 @@ impl Env {
             type_aliases: HashMap::new(),
             extension_methods: HashMap::new(),
             module_imports: Vec::new(),
+            module_name: None,
             parent: None,
         })))
     }
 
     fn child(parent: &Env) -> Self {
+        let module_name = parent.0.borrow().module_name.clone();
         Self(Rc::new(RefCell::new(Scope {
             values: HashMap::new(),
             type_aliases: HashMap::new(),
             extension_methods: HashMap::new(),
             module_imports: Vec::new(),
+            module_name,
             parent: Some(parent.clone()),
         })))
+    }
+
+    fn module_name(&self) -> Option<String> {
+        self.0.borrow().module_name.clone()
+    }
+
+    fn qualified_module_name(&self, name: &str) -> String {
+        self.0
+            .borrow()
+            .parent
+            .as_ref()
+            .and_then(Env::module_name)
+            .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"))
+    }
+
+    fn qualify_module_scope(&self, module_name: &str) {
+        let nested_modules = {
+            let mut scope = self.0.borrow_mut();
+            scope.module_name = Some(module_name.to_string());
+            for methods in scope.extension_methods.values_mut() {
+                for method in methods {
+                    method.module_name = Some(module_name.to_string());
+                }
+            }
+            scope
+                .values
+                .iter()
+                .filter_map(|(name, binding)| match &binding.value {
+                    Value::Module { env, .. } => Some((name.clone(), env.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (name, env) in nested_modules {
+            env.qualify_module_scope(&format!("{module_name}.{name}"));
+        }
     }
 
     fn define(&self, name: impl Into<String>, value: Value, mutable: bool) {
@@ -8174,6 +10380,12 @@ impl Env {
     }
 
     fn get_type_alias(&self, name: &str) -> Option<TypeName> {
+        if name.contains('.')
+            && let Some(target) = self.get_qualified_type_alias(name)
+        {
+            return Some(target);
+        }
+
         let scope = self.0.borrow();
         if let Some(target) = scope.type_aliases.get(name) {
             return Some(target.clone());
@@ -8182,6 +10394,31 @@ impl Env {
             .parent
             .as_ref()
             .and_then(|parent| parent.get_type_alias(name))
+    }
+
+    fn get_qualified_type_alias(&self, name: &str) -> Option<TypeName> {
+        let mut parts = name.split('.');
+        let first = parts.next()?;
+        let Value::Module {
+            env: mut module_env,
+            ..
+        } = self.get(first)?
+        else {
+            return None;
+        };
+        let remaining = parts.collect::<Vec<_>>();
+        let (&last, modules) = remaining.split_last()?;
+        for part in modules {
+            let Value::Module { env, .. } = module_env.get_local(part)? else {
+                return None;
+            };
+            module_env = env;
+        }
+        module_env.get_local_type_alias(last)
+    }
+
+    fn get_local_type_alias(&self, name: &str) -> Option<TypeName> {
+        self.0.borrow().type_aliases.get(name).cloned()
     }
 
     fn resolve_type_name(&self, type_name: &TypeName) -> TypeName {
@@ -8306,6 +10543,30 @@ impl Env {
             }
         }
         scope.parent.as_ref().and_then(|parent| parent.get(name))
+    }
+
+    fn get_qualified_path(&self, name: &str) -> Option<Value> {
+        let mut parts = name.split('.');
+        let first = parts.next()?;
+        let Some(mut value) = self.get(first) else {
+            return self.get(name);
+        };
+        let mut qualified = first.to_string();
+        let mut has_qualifier = false;
+        for part in parts {
+            let Value::Module { env, .. } = value else {
+                return None;
+            };
+            value = env.get_local(part)?;
+            qualified.push('.');
+            qualified.push_str(part);
+            has_qualifier = true;
+        }
+        Some(if has_qualifier {
+            qualify_runtime_named_value(value, &qualified)
+        } else {
+            value
+        })
     }
 
     fn get_local(&self, name: &str) -> Option<Value> {
@@ -8496,34 +10757,49 @@ impl RuntimeSuspension {
 }
 
 impl RuntimeTask {
-    fn from_flow(flow: Flow) -> Rc<Self> {
-        let task = Rc::new(Self {
+    fn new_running() -> Rc<Self> {
+        Rc::new(Self {
             state: RefCell::new(RuntimeTaskState::Running),
             awaiters: RefCell::new(Vec::new()),
-        });
-        task.set_from_flow(flow, None);
-        task
+            scoped_children: RefCell::new(Vec::new()),
+        })
     }
 
     fn set_from_flow(self: &Rc<Self>, flow: Flow, interpreter: Option<&Interpreter>) {
         match flow {
             Flow::Value(value) | Flow::Return(value) => {
-                *self.state.borrow_mut() = RuntimeTaskState::Complete(Ok(value.clone()));
-                self.resume_awaiters(Ok(value), interpreter);
+                self.complete_with_value(value, interpreter);
             }
             Flow::Break => {
                 let error = VerseError::runtime("`break` escaped spawned task");
-                *self.state.borrow_mut() = RuntimeTaskState::Complete(Err(error.clone()));
-                self.resume_awaiters(Err(error), interpreter);
+                self.complete_with_error(error, interpreter);
             }
             Flow::Pending(suspension) => {
+                self.cleanup_scoped_children();
                 *self.state.borrow_mut() = RuntimeTaskState::Suspended(suspension.clone());
                 suspension.register_task(self.clone());
             }
         }
     }
 
+    fn complete_with_value(self: &Rc<Self>, value: Value, interpreter: Option<&Interpreter>) {
+        if let Some(interpreter) = interpreter
+            && let Err(error) = self.cancel_scoped_children(interpreter)
+        {
+            self.complete_with_error(error, Some(interpreter));
+            return;
+        }
+        *self.state.borrow_mut() = RuntimeTaskState::Complete(Ok(value.clone()));
+        self.resume_awaiters(Ok(value), interpreter);
+    }
+
     fn complete_with_error(self: &Rc<Self>, error: VerseError, interpreter: Option<&Interpreter>) {
+        let mut error = error;
+        if let Some(interpreter) = interpreter
+            && let Err(cancel_error) = self.cancel_scoped_children(interpreter)
+        {
+            error = cancel_error;
+        }
         *self.state.borrow_mut() = RuntimeTaskState::Complete(Err(error.clone()));
         self.resume_awaiters(Err(error), interpreter);
     }
@@ -8550,7 +10826,39 @@ impl RuntimeTask {
         if let Some(suspension) = suspension {
             suspension.cancel(interpreter)?;
         }
+        self.cancel_scoped_children(interpreter)?;
         Ok(())
+    }
+
+    fn track_scoped_child(&self, task: Rc<RuntimeTask>) {
+        if task.is_complete() {
+            return;
+        }
+        let mut children = self.scoped_children.borrow_mut();
+        if children.iter().any(|existing| Rc::ptr_eq(existing, &task)) {
+            return;
+        }
+        children.push(task);
+    }
+
+    fn cleanup_scoped_children(&self) {
+        self.scoped_children
+            .borrow_mut()
+            .retain(|task| !task.is_complete());
+    }
+
+    fn cancel_scoped_children(&self, interpreter: &Interpreter) -> Result<(), VerseError> {
+        let children = std::mem::take(&mut *self.scoped_children.borrow_mut());
+        for child in children {
+            if !child.is_complete() {
+                child.cancel_silently(interpreter)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(&*self.state.borrow(), RuntimeTaskState::Complete(_))
     }
 
     fn is_suspended(&self) -> bool {
@@ -8569,7 +10877,9 @@ impl RuntimeTask {
             }
         };
 
-        match interpreter.eval_with_task_context(|| (suspension.resume)(interpreter, value)) {
+        match interpreter
+            .eval_with_task_context(self.clone(), || (suspension.resume)(interpreter, value))
+        {
             Ok(flow) => self.set_from_flow(flow, Some(interpreter)),
             Err(error) => self.complete_with_error(error, Some(interpreter)),
         }
@@ -8604,7 +10914,8 @@ impl RuntimeTask {
             }
         };
 
-        let flow = interpreter.eval_with_task_context(|| (suspension.resume)(interpreter, value));
+        let flow = interpreter
+            .eval_with_task_context(self.clone(), || (suspension.resume)(interpreter, value));
         match flow {
             Ok(flow) => self.set_from_flow(flow, Some(interpreter)),
             Err(error) => self.complete_with_error(error, Some(interpreter)),
@@ -8771,6 +11082,160 @@ fn structured_sync_values(state: &StructuredSyncState) -> Result<Vec<Value>, Ver
             })
         })
         .collect()
+}
+
+fn for_results_value(results: &Rc<RefCell<Vec<Value>>>) -> Value {
+    Value::Array(Rc::new(RefCell::new(copy_values(&results.borrow()))))
+}
+
+fn finish_for_pending_flow(
+    flow: Flow,
+    results: Rc<RefCell<Vec<Value>>>,
+) -> Result<Flow, VerseError> {
+    match flow {
+        Flow::Value(_) => Ok(Flow::Value(for_results_value(&results))),
+        Flow::Pending(suspension) => {
+            Ok(Flow::Pending(suspension.map(move |_, flow| {
+                finish_for_pending_flow(flow, results.clone())
+            })))
+        }
+        signal => Ok(signal),
+    }
+}
+
+fn for_clause_flow(flow: Option<Flow>) -> Result<Flow, VerseError> {
+    Ok(flow.unwrap_or(Flow::Value(Value::None)))
+}
+
+fn clone_for_clause_state(state: &ForClauseState) -> ForClauseState {
+    ForClauseState {
+        clauses: state.clauses.clone(),
+        index: state.index,
+        body: state.body.clone(),
+        env: state.env.clone(),
+        results: state.results.clone(),
+    }
+}
+
+fn clone_for_bindings(bindings: &[Vec<(String, Value)>]) -> Vec<Vec<(String, Value)>> {
+    bindings
+        .iter()
+        .map(|iteration| {
+            iteration
+                .iter()
+                .map(|(name, value)| (name.clone(), value_copy(value)))
+                .collect()
+        })
+        .collect()
+}
+
+fn clone_for_iteration_state(state: &ForIterationState) -> ForIterationState {
+    ForIterationState {
+        clauses: state.clauses.clone(),
+        index: state.index,
+        body: state.body.clone(),
+        env: state.env.clone(),
+        results: state.results.clone(),
+        bindings: clone_for_bindings(&state.bindings),
+    }
+}
+
+fn failure_result_flow(result: Option<Value>) -> Flow {
+    Flow::Value(Value::Result {
+        succeeded: result.is_some(),
+        value: Box::new(result.unwrap_or(Value::None)),
+    })
+}
+
+fn failure_eval_to_flow(result: FailureEval) -> Result<Flow, VerseError> {
+    match result {
+        FailureEval::Ready(result) => Ok(failure_result_flow(result)),
+        FailureEval::Pending(suspension) => Ok(Flow::Pending(suspension)),
+    }
+}
+
+fn invert_failure_result(result: Option<Value>) -> Option<Value> {
+    if result.is_some() {
+        None
+    } else {
+        Some(Value::Bool(true))
+    }
+}
+
+fn wrap_failure_transaction(
+    result: FailureEval,
+    transaction: Rc<RefCell<Option<EnvTransaction>>>,
+    span: Span,
+) -> FailureEval {
+    match result {
+        FailureEval::Ready(result) => {
+            finish_failure_transaction(&transaction, result.as_ref());
+            FailureEval::Ready(result)
+        }
+        FailureEval::Pending(suspension) => {
+            let transaction_for_resume = transaction.clone();
+            let transaction_for_cancel = transaction.clone();
+            FailureEval::Pending(
+                suspension
+                    .map(move |interpreter, flow| {
+                        let transaction = transaction_for_resume.clone();
+                        let continuation: Rc<FailureContinuation> = Rc::new(move |_, result| {
+                            finish_failure_transaction(&transaction, result.as_ref());
+                            Ok(failure_result_flow(result))
+                        });
+                        Interpreter::continue_when_failure_result(
+                            interpreter,
+                            flow,
+                            span,
+                            continuation,
+                        )
+                    })
+                    .on_cancel(move |_| {
+                        restore_failure_transaction(&transaction_for_cancel);
+                        Ok(())
+                    }),
+            )
+        }
+    }
+}
+
+fn finish_failure_transaction(
+    transaction: &Rc<RefCell<Option<EnvTransaction>>>,
+    result: Option<&Value>,
+) {
+    if result.is_some() {
+        transaction.borrow_mut().take();
+    } else {
+        restore_failure_transaction(transaction);
+    }
+}
+
+fn restore_failure_transaction(transaction: &Rc<RefCell<Option<EnvTransaction>>>) {
+    if let Some(transaction) = transaction.borrow_mut().take() {
+        transaction.restore();
+    }
+}
+
+fn unwrap_option_failure_value(value: Value, span: Span) -> Result<Option<Value>, VerseError> {
+    match value {
+        Value::Option(Some(value)) => Ok(Some(*value)),
+        Value::Option(None) | Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(Value::Bool(true))),
+        other => Err(VerseError::runtime_at(
+            format!("query operator expected bool or option, got `{other}`"),
+            span,
+        )),
+    }
+}
+
+fn runtime_failure_member_bracket_supports_pending(object: &Value, _name: &str) -> bool {
+    matches!(
+        object,
+        Value::StructInstance { .. }
+            | Value::ClassInstance { .. }
+            | Value::Result { .. }
+            | Value::Module { .. }
+    )
 }
 
 fn unwrap_option_value(value: Value, span: Span) -> Result<Value, VerseError> {
@@ -9000,12 +11465,71 @@ fn has_runtime_effect(effects: &[String], name: &str) -> bool {
     effects.iter().any(|effect| effect == name)
 }
 
+fn data_member_default_call_error(span: Span) -> VerseError {
+    VerseError::runtime_at(
+        "data-member default value can only call `<converges>` functions",
+        span,
+    )
+}
+
 fn class_has_specifier(specifiers: &[String], name: &str) -> bool {
     specifiers.iter().any(|specifier| specifier == name)
 }
 
 fn field_has_specifier(specifiers: &[String], name: &str) -> bool {
     specifiers.iter().any(|specifier| specifier == name)
+}
+
+fn runtime_access_level_from_specifiers(specifiers: &[String]) -> RuntimeAccessLevel {
+    if field_has_specifier(specifiers, "public") {
+        RuntimeAccessLevel::Public
+    } else if field_has_specifier(specifiers, "protected") {
+        RuntimeAccessLevel::Protected
+    } else if field_has_specifier(specifiers, "private") {
+        RuntimeAccessLevel::Private
+    } else {
+        RuntimeAccessLevel::Internal
+    }
+}
+
+fn ensure_runtime_interface_required_fields_initializable(
+    class_name: &str,
+    class_specifiers: &[String],
+    fields: &[RuntimeClassField],
+    span: Span,
+) -> Result<(), VerseError> {
+    let class_is_public = class_has_specifier(class_specifiers, "public");
+    for field in fields {
+        if field.default.is_some() || field.owner.is_none() {
+            continue;
+        }
+        let inaccessible_from_constructor = matches!(
+            field.access,
+            RuntimeAccessLevel::Private | RuntimeAccessLevel::Protected
+        ) || (field.access == RuntimeAccessLevel::Internal
+            && class_is_public);
+        if inaccessible_from_constructor {
+            return Err(VerseError::runtime_at(
+                format!(
+                    "class `{class_name}` must be `abstract` or provide a default value for interface field `{}`",
+                    field.name
+                ),
+                span,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn tuple_params_have_named_or_default(params: &[Param]) -> bool {
+    params.iter().any(|param| {
+        param.named
+            || param.default.is_some()
+            || matches!(
+                &param.pattern,
+                ParamPattern::Tuple(items) if tuple_params_have_named_or_default(items)
+            )
+    })
 }
 
 fn function_call_values(
@@ -9088,6 +11612,261 @@ fn function_call_values(
 
 fn coerce_annotated_value(env: &Env, annotation: Option<&TypeAnnotation>, value: Value) -> Value {
     coerce_value_to_type(env, annotation, value)
+}
+
+fn runtime_type_param_constraints(params: &[Param]) -> HashMap<String, TypeParamConstraint> {
+    let mut constraints = HashMap::new();
+    collect_runtime_type_param_constraints(params, &mut constraints);
+    constraints
+}
+
+fn collect_runtime_type_param_constraints(
+    params: &[Param],
+    constraints: &mut HashMap<String, TypeParamConstraint>,
+) {
+    for param in params {
+        for type_param in &param.type_params {
+            constraints.insert(type_param.name.clone(), type_param.constraint.clone());
+        }
+        if let ParamPattern::Tuple(items) = &param.pattern {
+            collect_runtime_type_param_constraints(items, constraints);
+        }
+    }
+}
+
+fn runtime_annotation_has_unresolved_type_params(
+    type_name: &TypeName,
+    type_params: &HashMap<String, TypeParamConstraint>,
+    env: &Env,
+) -> bool {
+    match type_name {
+        TypeName::Named(name) if type_params.contains_key(name) => {
+            env.get_local_type_alias(name).is_none()
+        }
+        TypeName::Array(item) => item.as_deref().is_some_and(|item| {
+            runtime_annotation_has_unresolved_type_params(item, type_params, env)
+        }),
+        TypeName::Map(key, value) | TypeName::WeakMap(key, value) => {
+            runtime_annotation_has_unresolved_type_params(key, type_params, env)
+                || runtime_annotation_has_unresolved_type_params(value, type_params, env)
+        }
+        TypeName::Tuple(items) => items
+            .iter()
+            .any(|item| runtime_annotation_has_unresolved_type_params(item, type_params, env)),
+        TypeName::Option(item) => {
+            runtime_annotation_has_unresolved_type_params(item, type_params, env)
+        }
+        TypeName::FunctionSignature {
+            params,
+            return_type,
+            ..
+        } => {
+            params
+                .iter()
+                .any(|param| runtime_annotation_has_unresolved_type_params(param, type_params, env))
+                || runtime_annotation_has_unresolved_type_params(return_type, type_params, env)
+        }
+        TypeName::Applied { args, .. } => args
+            .iter()
+            .any(|arg| runtime_annotation_has_unresolved_type_params(arg, type_params, env)),
+        _ => false,
+    }
+}
+
+fn runtime_type_name_for_value(value: &Value, env: &Env) -> Option<TypeName> {
+    match value {
+        Value::Int(_) => Some(TypeName::Int),
+        Value::Float(_) => Some(TypeName::Float),
+        Value::Rational(_) => Some(TypeName::Rational),
+        Value::Number(number) if number.fract() == 0.0 => Some(TypeName::Int),
+        Value::Number(_) => Some(TypeName::Number),
+        Value::Bool(_) => Some(TypeName::Bool),
+        Value::String(_) => Some(TypeName::String),
+        Value::Diagnostic(_) => Some(TypeName::Named("diagnostic".to_string())),
+        Value::None => Some(TypeName::None),
+        Value::Char(_) => Some(TypeName::Char),
+        Value::Char32(_) => Some(TypeName::Char32),
+        Value::Range { .. } => Some(TypeName::Named("range".to_string())),
+        Value::EnumValue { enum_name, .. } => Some(TypeName::Named(enum_name.clone())),
+        Value::StructInstance { struct_name, .. } => Some(TypeName::Named(struct_name.clone())),
+        Value::ClassInstance { class_name, .. } => Some(TypeName::Named(class_name.clone())),
+        Value::EnumType { name, .. }
+        | Value::StructType { name, .. }
+        | Value::ClassType { name, .. }
+        | Value::InterfaceType { name, .. } => Some(TypeName::Named(name.clone())),
+        Value::Array(items) => runtime_array_item_type_name(items.borrow().as_slice(), env)
+            .map(|item| TypeName::Array(Some(Box::new(item)))),
+        Value::Map(entries) => runtime_map_type_name(entries.borrow().as_slice(), env),
+        Value::Tuple(items) => items
+            .iter()
+            .map(|item| runtime_type_name_for_value(item, env))
+            .collect::<Option<Vec<_>>>()
+            .map(TypeName::Tuple),
+        Value::Option(Some(value)) => {
+            runtime_type_name_for_value(value, env).map(|item| TypeName::Option(Box::new(item)))
+        }
+        Value::Option(None) => None,
+        Value::Function { .. } | Value::BoundMethod { .. } | Value::NativeFunction { .. } => {
+            Some(TypeName::Function)
+        }
+        Value::Task(_) => None,
+        Value::Event { payload, .. } => Some(TypeName::Applied {
+            name: "event".to_string(),
+            args: payload.iter().cloned().collect(),
+        }),
+        Value::Awaitable { payload } => Some(TypeName::Applied {
+            name: "awaitable".to_string(),
+            args: payload.iter().cloned().collect(),
+        }),
+        Value::Signalable { payload } => Some(TypeName::Applied {
+            name: "signalable".to_string(),
+            args: vec![payload.clone()],
+        }),
+        Value::Subscribable { payload, .. } => Some(TypeName::Applied {
+            name: "subscribable".to_string(),
+            args: payload.iter().cloned().collect(),
+        }),
+        Value::Listenable { payload, .. } => Some(TypeName::Applied {
+            name: "listenable".to_string(),
+            args: payload.iter().cloned().collect(),
+        }),
+        Value::Generator { item_type, .. } => Some(TypeName::Applied {
+            name: "generator".to_string(),
+            args: item_type.iter().cloned().collect(),
+        }),
+        Value::CastableSubtype(item) => Some(TypeName::Applied {
+            name: "castable_subtype".to_string(),
+            args: vec![item.clone()],
+        }),
+        Value::ConcreteSubtype(item) => Some(TypeName::Applied {
+            name: "concrete_subtype".to_string(),
+            args: vec![item.clone()],
+        }),
+        Value::ClassifiableSubset(_) => None,
+        Value::Modifier { item_type } => Some(TypeName::Applied {
+            name: "modifier".to_string(),
+            args: vec![item_type.clone()],
+        }),
+        Value::ModifierStack { item_type, .. } => Some(TypeName::Applied {
+            name: "modifier_stack".to_string(),
+            args: vec![item_type.clone()],
+        }),
+        Value::Result { succeeded, value } => {
+            let item = runtime_type_name_for_value(value, env)?;
+            Some(TypeName::Applied {
+                name: "result".to_string(),
+                args: if *succeeded {
+                    vec![item, TypeName::Any]
+                } else {
+                    vec![TypeName::Any, item]
+                },
+            })
+        }
+        Value::Module { name, .. } => Some(TypeName::Named(name.clone())),
+        Value::Session => Some(TypeName::Named("session".to_string())),
+        Value::External
+        | Value::Overload(_)
+        | Value::Pending
+        | Value::Suspended(_)
+        | Value::NativeResultMethod { .. }
+        | Value::NativeEventMethod { .. }
+        | Value::NativeSubscribableMethod { .. }
+        | Value::NativeTaskMethod { .. }
+        | Value::NativeModifierMethod { .. }
+        | Value::NativeCancelMethod { .. }
+        | Value::NativeSubscriptionCancelMethod { .. }
+        | Value::ParametricType { .. }
+        | Value::ModifierCancelHandle { .. }
+        | Value::SubscriptionCancelHandle { .. } => None,
+    }
+}
+
+fn runtime_array_item_type_name(items: &[Value], env: &Env) -> Option<TypeName> {
+    let mut inferred: Option<TypeName> = None;
+    for item in items {
+        let item_type = runtime_type_name_for_value(item, env)?;
+        inferred = Some(match inferred {
+            Some(current) => merge_runtime_type_names(&current, &item_type, env)?,
+            None => item_type,
+        });
+    }
+    inferred
+}
+
+fn runtime_map_type_name(entries: &[(Value, Value)], env: &Env) -> Option<TypeName> {
+    let mut key_type: Option<TypeName> = None;
+    let mut value_type: Option<TypeName> = None;
+    for (key, value) in entries {
+        let next_key = runtime_type_name_for_value(key, env)?;
+        let next_value = runtime_type_name_for_value(value, env)?;
+        key_type = Some(match key_type {
+            Some(current) => merge_runtime_type_names(&current, &next_key, env)?,
+            None => next_key,
+        });
+        value_type = Some(match value_type {
+            Some(current) => merge_runtime_type_names(&current, &next_value, env)?,
+            None => next_value,
+        });
+    }
+    Some(TypeName::Map(Box::new(key_type?), Box::new(value_type?)))
+}
+
+fn merge_runtime_type_names(current: &TypeName, next: &TypeName, env: &Env) -> Option<TypeName> {
+    if current == next {
+        return Some(current.clone());
+    }
+    if runtime_type_names_assignable(next, current) {
+        return Some(current.clone());
+    }
+    if runtime_type_names_assignable(current, next) {
+        return Some(next.clone());
+    }
+    if let (TypeName::Named(left), TypeName::Named(right)) = (current, next) {
+        if runtime_class_is_subtype(left, right, env)
+            || runtime_interface_is_subtype(left, right, env)
+        {
+            return Some(next.clone());
+        }
+        if runtime_class_is_subtype(right, left, env)
+            || runtime_interface_is_subtype(right, left, env)
+        {
+            return Some(current.clone());
+        }
+    }
+    None
+}
+
+fn runtime_type_name_satisfies_constraint(
+    actual: &TypeName,
+    value: &Value,
+    expected: &TypeName,
+    env: &Env,
+) -> bool {
+    match expected {
+        TypeName::Any => true,
+        TypeName::Comparable => runtime_value_is_comparable(value),
+        _ if runtime_type_names_assignable(actual, expected) => true,
+        TypeName::Named(expected_name) => match actual {
+            TypeName::Named(actual_name) => {
+                runtime_class_is_subtype(actual_name, expected_name, env)
+                    || runtime_class_implements_interface(actual_name, expected_name, env)
+                    || runtime_interface_is_subtype(actual_name, expected_name, env)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn should_coerce_class_type_for_annotation(env: &Env, annotation: Option<&TypeAnnotation>) -> bool {
+    annotation.is_some_and(|annotation| {
+        matches!(
+            env.resolve_type_name(&annotation.name),
+            TypeName::Applied { name, args }
+                if matches!(name.as_str(), "castable_subtype" | "concrete_subtype")
+                    && args.len() == 1
+        )
+    })
 }
 
 fn runtime_value_matches_annotation(
@@ -9234,6 +12013,11 @@ fn runtime_value_matches_type_name(value: &Value, type_name: &TypeName, env: &En
                 && match value {
                     Value::External => true,
                     Value::CastableSubtype(item) => item == &args[0],
+                    Value::ClassType {
+                        name,
+                        castable: true,
+                        ..
+                    } => runtime_class_type_conforms_to_type_name(name, &args[0], env),
                     _ => false,
                 }
         }
@@ -9242,6 +12026,14 @@ fn runtime_value_matches_type_name(value: &Value, type_name: &TypeName, env: &En
                 && match value {
                     Value::External => true,
                     Value::ConcreteSubtype(item) => item == &args[0],
+                    Value::ClassType {
+                        name,
+                        concrete: true,
+                        castable,
+                        ..
+                    } => runtime_class_type_satisfies_subtype_type_name(
+                        name, *castable, &args[0], env,
+                    ),
                     _ => false,
                 }
         }
@@ -9499,6 +12291,14 @@ fn runtime_class_instance_conforms_to(actual: &str, expected: &str, env: &Env) -
     if runtime_names_match(actual, expected) {
         return true;
     }
+    if runtime_class_is_subtype(actual, expected, env)
+        || runtime_class_implements_interface(actual, expected, env)
+    {
+        return true;
+    }
+    if runtime_builtin_class_base_name(expected) {
+        return runtime_class_is_subtype(actual, expected, env);
+    }
 
     match runtime_named_type_value(expected, env) {
         Some(Value::ClassType { name, .. }) => runtime_class_is_subtype(actual, &name, env),
@@ -9506,6 +12306,28 @@ fn runtime_class_instance_conforms_to(actual: &str, expected: &str, env: &Env) -
             runtime_class_implements_interface(actual, &name, env)
         }
         _ => false,
+    }
+}
+
+fn runtime_class_type_conforms_to_type_name(actual: &str, expected: &TypeName, env: &Env) -> bool {
+    match env.resolve_type_name(expected) {
+        TypeName::Any => true,
+        TypeName::Named(expected) => runtime_class_instance_conforms_to(actual, &expected, env),
+        _ => false,
+    }
+}
+
+fn runtime_class_type_satisfies_subtype_type_name(
+    actual: &str,
+    castable: bool,
+    expected: &TypeName,
+    env: &Env,
+) -> bool {
+    match env.resolve_type_name(expected) {
+        TypeName::Applied { name, args } if name == "castable_subtype" && args.len() == 1 => {
+            castable && runtime_class_type_conforms_to_type_name(actual, &args[0], env)
+        }
+        resolved => runtime_class_type_conforms_to_type_name(actual, &resolved, env),
     }
 }
 
@@ -9583,9 +12405,53 @@ fn runtime_interface_is_subtype_inner(
 }
 
 fn runtime_named_type_value(name: &str, env: &Env) -> Option<Value> {
-    env.get(name).or_else(|| {
+    env.get_qualified_path(name).or_else(|| {
         let local_name = name.rsplit('.').next().unwrap_or(name);
         (local_name != name).then(|| env.get(local_name)).flatten()
+    })
+}
+
+fn runtime_class_definition_diagnostic_span(
+    base: Option<&TypeAnnotation>,
+    fields: &[StructField],
+    methods: &[ClassMethod],
+    blocks: &[ClassBlock],
+) -> Span {
+    base.map_or_else(
+        || {
+            fields
+                .first()
+                .map(|field| field.span)
+                .or_else(|| methods.first().map(|method| method.span))
+                .or_else(|| blocks.first().map(|block| block.span))
+                .unwrap_or_else(|| Span::new(0, 0, 1, 1))
+        },
+        |base| base.span,
+    )
+}
+
+fn runtime_builtin_class_base_name(name: &str) -> bool {
+    matches!(name.rsplit('.').next().unwrap_or(name), "component" | "tag")
+}
+
+fn runtime_builtin_class_type(name: &str) -> Option<Value> {
+    let local_name = name.rsplit('.').next().unwrap_or(name);
+    if !runtime_builtin_class_base_name(local_name) {
+        return None;
+    }
+    Some(Value::ClassType {
+        name: local_name.to_string(),
+        base: None,
+        interfaces: Vec::new(),
+        unique: false,
+        abstract_class: false,
+        epic_internal_class: false,
+        final_class: false,
+        concrete: false,
+        castable: false,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        blocks: Vec::new(),
     })
 }
 
@@ -9704,12 +12570,30 @@ fn coerce_value_to_type_name(env: &Env, type_name: &TypeName, value: Value) -> V
         TypeName::Applied { name, args } if name == "castable_subtype" && args.len() == 1 => {
             match value {
                 Value::External => Value::CastableSubtype(args[0].clone()),
+                Value::ClassType {
+                    name,
+                    castable: true,
+                    ..
+                } if runtime_class_type_conforms_to_type_name(&name, &args[0], env) => {
+                    Value::CastableSubtype(args[0].clone())
+                }
                 other => other,
             }
         }
         TypeName::Applied { name, args } if name == "concrete_subtype" && args.len() == 1 => {
             match value {
                 Value::External => Value::ConcreteSubtype(args[0].clone()),
+                Value::ClassType {
+                    name,
+                    concrete: true,
+                    castable,
+                    ..
+                } if runtime_class_type_satisfies_subtype_type_name(
+                    &name, castable, &args[0], env,
+                ) =>
+                {
+                    Value::ConcreteSubtype(args[0].clone())
+                }
                 other => other,
             }
         }
@@ -9966,6 +12850,8 @@ fn value_copy(value: &Value) -> Value {
             abstract_class,
             epic_internal_class,
             final_class,
+            concrete,
+            castable,
             fields,
             methods,
             blocks,
@@ -9977,12 +12863,16 @@ fn value_copy(value: &Value) -> Value {
             abstract_class: *abstract_class,
             epic_internal_class: *epic_internal_class,
             final_class: *final_class,
+            concrete: *concrete,
+            castable: *castable,
             fields: fields
                 .iter()
                 .map(|field| RuntimeClassField {
                     name: field.name.clone(),
                     mutable: field.mutable,
                     final_member: field.final_member,
+                    access: field.access,
+                    owner: field.owner.clone(),
                     default: field.default.as_ref().map(value_copy),
                 })
                 .collect(),
@@ -10003,6 +12893,8 @@ fn value_copy(value: &Value) -> Value {
                     name: field.name.clone(),
                     mutable: field.mutable,
                     final_member: field.final_member,
+                    access: field.access,
+                    owner: field.owner.clone(),
                     default: field.default.as_ref().map(value_copy),
                 })
                 .collect(),
@@ -10115,6 +13007,77 @@ fn value_copy(value: &Value) -> Value {
         | Value::NativeModifierMethod { .. }
         | Value::NativeCancelMethod { .. }
         | Value::NativeSubscriptionCancelMethod { .. } => value.clone(),
+    }
+}
+
+fn qualify_runtime_named_value(value: Value, qualified_name: &str) -> Value {
+    match value {
+        Value::EnumType { variants, open, .. } => Value::EnumType {
+            name: qualified_name.to_string(),
+            variants,
+            open,
+        },
+        Value::StructType {
+            computes, fields, ..
+        } => Value::StructType {
+            name: qualified_name.to_string(),
+            computes,
+            fields,
+        },
+        Value::ClassType {
+            base,
+            interfaces,
+            unique,
+            abstract_class,
+            epic_internal_class,
+            final_class,
+            concrete,
+            castable,
+            fields,
+            methods,
+            blocks,
+            ..
+        } => Value::ClassType {
+            name: qualified_name.to_string(),
+            base,
+            interfaces,
+            unique,
+            abstract_class,
+            epic_internal_class,
+            final_class,
+            concrete,
+            castable,
+            fields,
+            methods,
+            blocks,
+        },
+        Value::InterfaceType {
+            parents,
+            fields,
+            methods,
+            ..
+        } => Value::InterfaceType {
+            name: qualified_name.to_string(),
+            parents,
+            fields: qualify_runtime_interface_fields(qualified_name, fields),
+            methods: qualify_runtime_interface_methods(qualified_name, methods),
+        },
+        Value::ParametricType {
+            params,
+            body,
+            closure,
+            ..
+        } => Value::ParametricType {
+            name: qualified_name.to_string(),
+            params,
+            body,
+            closure,
+        },
+        Value::Module { env, .. } => Value::Module {
+            name: qualified_name.to_string(),
+            env,
+        },
+        other => other,
     }
 }
 
@@ -10835,6 +13798,18 @@ fn method_has_specifier(method: &ClassMethod, name: &str) -> bool {
     method.effects.iter().any(|effect| effect == name)
 }
 
+fn qualify_runtime_interface_fields(
+    interface_name: &str,
+    mut fields: Vec<RuntimeClassField>,
+) -> Vec<RuntimeClassField> {
+    for field in &mut fields {
+        if field.owner.is_none() {
+            field.owner = Some(interface_name.to_string());
+        }
+    }
+    fields
+}
+
 fn qualify_runtime_interface_methods(
     interface_name: &str,
     mut methods: Vec<RuntimeClassMethod>,
@@ -10856,6 +13831,16 @@ fn runtime_qualifier_matches(stored: &str, requested: &str) -> bool {
 fn runtime_method_has_qualifier(method: &RuntimeClassMethod, qualifier: &str) -> bool {
     method
         .qualifier
+        .as_deref()
+        .is_some_and(|stored| runtime_qualifier_matches(stored, qualifier))
+}
+
+fn runtime_extension_method_has_qualifier(
+    method: &RuntimeExtensionMethod,
+    qualifier: &str,
+) -> bool {
+    method
+        .module_name
         .as_deref()
         .is_some_and(|stored| runtime_qualifier_matches(stored, qualifier))
 }
@@ -10960,11 +13945,7 @@ fn eval_array_method(
 ) -> Result<Value, VerseError> {
     match name {
         "Slice" => {
-            let [start, end]: [Value; 2] = args.try_into().map_err(|args: Vec<Value>| {
-                array_method_arity_error(name, 2, 2, args.len(), span)
-            })?;
-            let start = expect_array_position(&start, "Slice start", span)?;
-            let end = expect_array_position(&end, "Slice end", span)?;
+            let (start, end) = array_slice_args(args, items.len(), span)?;
             ensure_slice_range(start, end, items.len(), span)?;
             Ok(array_value(
                 items[start..end].iter().map(value_copy).collect(),
@@ -11129,13 +14110,7 @@ fn eval_array_method_failable(
 ) -> Result<Option<Value>, VerseError> {
     match name {
         "Slice" => {
-            let [start, end]: [Value; 2] = args.try_into().map_err(|args: Vec<Value>| {
-                array_method_arity_error(name, 2, 2, args.len(), span)
-            })?;
-            let Some(start) = array_position_value(&start, "Slice start", span)? else {
-                return Ok(None);
-            };
-            let Some(end) = array_position_value(&end, "Slice end", span)? else {
+            let Some((start, end)) = array_slice_args_failable(args, items.len(), span)? else {
                 return Ok(None);
             };
             if !valid_slice_range(start, end, items.len()) {
@@ -11442,6 +14417,46 @@ fn ensure_slice_range(start: usize, end: usize, len: usize, span: Span) -> Resul
         ));
     }
     Ok(())
+}
+
+fn array_slice_args(
+    args: Vec<Value>,
+    len: usize,
+    span: Span,
+) -> Result<(usize, usize), VerseError> {
+    match args.as_slice() {
+        [start] => Ok((expect_array_position(start, "Slice start", span)?, len)),
+        [start, end] => Ok((
+            expect_array_position(start, "Slice start", span)?,
+            expect_array_position(end, "Slice end", span)?,
+        )),
+        _ => Err(array_method_arity_error("Slice", 1, 2, args.len(), span)),
+    }
+}
+
+fn array_slice_args_failable(
+    args: Vec<Value>,
+    len: usize,
+    span: Span,
+) -> Result<Option<(usize, usize)>, VerseError> {
+    match args.as_slice() {
+        [start] => {
+            let Some(start) = array_position_value(start, "Slice start", span)? else {
+                return Ok(None);
+            };
+            Ok(Some((start, len)))
+        }
+        [start, end] => {
+            let (Some(start), Some(end)) = (
+                array_position_value(start, "Slice start", span)?,
+                array_position_value(end, "Slice end", span)?,
+            ) else {
+                return Ok(None);
+            };
+            Ok(Some((start, end)))
+        }
+        _ => Err(array_method_arity_error("Slice", 1, 2, args.len(), span)),
+    }
 }
 
 fn array_method_arity_error(
@@ -11787,6 +14802,7 @@ fn native_named_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "ToString" => vec![vec!["Val", "String", "Character"]],
         "Localize" => vec![vec!["Message"]],
         "Join" => vec![vec!["Strings", "Messages"], vec!["Separator"]],
+        "Concatenate" => vec![vec!["Arrays"]],
         "GetRandomFloat" | "GetRandomInt" => vec![vec!["Low"], vec!["High"]],
         "Shuffle" => vec![vec!["Input"]],
         "Sleep" => vec![vec!["Seconds"]],
@@ -12671,32 +15687,42 @@ fn native_join(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError>
     )))
 }
 
-fn native_concatenate(args: Vec<Value>, _span: Span) -> Result<NativeResult, VerseError> {
+fn native_concatenate(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let mut result = Vec::new();
 
-    if args.len() == 1
-        && let Value::Array(items) = &args[0]
-        && items
-            .borrow()
-            .iter()
-            .all(|item| matches!(item, Value::Array(_)))
-    {
-        for item in items.borrow().iter() {
-            let Value::Array(nested) = item else {
-                unreachable!("checked above")
-            };
-            result.extend(nested.borrow().iter().map(value_copy));
+    if args.len() == 1 {
+        let arg = args.into_iter().next().expect("length checked above");
+        let arrays_candidate = tuple_value_to_array(value_copy(&arg));
+        if let Value::Array(arrays) = &arrays_candidate
+            && arrays
+                .borrow()
+                .iter()
+                .all(|item| matches!(item, Value::Array(_)))
+        {
+            for array in arrays.borrow().iter() {
+                let Value::Array(items) = array else {
+                    unreachable!("checked above");
+                };
+                result.extend(items.borrow().iter().map(value_copy));
+            }
+            return Ok(NativeResult::Value(array_value(result)));
         }
-        return Ok(NativeResult::Value(array_value(result)));
+        return concatenate_packed_array_args(vec![arg], span);
     }
 
+    concatenate_packed_array_args(args, span)
+}
+
+fn concatenate_packed_array_args(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let mut result = Vec::new();
     for arg in args {
         match tuple_value_to_array(arg) {
             Value::Array(items) => result.extend(items.borrow().iter().map(value_copy)),
             other => {
-                return Err(VerseError::runtime(format!(
-                    "`Concatenate` expected array arguments, got {other}"
-                )));
+                return Err(VerseError::runtime_at(
+                    format!("`Concatenate` expected array arguments, got {other}"),
+                    span,
+                ));
             }
         }
     }

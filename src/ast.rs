@@ -260,6 +260,7 @@ pub enum ParamPattern {
 pub struct StructField {
     pub name: String,
     pub attributes: Vec<FieldAttribute>,
+    pub var_specifiers: Vec<String>,
     pub specifiers: Vec<String>,
     pub annotation: Option<TypeAnnotation>,
     pub default: Option<Expr>,

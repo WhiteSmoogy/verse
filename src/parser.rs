@@ -693,9 +693,7 @@ impl Parser {
                 let span = expr.span.through(question_span);
                 expr = Expr::new(ExprKind::UnwrapOption(Box::new(expr)), span);
             } else if self.match_dot() {
-                if self.check_lparen()
-                    && matches!(self.kind_at(self.current + 1), Some(TokenKind::Ident(_)))
-                {
+                if self.check_lparen() {
                     let open_span = self.consume_lparen("expected `(` after `.`")?;
                     if !self.is_qualified_name_after_open() {
                         return Err(self.error_at_current("expected qualified member name"));
@@ -1332,32 +1330,15 @@ impl Parser {
     }
 
     fn is_qualified_name_after_open(&self) -> bool {
-        let mut index = self.current;
-        if !matches!(self.kind_at(index), Some(TokenKind::Ident(_))) {
-            return false;
-        }
-        index += 1;
-        while matches!(self.kind_at(index), Some(TokenKind::Dot))
-            && matches!(self.kind_at(index + 1), Some(TokenKind::Ident(_)))
-        {
-            index += 2;
-        }
-
-        matches!(self.kind_at(index), Some(TokenKind::Colon))
-            && matches!(self.kind_at(index + 1), Some(TokenKind::RParen))
-            && self.kind_at(index + 2).is_some_and(is_member_name_kind)
+        self.skip_qualified_name_after_open_at(self.current)
+            .is_some()
     }
 
     fn parse_qualified_name_after_open(
         &mut self,
         open_span: Span,
     ) -> Result<(String, String, Span), VerseError> {
-        let (mut qualifier, _) = self.consume_ident("expected qualifier name")?;
-        while self.match_dot() {
-            let (part, _) = self.consume_ident("expected qualifier name after `.`")?;
-            qualifier.push('.');
-            qualifier.push_str(&part);
-        }
+        let qualifier = self.parse_module_path()?;
         self.consume_colon("expected `:` after qualifier")?;
         self.consume_rparen("expected `)` after qualifier")?;
         let (name, name_span) = self.consume_member_name("expected name after qualifier")?;
@@ -1667,6 +1648,7 @@ impl Parser {
             fields.push(StructField {
                 name,
                 attributes: Vec::new(),
+                var_specifiers: Vec::new(),
                 specifiers: Vec::new(),
                 annotation,
                 default,
@@ -1739,7 +1721,25 @@ impl Parser {
         let base = parents.next();
         let interfaces = parents.collect::<Vec<_>>();
 
-        self.consume_colon("expected `:` after `class`")?;
+        if self.match_lbrace() {
+            self.skip_separators();
+            let rbrace_span = self.consume_rbrace("expected `}` after empty class definition")?;
+            return Ok(Expr::new(
+                ExprKind::ClassDefinition {
+                    block: false,
+                    specifiers,
+                    base,
+                    interfaces,
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                    extension_methods: Vec::new(),
+                    blocks: Vec::new(),
+                },
+                class_span.through(rbrace_span),
+            ));
+        }
+
+        self.consume_colon("expected `:` or `{}` after `class`")?;
         if self.skip_separators() == 0 {
             return Err(self.error_at_current("expected newline after `class:`"));
         }
@@ -2048,14 +2048,14 @@ impl Parser {
         context: &str,
     ) -> Result<StructField, VerseError> {
         let mutable = self.match_var();
-        let mut specifiers = if mutable {
-            self.parse_class_field_specifiers()?
+        let var_specifiers = if mutable {
+            self.parse_var_field_specifiers()?
         } else {
             Vec::new()
         };
         let (name, name_span) = self.consume_ident(&format!("expected {context} field name"))?;
-        let post_name_specifiers = self.parse_class_field_specifiers()?;
-        for specifier in post_name_specifiers {
+        let mut specifiers = Vec::new();
+        for specifier in self.parse_class_field_specifiers()? {
             if specifiers.iter().any(|existing| existing == &specifier) {
                 return Err(VerseError::parse(
                     format!("duplicate class field specifier `{specifier}`"),
@@ -2084,6 +2084,7 @@ impl Parser {
         Ok(StructField {
             name,
             attributes,
+            var_specifiers,
             specifiers,
             annotation,
             default,
@@ -2175,6 +2176,23 @@ impl Parser {
             if specifiers.iter().any(|specifier| specifier == &name) {
                 return Err(VerseError::parse(
                     format!("duplicate class field specifier `{name}`"),
+                    name_span,
+                ));
+            }
+            specifiers.push(name);
+        }
+        Ok(specifiers)
+    }
+
+    fn parse_var_field_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
+        let mut specifiers = Vec::new();
+        while self.match_less() {
+            let (name, name_span) = self.consume_ident("expected var field specifier after `<`")?;
+            validate_var_field_specifier(&name, name_span)?;
+            self.consume_greater("expected `>` after var field specifier")?;
+            if specifiers.iter().any(|specifier| specifier == &name) {
+                return Err(VerseError::parse(
+                    format!("duplicate var field specifier `{name}`"),
                     name_span,
                 ));
             }
@@ -2877,12 +2895,24 @@ impl Parser {
         let mut params = Vec::new();
         let mut item_types = Vec::new();
         let mut binding_names = Vec::new();
+        let mut seen_named = false;
 
         loop {
             let param = if self.check_lparen() {
+                if seen_named {
+                    return Err(self
+                        .error_at_current("positional parameters cannot follow named parameters"));
+                }
                 self.parse_tuple_param_pattern()?
             } else {
-                self.parse_binding_param(false)?
+                let named = self.match_question();
+                if named {
+                    seen_named = true;
+                } else if seen_named {
+                    return Err(self
+                        .error_at_current("positional parameters cannot follow named parameters"));
+                }
+                self.parse_binding_param(named)?
             };
             let Some(annotation) = param.annotation.as_ref() else {
                 return Err(VerseError::parse(
@@ -3101,6 +3131,25 @@ impl Parser {
 
         if self.match_lparen() {
             let open_span = self.previous_span();
+            if self.is_qualified_name_after_open() {
+                let (qualifier, name, span) = self.parse_qualified_name_after_open(open_span)?;
+                let qualified_name = format!("{qualifier}.{name}");
+                if self.match_lparen() {
+                    let (args, close_span) = self.finish_parametric_type_args()?;
+                    return Ok(TypeAnnotation {
+                        name: TypeName::Applied {
+                            name: qualified_name,
+                            args,
+                        },
+                        span: open_span.through(close_span),
+                    });
+                }
+                return Ok(TypeAnnotation {
+                    name: TypeName::Named(qualified_name),
+                    span,
+                });
+            }
+
             let mut items = Vec::new();
 
             if self.match_rparen() {
@@ -3684,6 +3733,42 @@ impl Parser {
         Ok(component)
     }
 
+    fn skip_qualified_name_after_open_at(&self, index: usize) -> Option<usize> {
+        let path_end = self.skip_module_path_at(index)?;
+        if !matches!(self.kind_at(path_end), Some(TokenKind::Colon))
+            || !matches!(self.kind_at(path_end + 1), Some(TokenKind::RParen))
+            || !self.kind_at(path_end + 2).is_some_and(is_member_name_kind)
+        {
+            return None;
+        }
+        Some(path_end + 3)
+    }
+
+    fn skip_module_path_at(&self, index: usize) -> Option<usize> {
+        if matches!(self.kind_at(index), Some(TokenKind::Slash)) {
+            let mut cursor = self.skip_module_path_component_at(index + 1)?;
+            while matches!(self.kind_at(cursor), Some(TokenKind::Slash)) {
+                cursor = self.skip_module_path_component_at(cursor + 1)?;
+            }
+            return Some(cursor);
+        }
+
+        self.skip_module_path_component_at(index)
+    }
+
+    fn skip_module_path_component_at(&self, index: usize) -> Option<usize> {
+        if !matches!(self.kind_at(index), Some(TokenKind::Ident(_))) {
+            return None;
+        }
+        let mut cursor = index + 1;
+        while matches!(self.kind_at(cursor), Some(TokenKind::Dot))
+            && matches!(self.kind_at(cursor + 1), Some(TokenKind::Ident(_)))
+        {
+            cursor += 2;
+        }
+        Some(cursor)
+    }
+
     fn is_class_block_clause(&self) -> bool {
         matches!(self.peek_kind(), TokenKind::Ident(name) if name == "block")
             && matches!(self.kind_at(self.current + 1), Some(TokenKind::Colon))
@@ -3793,6 +3878,10 @@ impl Parser {
         }
 
         if matches!(self.kind_at(index), Some(TokenKind::LParen)) {
+            if let Some(end) = self.skip_qualified_name_after_open_at(index + 1) {
+                return self.skip_parametric_type_args_after_name_at(end);
+            }
+
             let mut cursor = index + 1;
 
             if matches!(self.kind_at(cursor), Some(TokenKind::RParen)) {
@@ -3872,29 +3961,33 @@ impl Parser {
             end += 2;
         }
 
-        if matches!(self.kind_at(end), Some(TokenKind::LParen)) {
-            let mut cursor = end + 1;
+        self.skip_parametric_type_args_after_name_at(end)
+    }
 
-            if matches!(self.kind_at(cursor), Some(TokenKind::RParen)) {
-                return cursor + 1;
-            }
-
-            loop {
-                if !self.is_type_name_at(cursor) {
-                    return end;
-                }
-
-                cursor = self.skip_type_name_at(cursor);
-
-                match self.kind_at(cursor) {
-                    Some(TokenKind::Comma) => cursor += 1,
-                    Some(TokenKind::RParen) => return cursor + 1,
-                    _ => return end,
-                }
-            }
+    fn skip_parametric_type_args_after_name_at(&self, end: usize) -> usize {
+        if !matches!(self.kind_at(end), Some(TokenKind::LParen)) {
+            return end;
         }
 
-        end
+        let mut cursor = end + 1;
+
+        if matches!(self.kind_at(cursor), Some(TokenKind::RParen)) {
+            return cursor + 1;
+        }
+
+        loop {
+            if !self.is_type_name_at(cursor) {
+                return end;
+            }
+
+            cursor = self.skip_type_name_at(cursor);
+
+            match self.kind_at(cursor) {
+                Some(TokenKind::Comma) => cursor += 1,
+                Some(TokenKind::RParen) => return cursor + 1,
+                _ => return end,
+            }
+        }
     }
 
     fn is_definition_operator_at(&self, index: usize) -> bool {
@@ -4431,6 +4524,7 @@ fn is_known_declaration_specifier(name: &str) -> bool {
             | "override"
             | "abstract"
             | "final"
+            | "final_super"
             | "unique"
             | "concrete"
             | "persistable"
@@ -4442,7 +4536,15 @@ fn is_known_declaration_specifier(name: &str) -> bool {
 fn validate_class_specifier(name: &str, span: Span) -> Result<(), VerseError> {
     if matches!(
         name,
-        "abstract" | "final" | "unique" | "concrete" | "computes" | "persistable" | "epic_internal"
+        "abstract"
+            | "final"
+            | "final_super"
+            | "unique"
+            | "concrete"
+            | "castable"
+            | "computes"
+            | "persistable"
+            | "epic_internal"
     ) || is_known_access_specifier(name)
     {
         Ok(())
@@ -4472,6 +4574,22 @@ fn validate_class_field_specifier(name: &str, span: Span) -> Result<(), VerseErr
     } else {
         Err(VerseError::parse(
             format!("unknown class field specifier `{name}`"),
+            span,
+        ))
+    }
+}
+
+fn validate_var_field_specifier(name: &str, span: Span) -> Result<(), VerseError> {
+    if is_known_access_specifier(name) {
+        Ok(())
+    } else if is_known_effect_specifier(name) || is_known_declaration_specifier(name) {
+        Err(VerseError::parse(
+            format!("unsupported var field specifier `{name}`"),
+            span,
+        ))
+    } else {
+        Err(VerseError::parse(
+            format!("unknown var field specifier `{name}`"),
             span,
         ))
     }
@@ -4648,7 +4766,7 @@ fn expr_consumed_trailing_separator(expr: &Expr) -> bool {
 
 fn is_archetype_callee(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Ident(_) => true,
+        ExprKind::Ident(_) | ExprKind::QualifiedName { .. } => true,
         ExprKind::Member { object, .. } => is_archetype_callee(object),
         ExprKind::Call { callee, args } => {
             if args.is_empty() {

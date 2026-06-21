@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::ast::{
@@ -85,6 +85,7 @@ pub struct ParamSpec {
     value_type: Type,
     named: bool,
     has_default: bool,
+    tuple_items: Option<Vec<ParamSpec>>,
 }
 
 impl fmt::Display for Type {
@@ -210,6 +211,8 @@ struct StructInfo {
     abstract_class: bool,
     epic_internal_class: bool,
     final_class: bool,
+    concrete: bool,
+    castable: bool,
     persistable: bool,
     computes: bool,
     fields: Vec<StructFieldInfo>,
@@ -245,6 +248,7 @@ struct StructFieldInfo {
     mutable: bool,
     final_member: bool,
     access: AccessLevel,
+    mutation_access: AccessLevel,
     owner: Option<String>,
     span: Span,
 }
@@ -305,9 +309,16 @@ struct PlayerWeakMapInfo {
     value_type: Type,
 }
 
+#[derive(Clone)]
+struct DataMemberDefaultContext {
+    aggregate_name: String,
+    field_name: String,
+}
+
 type ClassMemberInfosResult = (
     Vec<StructFieldInfo>,
     Vec<ClassMethodInfo>,
+    bool,
     bool,
     Option<String>,
     Vec<String>,
@@ -337,6 +348,7 @@ pub struct Checker {
     module_types: HashMap<String, ModuleInfo>,
     extension_methods: HashMap<String, Vec<ExtensionMethodInfo>>,
     parametric_types: HashMap<String, ParametricTypeInfo>,
+    predeclared_aggregate_values: HashSet<String>,
     type_alias_defs: HashMap<String, TypeAliasInfo>,
     type_aliases: HashMap<String, Type>,
     type_param_scopes: Vec<HashMap<String, Type>>,
@@ -349,9 +361,12 @@ pub struct Checker {
     failure_context_depth: usize,
     range_context_depth: usize,
     defer_depth: usize,
+    data_member_default_depth: usize,
+    data_member_default_stack: Vec<DataMemberDefaultContext>,
     async_expr_markers: Vec<AsyncExprMarker>,
     suppressed_async_expr_markers: usize,
     class_context: Vec<String>,
+    class_member_shadow_names: Vec<HashSet<String>>,
 }
 
 impl Checker {
@@ -599,16 +614,14 @@ impl Checker {
         globals.insert("PiFloat".to_string(), Symbol::immutable(Type::Float));
         globals.insert(
             "Concatenate".to_string(),
-            Symbol::immutable(Type::Function {
-                arity: None,
-                arity_range: None,
-                effects: Vec::new(),
-                param_types: Some(vec![Type::Array(Box::new(Type::Array(Box::new(
-                    Type::Unknown,
-                ))))]),
-                param_specs: None,
-                return_type: Box::new(Type::Array(Box::new(Type::Unknown))),
-            }),
+            Symbol::immutable(native_function_type(
+                &[],
+                vec![(
+                    "Arrays",
+                    Type::Array(Box::new(Type::Array(Box::new(Type::Unknown)))),
+                )],
+                Type::Array(Box::new(Type::Unknown)),
+            )),
         );
         globals.insert(
             "ConcatenateMaps".to_string(),
@@ -913,6 +926,7 @@ impl Checker {
             module_types,
             extension_methods: HashMap::new(),
             parametric_types: HashMap::new(),
+            predeclared_aggregate_values: HashSet::new(),
             type_alias_defs: HashMap::new(),
             type_aliases: HashMap::new(),
             type_param_scopes: Vec::new(),
@@ -925,16 +939,21 @@ impl Checker {
             failure_context_depth: 0,
             range_context_depth: 0,
             defer_depth: 0,
+            data_member_default_depth: 0,
+            data_member_default_stack: Vec::new(),
             async_expr_markers: Vec::new(),
             suppressed_async_expr_markers: 0,
             class_context: Vec::new(),
+            class_member_shadow_names: Vec::new(),
         }
     }
 
     pub fn check_program(mut self, program: &Program) -> Result<Type, VerseError> {
         self.predeclare_top_level_modules(program);
+        self.predeclare_top_level_module_member_access(program)?;
         self.predeclare_top_level_enums(program);
         self.predeclare_top_level_aggregate_names(program);
+        self.predeclare_top_level_aggregate_values(program)?;
         self.predeclare_top_level_parametric_types(program)?;
         self.predeclare_using_imports_recursive(&program.statements)?;
         self.predeclare_top_level_type_aliases(program)?;
@@ -944,6 +963,56 @@ impl Checker {
         self.define_top_level_aggregate_members(program)?;
         self.validate_function_overloads_in_current_scope()?;
         self.check_statements(&program.statements)
+    }
+
+    fn predeclare_top_level_module_member_access(
+        &mut self,
+        program: &Program,
+    ) -> Result<(), VerseError> {
+        self.predeclare_module_member_access(&program.statements)
+    }
+
+    fn predeclare_module_member_access(&mut self, statements: &[Stmt]) -> Result<(), VerseError> {
+        for statement in statements {
+            match &statement.kind {
+                StmtKind::Let {
+                    name,
+                    specifiers,
+                    expr,
+                    ..
+                } => match &expr.kind {
+                    ExprKind::ModuleDefinition {
+                        statements: module_statements,
+                        ..
+                    } => {
+                        self.record_current_module_member_access(name, specifiers, statement.span)?;
+                        self.module_path.push(name.clone());
+                        self.predeclare_module_member_access(module_statements)?;
+                        self.module_path.pop();
+                    }
+                    ExprKind::EnumDefinition { .. }
+                    | ExprKind::StructDefinition { .. }
+                    | ExprKind::ClassDefinition { .. }
+                    | ExprKind::InterfaceDefinition { .. } => {
+                        self.record_current_module_member_access(
+                            name,
+                            module_member_specifiers(specifiers, expr),
+                            statement.span,
+                        )?;
+                    }
+                    _ => {}
+                },
+                StmtKind::ParametricType {
+                    name, specifiers, ..
+                } => self.record_current_module_member_access(name, specifiers, statement.span)?,
+                StmtKind::TypeAlias { name, .. } => {
+                    self.record_current_module_member_access(name, &[], statement.span)?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn predeclare_top_level_modules(&mut self, program: &Program) {
@@ -1054,12 +1123,44 @@ impl Checker {
                 abstract_class: false,
                 epic_internal_class: false,
                 final_class: false,
+                concrete: false,
+                castable: false,
                 persistable,
                 computes,
                 fields: Vec::new(),
                 methods: Vec::new(),
             });
         }
+    }
+
+    fn predeclare_top_level_aggregate_values(
+        &mut self,
+        program: &Program,
+    ) -> Result<(), VerseError> {
+        self.predeclare_aggregate_values_in_current_scope(&program.statements)
+    }
+
+    fn predeclare_aggregate_values_in_current_scope(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        for statement in statements {
+            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                continue;
+            };
+
+            let qualified = self.current_qualified_name(name);
+            let value_type = match &expr.kind {
+                ExprKind::StructDefinition { .. } => Type::StructType(qualified.clone()),
+                ExprKind::ClassDefinition { .. } => Type::ClassType(qualified.clone()),
+                ExprKind::InterfaceDefinition { .. } => Type::InterfaceType(qualified.clone()),
+                _ => continue,
+            };
+
+            self.define_predeclared_aggregate_value(name, &qualified, value_type, statement.span)?;
+        }
+
+        Ok(())
     }
 
     fn predeclare_top_level_parametric_types(
@@ -1095,8 +1196,30 @@ impl Checker {
                             statement.span,
                         )
                     })?;
-                    self.validate_type_parameter_names(params, statement.span)?;
                     let qualified = self.current_qualified_name(name);
+                    if matches!(
+                        &expr.kind,
+                        ExprKind::ClassDefinition { specifiers, .. }
+                            if class_has_specifier(specifiers, "persistable")
+                    ) {
+                        return Err(VerseError::check_at(
+                            format!("persistable class `{qualified}` cannot be parametric"),
+                            statement.span,
+                        ));
+                    }
+                    if matches!(
+                        &expr.kind,
+                        ExprKind::StructDefinition {
+                            persistable: true,
+                            ..
+                        }
+                    ) {
+                        return Err(VerseError::check_at(
+                            format!("persistable struct `{qualified}` cannot be parametric"),
+                            statement.span,
+                        ));
+                    }
+                    self.validate_type_parameter_names(params, statement.span)?;
                     if self.parametric_types.contains_key(&qualified) {
                         return Err(VerseError::check_at(
                             format!("duplicate parametric type `{name}`"),
@@ -1391,9 +1514,6 @@ impl Checker {
             self.ensure_qualified_type_name_accessible(name, span)?;
             return Ok(Type::Interface(name.to_string()));
         }
-        if is_builtin_class_type_name(name) {
-            return Ok(Type::Class(name.to_string()));
-        }
         if let Some(info) = self.struct_types.get(name) {
             self.ensure_qualified_type_name_accessible(name, span)?;
             match info.kind {
@@ -1420,6 +1540,10 @@ impl Checker {
                     AggregateKind::Class => Type::Class(qualified),
                 });
             }
+        }
+
+        if is_builtin_class_type_name(name) {
+            return Ok(Type::Class(name.to_string()));
         }
 
         Err(VerseError::check_at(format!("unknown type `{name}`"), span))
@@ -1761,6 +1885,139 @@ impl Checker {
         Ok(value_type)
     }
 
+    fn type_name_to_type_name_for_assignability(&self, name: &TypeName) -> Option<Type> {
+        let value_type = match name {
+            TypeName::Int => Type::Int,
+            TypeName::Float => Type::Float,
+            TypeName::Rational => Type::Rational,
+            TypeName::Number => Type::Number,
+            TypeName::Bool => Type::Bool,
+            TypeName::String => Type::String,
+            TypeName::Message => Type::Message,
+            TypeName::Char => Type::Char,
+            TypeName::Char8 => Type::Char8,
+            TypeName::Char32 => Type::Char32,
+            TypeName::None => Type::None,
+            TypeName::Any => Type::Any,
+            TypeName::Comparable => Type::Comparable,
+            TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
+                Some(item) => self.type_name_to_type_name_for_assignability(item)?,
+                None => Type::Unknown,
+            })),
+            TypeName::Map(key, value) => Type::Map(
+                Box::new(self.type_name_to_type_name_for_assignability(key)?),
+                Box::new(self.type_name_to_type_name_for_assignability(value)?),
+            ),
+            TypeName::WeakMap(key, value) => Type::WeakMap(
+                Box::new(self.type_name_to_type_name_for_assignability(key)?),
+                Box::new(self.type_name_to_type_name_for_assignability(value)?),
+            ),
+            TypeName::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.type_name_to_type_name_for_assignability(item))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            TypeName::Option(item) => Type::Option(Box::new(
+                self.type_name_to_type_name_for_assignability(item)?,
+            )),
+            TypeName::Function => Type::Function {
+                arity: None,
+                arity_range: None,
+                effects: Vec::new(),
+                param_types: None,
+                param_specs: None,
+                return_type: Box::new(Type::Unknown),
+            },
+            TypeName::FunctionSignature {
+                params,
+                effects,
+                return_type,
+            } => Type::Function {
+                arity: Some(params.len()),
+                arity_range: None,
+                effects: effects.clone(),
+                param_types: Some(
+                    params
+                        .iter()
+                        .map(|param| self.type_name_to_type_name_for_assignability(param))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                param_specs: None,
+                return_type: Box::new(self.type_name_to_type_name_for_assignability(return_type)?),
+            },
+            TypeName::Applied { name, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.type_name_to_type_name_for_assignability(arg))
+                    .collect::<Option<Vec<_>>>()?;
+                if is_official_parametric_type_name(name) {
+                    official_parametric_type(name, &args, Span::new(0, 0, 0, 0)).ok()?
+                } else {
+                    let qualified = self.resolve_parametric_type_reference(name)?;
+                    let info = self.parametric_types.get(&qualified)?;
+                    let instance_name = render_parametric_instance_type_name(&qualified, &args);
+                    match info.kind {
+                        ParametricTypeKind::Struct
+                            if self.struct_types.contains_key(&instance_name) =>
+                        {
+                            Type::Struct(instance_name)
+                        }
+                        ParametricTypeKind::Class
+                            if self.struct_types.contains_key(&instance_name) =>
+                        {
+                            Type::Class(instance_name)
+                        }
+                        ParametricTypeKind::Interface
+                            if self.interface_types.contains_key(&instance_name) =>
+                        {
+                            Type::Interface(instance_name)
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            TypeName::Named(name) => {
+                if let Some(value_type) = self.resolve_type_param(name) {
+                    value_type
+                } else if let Some(value_type) = self.type_aliases.get(name).cloned() {
+                    value_type
+                } else if !name.contains('.')
+                    && let Some(qualified) = self.resolve_contextual_type_name(name)
+                    && let Some(value_type) = self.type_aliases.get(&qualified).cloned()
+                {
+                    value_type
+                } else {
+                    self.named_type_to_type(name, Span::new(0, 0, 0, 0)).ok()?
+                }
+            }
+        };
+        Some(value_type)
+    }
+
+    fn constrained_type_param_supertype(
+        &mut self,
+        value_type: &Type,
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        let Type::Param(_, TypeParamConstraint::Subtype(parent)) = value_type else {
+            return Ok(None);
+        };
+        let supertype = self.type_name_to_type_name(parent, span)?;
+        Ok((!matches!(supertype, Type::Param(_, _))).then_some(supertype))
+    }
+
+    fn constrained_type_param_supertype_for_assignability(
+        &self,
+        value_type: &Type,
+    ) -> Option<Type> {
+        let Type::Param(_, TypeParamConstraint::Subtype(parent)) = value_type else {
+            return None;
+        };
+        let supertype = self.type_name_to_type_name_for_assignability(parent)?;
+        (!matches!(supertype, Type::Param(_, _))).then_some(supertype)
+    }
+
     fn param_types(&mut self, params: &[Param]) -> Result<Vec<Type>, VerseError> {
         params
             .iter()
@@ -1769,17 +2026,20 @@ impl Checker {
     }
 
     fn param_specs(&mut self, params: &[Param]) -> Result<Vec<ParamSpec>, VerseError> {
-        params
-            .iter()
-            .map(|param| {
-                Ok(ParamSpec {
-                    name: param.name.clone(),
-                    value_type: self.annotation_to_type(param.annotation.as_ref())?,
-                    named: param.named,
-                    has_default: param.default.is_some(),
-                })
-            })
-            .collect()
+        params.iter().map(|param| self.param_spec(param)).collect()
+    }
+
+    fn param_spec(&mut self, param: &Param) -> Result<ParamSpec, VerseError> {
+        Ok(ParamSpec {
+            name: param.name.clone(),
+            value_type: self.annotation_to_type(param.annotation.as_ref())?,
+            named: param.named,
+            has_default: param.default.is_some(),
+            tuple_items: match &param.pattern {
+                ParamPattern::Tuple(params) => Some(self.param_specs(params)?),
+                ParamPattern::Binding | ParamPattern::Anonymous => None,
+            },
+        })
     }
 
     fn instantiate_parametric_type(
@@ -1794,6 +2054,7 @@ impl Checker {
                 span,
             ));
         };
+        self.ensure_qualified_type_name_accessible(&qualified, span)?;
         let Some(info) = self.parametric_types.get(&qualified).cloned() else {
             return Err(VerseError::check_at(
                 format!("unknown parametric type `{name}`"),
@@ -1850,13 +2111,15 @@ impl Checker {
                         abstract_class: false,
                         epic_internal_class: false,
                         final_class: false,
+                        concrete: false,
+                        castable: false,
                         persistable: *persistable,
                         computes: *computes,
                         fields: Vec::new(),
                         methods: Vec::new(),
                     },
                 );
-                let fields = self.struct_field_infos(fields)?;
+                let fields = self.struct_field_infos_with_owner(fields, Some(&instance_name))?;
                 if *persistable {
                     self.ensure_persistable_struct(&instance_name, &fields)?;
                 }
@@ -1870,6 +2133,8 @@ impl Checker {
                         abstract_class: false,
                         epic_internal_class: false,
                         final_class: false,
+                        concrete: false,
+                        castable: false,
                         persistable: *persistable,
                         computes: *computes,
                         fields,
@@ -1898,13 +2163,15 @@ impl Checker {
                         abstract_class: class_has_specifier(specifiers, "abstract"),
                         epic_internal_class: class_has_specifier(specifiers, "epic_internal"),
                         final_class: class_has_specifier(specifiers, "final"),
+                        concrete: class_has_specifier(specifiers, "concrete"),
+                        castable: class_has_specifier(specifiers, "castable"),
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
                         fields: Vec::new(),
                         methods: Vec::new(),
                     },
                 );
-                let (fields, methods, unique, base, implemented_interfaces) = self
+                let (fields, methods, unique, castable, base, implemented_interfaces) = self
                     .class_member_infos(
                         &instance_name,
                         ClassDefinitionParts {
@@ -1927,6 +2194,8 @@ impl Checker {
                         abstract_class: class_has_specifier(specifiers, "abstract"),
                         epic_internal_class: class_has_specifier(specifiers, "epic_internal"),
                         final_class: class_has_specifier(specifiers, "final"),
+                        concrete: class_has_specifier(specifiers, "concrete"),
+                        castable,
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
                         fields,
@@ -1951,7 +2220,8 @@ impl Checker {
                 );
                 let parent_names = self.interface_parent_names(parents)?;
                 let inherited_fields = self.interface_field_requirements(&parent_names)?;
-                let local_fields = self.struct_field_infos(fields)?;
+                let local_fields =
+                    self.struct_field_infos_with_owner(fields, Some(&instance_name))?;
                 let fields =
                     self.merge_interface_field_set(inherited_fields, local_fields, info.span)?;
                 let inherited_methods = self.interface_method_requirements(&parent_names)?;
@@ -1991,6 +2261,7 @@ impl Checker {
                 span,
             ));
         };
+        self.ensure_qualified_type_name_accessible(&qualified, span)?;
         let expected = self
             .parametric_types
             .get(&qualified)
@@ -2269,7 +2540,7 @@ impl Checker {
             let qualified = self.current_qualified_name(name);
             let parent_names = self.interface_parent_names(parents)?;
             let inherited_fields = self.interface_field_requirements(&parent_names)?;
-            let local_fields = self.struct_field_infos(fields)?;
+            let local_fields = self.struct_field_infos_with_owner(fields, Some(&qualified))?;
             let fields =
                 self.merge_interface_field_set(inherited_fields, local_fields, statement.span)?;
             let inherited_methods = self.interface_method_requirements(&parent_names)?;
@@ -2381,6 +2652,15 @@ impl Checker {
         for field in fields {
             if let Some(index) = base.iter().position(|existing| existing.name == field.name) {
                 let existing = &base[index];
+                if existing.final_member && existing.owner != field.owner {
+                    return Err(VerseError::check_at(
+                        format!(
+                            "field `{}` overrides final inherited field `{}`",
+                            field.name, existing.name
+                        ),
+                        field.span,
+                    ));
+                }
                 if existing.value_type != field.value_type || existing.mutable != field.mutable {
                     return Err(VerseError::check_at(
                         format!(
@@ -2515,6 +2795,8 @@ impl Checker {
                 abstract_class,
                 epic_internal_class,
                 final_class,
+                concrete,
+                castable,
                 persistable,
                 computes,
             ) = match &expr.kind {
@@ -2523,19 +2805,24 @@ impl Checker {
                     persistable,
                     computes,
                     ..
-                } => (
-                    self.struct_field_infos(fields)?,
-                    Vec::new(),
-                    AggregateKind::Struct,
-                    None,
-                    Vec::new(),
-                    false,
-                    false,
-                    false,
-                    false,
-                    *persistable,
-                    *computes,
-                ),
+                } => {
+                    let qualified = self.current_qualified_name(name);
+                    (
+                        self.struct_field_infos_with_owner(fields, Some(&qualified))?,
+                        Vec::new(),
+                        AggregateKind::Struct,
+                        None,
+                        Vec::new(),
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        *persistable,
+                        *computes,
+                    )
+                }
                 ExprKind::ClassDefinition {
                     base,
                     interfaces,
@@ -2547,7 +2834,7 @@ impl Checker {
                     ..
                 } => {
                     let qualified = self.current_qualified_name(name);
-                    let (fields, methods, unique, base, implemented_interfaces) = self
+                    let (fields, methods, unique, castable, base, implemented_interfaces) = self
                         .class_member_infos(
                             &qualified,
                             ClassDefinitionParts {
@@ -2570,6 +2857,8 @@ impl Checker {
                         class_has_specifier(specifiers, "abstract"),
                         class_has_specifier(specifiers, "epic_internal"),
                         class_has_specifier(specifiers, "final"),
+                        class_has_specifier(specifiers, "concrete"),
+                        castable,
                         class_has_specifier(specifiers, "persistable"),
                         false,
                     )
@@ -2590,6 +2879,8 @@ impl Checker {
                     abstract_class,
                     epic_internal_class,
                     final_class,
+                    concrete,
+                    castable,
                     persistable,
                     computes,
                     fields,
@@ -2599,13 +2890,6 @@ impl Checker {
         }
 
         Ok(())
-    }
-
-    fn struct_field_infos(
-        &mut self,
-        fields: &[StructField],
-    ) -> Result<Vec<StructFieldInfo>, VerseError> {
-        self.struct_field_infos_with_owner(fields, None)
     }
 
     fn struct_field_infos_with_owner(
@@ -2632,7 +2916,8 @@ impl Checker {
                     ));
                 }
                 if let Some(default) = &field.default {
-                    let default_type = self.check_expr(default)?;
+                    let default_type =
+                        self.check_data_member_default(owner, &field.name, default)?;
                     self.ensure_expr_assignable(&value_type, &default_type, default, || {
                         format!(
                             "default value for field `{}` must be `{value_type}`, got `{default_type}`",
@@ -2646,17 +2931,20 @@ impl Checker {
                         field.span,
                     ));
                 }
+                let access = access_level_from_specifiers(&field.specifiers, "field", field.span)?;
+                let mutation_access = if field.mutable && !field.var_specifiers.is_empty() {
+                    access_level_from_specifiers(&field.var_specifiers, "var field", field.span)?
+                } else {
+                    access
+                };
                 Ok(StructFieldInfo {
                     name: field.name.clone(),
                     value_type,
                     has_default: field.default.is_some(),
                     mutable: field.mutable,
                     final_member: field_has_specifier(&field.specifiers, "final"),
-                    access: access_level_from_specifiers(
-                        &field.specifiers,
-                        "field",
-                        field.span,
-                    )?,
+                    access,
+                    mutation_access,
                     owner: owner.map(str::to_string),
                     span: field.span,
                 })
@@ -2664,8 +2952,92 @@ impl Checker {
             .collect()
     }
 
+    fn check_data_member_default(
+        &mut self,
+        owner: Option<&str>,
+        field_name: &str,
+        default: &Expr,
+    ) -> Result<Type, VerseError> {
+        self.data_member_default_depth += 1;
+        if let Some(owner) = owner {
+            self.data_member_default_stack
+                .push(DataMemberDefaultContext {
+                    aggregate_name: owner.to_string(),
+                    field_name: field_name.to_string(),
+                });
+        }
+        self.function_effects.push(vec!["converges".to_string()]);
+        let result = if let Some(owner) = owner {
+            self.push_scope();
+            let result = self
+                .define_current_aggregate_type_if_unshadowed(owner, default.span)
+                .and_then(|_| self.check_expr(default));
+            self.pop_scope();
+            result
+        } else {
+            self.check_expr(default)
+        };
+        self.function_effects.pop();
+        if owner.is_some() {
+            self.data_member_default_stack.pop();
+        }
+        self.data_member_default_depth -= 1;
+        result
+    }
+
+    fn define_current_aggregate_type_if_unshadowed(
+        &mut self,
+        aggregate_name: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if aggregate_name.contains('(') {
+            return Ok(());
+        }
+        let name = aggregate_unqualified_name(aggregate_name);
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.contains_key(name))
+        {
+            return Ok(());
+        }
+        if let Some(info) = self.struct_types.get(aggregate_name) {
+            let value_type = match info.kind {
+                AggregateKind::Struct => Type::StructType(aggregate_name.to_string()),
+                AggregateKind::Class => Type::ClassType(aggregate_name.to_string()),
+            };
+            return self.define(name, value_type, false, span);
+        }
+        if self.interface_types.contains_key(aggregate_name) {
+            return self.define(
+                name,
+                Type::InterfaceType(aggregate_name.to_string()),
+                false,
+                span,
+            );
+        }
+        Ok(())
+    }
+
     fn check_class_field_attributes(&mut self, fields: &[StructField]) -> Result<(), VerseError> {
         for field in fields {
+            if field
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name == "editable")
+                && let Some(annotation) = field.annotation.as_ref()
+            {
+                let value_type = self.type_name_to_type(annotation)?;
+                if type_contains_type_param(&value_type) {
+                    return Err(VerseError::check_at(
+                        format!(
+                            "`@editable` field `{}` cannot use a type parameter in its annotation",
+                            field.name
+                        ),
+                        field.span,
+                    ));
+                }
+            }
             for attribute in &field.attributes {
                 for argument in &attribute.arguments {
                     self.check_expr(&argument.expr)?;
@@ -2702,38 +3074,51 @@ impl Checker {
         }
 
         let mut implemented_interfaces = Vec::new();
-        let (mut inherited_fields, mut inherited_methods, base_name, base_unique) =
+        let (mut inherited_fields, mut inherited_methods, base_name, base_unique, base_castable) =
             if let Some(base) = base {
                 match self.type_name_to_type(base)? {
                     Type::Class(base_name) => {
-                        let Some(info) = self.struct_types.get(&base_name).cloned() else {
-                            return Err(VerseError::check_at(
-                                format!("unknown class `{base_name}`"),
-                                base.span,
-                            ));
-                        };
-                        if info.kind != AggregateKind::Class {
-                            return Err(VerseError::check_at(
-                                format!("class base must be a class, got `{base_name}`"),
-                                base.span,
-                            ));
+                        if is_builtin_class_base_name(&base_name) {
+                            (Vec::new(), Vec::new(), Some(base_name), false, false)
+                        } else {
+                            let Some(info) = self.struct_types.get(&base_name).cloned() else {
+                                return Err(VerseError::check_at(
+                                    format!("unknown class `{base_name}`"),
+                                    base.span,
+                                ));
+                            };
+                            if info.kind != AggregateKind::Class {
+                                return Err(VerseError::check_at(
+                                    format!("class base must be a class, got `{base_name}`"),
+                                    base.span,
+                                ));
+                            }
+                            if info.final_class {
+                                return Err(VerseError::check_at(
+                                    format!(
+                                        "class `{base_name}` is `final` and cannot be inherited"
+                                    ),
+                                    base.span,
+                                ));
+                            }
+                            (
+                                info.fields,
+                                info.methods,
+                                Some(base_name),
+                                info.unique,
+                                info.castable,
+                            )
                         }
-                        if info.final_class {
-                            return Err(VerseError::check_at(
-                                format!("class `{base_name}` is `final` and cannot be inherited"),
-                                base.span,
-                            ));
-                        }
-                        (info.fields, info.methods, Some(base_name), info.unique)
                     }
                     Type::Interface(interface_name) => {
                         implemented_interfaces.push(interface_name);
-                        (Vec::new(), Vec::new(), None, false)
+                        (Vec::new(), Vec::new(), None, false, false)
                     }
                     Type::Modifier(item_type) => (
                         Vec::new(),
                         vec![modifier_method_info(item_type.as_ref(), base.span)],
                         None,
+                        false,
                         false,
                     ),
                     other => {
@@ -2744,8 +3129,27 @@ impl Checker {
                     }
                 }
             } else {
-                (Vec::new(), Vec::new(), None, false)
+                (Vec::new(), Vec::new(), None, false, false)
             };
+        let class_span =
+            class_definition_diagnostic_span(base, fields, methods, extension_methods, blocks);
+        let has_final_super = class_has_specifier(specifiers, "final_super");
+        if has_final_super && base_name.as_deref() != Some("component") {
+            return Err(VerseError::check_at(
+                format!(
+                    "class `{class_name}` with `<final_super>` must directly inherit from `component`"
+                ),
+                class_span,
+            ));
+        }
+        if base_name.as_deref() == Some("component") && !has_final_super {
+            return Err(VerseError::check_at(
+                format!(
+                    "class `{class_name}` directly inheriting from `component` must specify `<final_super>`"
+                ),
+                class_span,
+            ));
+        }
         for interface in interfaces {
             let interface_type = self.type_name_to_type(interface)?;
             let Type::Interface(interface_name) = interface_type else {
@@ -2774,6 +3178,7 @@ impl Checker {
         inherited_methods =
             self.merge_interface_methods(inherited_methods, interface_methods, class_name, base)?;
         let unique = class_has_specifier(specifiers, "unique") || base_unique;
+        let castable = class_has_specifier(specifiers, "castable") || base_castable;
 
         let local = self.struct_field_infos_with_owner(fields, Some(class_name))?;
         for field in local {
@@ -2842,6 +3247,14 @@ impl Checker {
             inherited_fields.push(field);
         }
 
+        if !class_has_specifier(specifiers, "abstract") {
+            self.ensure_interface_required_fields_initializable(
+                class_name,
+                specifiers,
+                &inherited_fields,
+            )?;
+        }
+
         if class_has_specifier(specifiers, "concrete") {
             self.ensure_concrete_class_fields(class_name, &inherited_fields)?;
         }
@@ -2867,6 +3280,8 @@ impl Checker {
                 abstract_class: class_has_specifier(specifiers, "abstract"),
                 epic_internal_class: class_has_specifier(specifiers, "epic_internal"),
                 final_class: class_has_specifier(specifiers, "final"),
+                concrete: class_has_specifier(specifiers, "concrete"),
+                castable,
                 persistable: class_has_specifier(specifiers, "persistable"),
                 computes: false,
                 fields: inherited_fields.clone(),
@@ -2915,6 +3330,7 @@ impl Checker {
             inherited_fields,
             inherited_methods,
             unique,
+            castable,
             base_name,
             implemented_interfaces,
         ))
@@ -2941,6 +3357,36 @@ impl Checker {
             ));
         }
 
+        Ok(())
+    }
+
+    fn ensure_interface_required_fields_initializable(
+        &self,
+        class_name: &str,
+        class_specifiers: &[String],
+        fields: &[StructFieldInfo],
+    ) -> Result<(), VerseError> {
+        let class_is_public = class_has_specifier(class_specifiers, "public");
+        for field in fields {
+            let Some(owner) = field.owner.as_deref() else {
+                continue;
+            };
+            if field.has_default || !self.interface_types.contains_key(owner) {
+                continue;
+            }
+            let inaccessible_from_constructor =
+                matches!(field.access, AccessLevel::Private | AccessLevel::Protected)
+                    || (field.access == AccessLevel::Internal && class_is_public);
+            if inaccessible_from_constructor {
+                return Err(VerseError::check_at(
+                    format!(
+                        "class `{class_name}` must be `abstract` or provide a default value for interface field `{}`",
+                        field.name
+                    ),
+                    field.span,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -3073,13 +3519,17 @@ impl Checker {
                         block.span,
                     )?;
                 }
+                self.define_current_class_type_if_unshadowed(class_name, block.span)?;
                 if let Some(span) = defer_body_failable_expr(&block.body) {
                     return Err(VerseError::check_at(
                         "class block cannot contain failable expressions",
                         span,
                     ));
                 }
-                self.check_expr(&block.body)?;
+                self.push_class_member_shadow_names(class_name, fields);
+                let block_result = self.check_expr(&block.body);
+                self.pop_class_member_shadow_names();
+                block_result?;
                 Ok(())
             })();
             self.class_context.pop();
@@ -3496,8 +3946,10 @@ impl Checker {
                 for (name, value_type) in &method_bindings {
                     self.define(name, value_type.clone(), false, method.span)?;
                 }
+                self.define_current_class_type_if_unshadowed(class_name, method.span)?;
 
-                self.check_function(
+                self.push_class_member_shadow_names(class_name, fields);
+                let function_result = self.check_function(
                     &method.params,
                     &method.effects,
                     method.return_type.as_ref(),
@@ -3505,7 +3957,9 @@ impl Checker {
                         .body
                         .as_ref()
                         .expect("concrete class method should have a body"),
-                )
+                );
+                self.pop_class_member_shadow_names();
+                function_result
             })();
             self.class_context.pop();
             self.pop_scope();
@@ -3583,13 +4037,17 @@ impl Checker {
                 for (name, value_type) in &method_bindings {
                     self.define(name, value_type.clone(), false, extension.span)?;
                 }
+                self.define_current_class_type_if_unshadowed(class_name, extension.span)?;
 
-                self.check_function(
+                self.push_class_member_shadow_names(class_name, fields);
+                let function_result = self.check_function(
                     &params,
                     &extension.method.effects,
                     extension.method.return_type.as_ref(),
                     body,
-                )
+                );
+                self.pop_class_member_shadow_names();
+                function_result
             })();
             self.class_context.pop();
             self.pop_scope();
@@ -3608,6 +4066,25 @@ impl Checker {
         }
 
         Ok(())
+    }
+
+    fn define_current_class_type_if_unshadowed(
+        &mut self,
+        class_name: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if class_name.contains('(') {
+            return Ok(());
+        }
+        let name = aggregate_unqualified_name(class_name);
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.contains_key(name))
+        {
+            return Ok(());
+        }
+        self.define(name, Type::ClassType(class_name.to_string()), false, span)
     }
 
     fn predeclare_top_level_functions(&mut self, program: &Program) -> Result<(), VerseError> {
@@ -3847,7 +4324,7 @@ impl Checker {
                 return Err(VerseError::check_at(message, span.through(statement.span)));
             }
             last = self.check_stmt(statement)?;
-            if last == Type::Never {
+            if last == Type::Never || self.statement_never_completes(statement) {
                 unreachable_after =
                     Some((unreachable_statement_message(statement), statement.span));
             }
@@ -4000,6 +4477,7 @@ impl Checker {
         };
         self.validate_type_parameter_names(params, span)?;
         self.validate_type_parameter_constraints(params, span)?;
+        self.check_parametric_type_field_attributes(params, expr)?;
         let qualified = self.current_qualified_name(name);
         let value_type = Type::ParametricType {
             name: qualified,
@@ -4009,6 +4487,28 @@ impl Checker {
         self.define(name, value_type.clone(), false, span)?;
         self.record_current_module_member(name, value_type.clone(), specifiers, span)?;
         Ok(value_type)
+    }
+
+    fn check_parametric_type_field_attributes(
+        &mut self,
+        params: &[TypeParam],
+        expr: &Expr,
+    ) -> Result<(), VerseError> {
+        self.push_type_param_scope(params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = match &expr.kind {
+            ExprKind::ClassDefinition { fields, .. }
+            | ExprKind::InterfaceDefinition { fields, .. } => {
+                self.check_class_field_attributes(fields)
+            }
+            _ => Ok(()),
+        };
+        self.pop_type_param_scope();
+        result
     }
 
     fn validate_type_parameter_names(
@@ -4214,7 +4714,7 @@ impl Checker {
             }
             let qualified = self.current_qualified_name(name);
             if !self.struct_types.contains_key(&qualified) {
-                let fields = self.struct_field_infos(fields)?;
+                let fields = self.struct_field_infos_with_owner(fields, Some(&qualified))?;
                 if *persistable {
                     self.ensure_persistable_struct(&qualified, &fields)?;
                 }
@@ -4228,6 +4728,8 @@ impl Checker {
                         abstract_class: false,
                         epic_internal_class: false,
                         final_class: false,
+                        concrete: false,
+                        castable: false,
                         persistable: *persistable,
                         computes: *computes,
                         fields,
@@ -4235,8 +4737,8 @@ impl Checker {
                     },
                 );
             }
-            let value_type = Type::StructType(qualified);
-            self.define(name, value_type.clone(), false, span)?;
+            let value_type = Type::StructType(qualified.clone());
+            self.define_aggregate_value(name, &qualified, value_type.clone(), span)?;
             self.record_current_module_member(name, value_type.clone(), specifiers, span)?;
             return Ok(value_type);
         }
@@ -4266,7 +4768,7 @@ impl Checker {
             }
             let qualified = self.current_qualified_name(name);
             if !self.struct_types.contains_key(&qualified) {
-                let (fields, methods, unique, base, implemented_interfaces) = self
+                let (fields, methods, unique, castable, base, implemented_interfaces) = self
                     .class_member_infos(
                         &qualified,
                         ClassDefinitionParts {
@@ -4289,6 +4791,8 @@ impl Checker {
                         abstract_class: class_has_specifier(class_specifiers, "abstract"),
                         epic_internal_class: class_has_specifier(class_specifiers, "epic_internal"),
                         final_class: class_has_specifier(class_specifiers, "final"),
+                        concrete: class_has_specifier(class_specifiers, "concrete"),
+                        castable,
                         persistable: class_has_specifier(class_specifiers, "persistable"),
                         computes: false,
                         fields,
@@ -4297,8 +4801,8 @@ impl Checker {
                 );
             }
             self.check_class_field_attributes(fields)?;
-            let value_type = Type::ClassType(qualified);
-            self.define(name, value_type.clone(), false, span)?;
+            let value_type = Type::ClassType(qualified.clone());
+            self.define_aggregate_value(name, &qualified, value_type.clone(), span)?;
             self.record_current_module_member(
                 name,
                 value_type.clone(),
@@ -4323,8 +4827,8 @@ impl Checker {
             }
             self.check_class_field_attributes(fields)?;
             let qualified = self.current_qualified_name(name);
-            let value_type = Type::InterfaceType(qualified);
-            self.define(name, value_type.clone(), false, span)?;
+            let value_type = Type::InterfaceType(qualified.clone());
+            self.define_aggregate_value(name, &qualified, value_type.clone(), span)?;
             self.record_current_module_member(name, value_type.clone(), specifiers, span)?;
             return Ok(value_type);
         }
@@ -4519,6 +5023,22 @@ impl Checker {
         Ok(())
     }
 
+    fn record_current_module_member_access(
+        &mut self,
+        name: &str,
+        specifiers: &[String],
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some(module_name) = self.current_module_name() else {
+            return Ok(());
+        };
+        let access = access_level_from_specifiers(specifiers, "module member", span)?;
+        if let Some(info) = self.module_types.get_mut(&module_name) {
+            info.member_access.insert(name.to_string(), access);
+        }
+        Ok(())
+    }
+
     fn check_module_body(
         &mut self,
         module_name: &str,
@@ -4532,6 +5052,7 @@ impl Checker {
         self.module_scope_depths.push(self.scopes.len());
         let result = (|| {
             self.predeclare_using_imports(statements)?;
+            self.predeclare_aggregate_values_in_current_scope(statements)?;
             self.predeclare_extension_methods_in_current_scope(statements)?;
             self.predeclare_functions_in_current_scope(statements)?;
             self.check_statements(statements)?;
@@ -4696,6 +5217,11 @@ impl Checker {
                 if is_shuffle_callee(callee) && is_shuffle_function_type(&callee_type) {
                     self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
                     return self.check_shuffle_call(args, &arg_types, expr.span);
+                }
+
+                if is_concatenate_callee(callee) && is_concatenate_function_type(&callee_type) {
+                    self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
+                    return self.check_concatenate_call(args, &arg_types, expr.span);
                 }
 
                 if is_make_classifiable_subset_callee(callee)
@@ -4946,6 +5472,7 @@ impl Checker {
             if let Some(qualified) = self.resolve_parametric_type_reference(name)
                 && let Some(info) = self.parametric_types.get(&qualified)
             {
+                self.ensure_qualified_type_name_accessible(&qualified, span)?;
                 return Ok(Type::ParametricType {
                     name: qualified,
                     params: info.params.iter().map(|param| param.name.clone()).collect(),
@@ -4974,10 +5501,31 @@ impl Checker {
         allow_overload: bool,
     ) -> Result<Type, VerseError> {
         if qualifier != "super" {
-            return Err(VerseError::check_at(
-                format!("unknown qualifier `{qualifier}`"),
-                span,
-            ));
+            let Some(module_info) = self.module_types.get(qualifier) else {
+                return Err(VerseError::check_at(
+                    format!("unknown qualifier `{qualifier}`"),
+                    span,
+                ));
+            };
+            let Some(value_type) = module_info.members.get(name) else {
+                return Err(VerseError::check_at(
+                    format!("module `{qualifier}` has no member `{name}`"),
+                    span,
+                ));
+            };
+            let access = module_info
+                .member_access
+                .get(name)
+                .copied()
+                .unwrap_or(AccessLevel::Internal);
+            self.ensure_module_member_accessible(qualifier, access, name, span)?;
+            if matches!(value_type, Type::Overload(_)) && !allow_overload {
+                return Err(VerseError::check_at(
+                    format!("overloaded function `{name}` must be called"),
+                    span,
+                ));
+            }
+            return Ok(value_type.clone());
         }
         let Some(symbol) = self.lookup("super") else {
             return Err(VerseError::check_at("undefined name `super`", span));
@@ -5007,7 +5555,7 @@ impl Checker {
         }
         for method in &methods {
             let owner = method.owner.as_deref().unwrap_or(&base_name);
-            self.ensure_class_member_accessible(owner, method.access, name, "method", span)?;
+            self.ensure_aggregate_member_accessible(owner, method.access, name, "method", span)?;
         }
         let method_type = method_group_type(methods).expect("non-empty method group should type");
         if matches!(method_type, Type::Overload(_)) && !allow_overload {
@@ -5108,13 +5656,17 @@ impl Checker {
     }
 
     fn check_qualified_member(
-        &self,
+        &mut self,
         object_type: &Type,
         qualifier: &str,
         name: &str,
         span: Span,
         allow_overload: bool,
     ) -> Result<Type, VerseError> {
+        if let Some(supertype) = self.constrained_type_param_supertype(object_type, span)? {
+            return self.check_qualified_member(&supertype, qualifier, name, span, allow_overload);
+        }
+
         let (label, aggregate_name, methods) = match object_type {
             Type::Class(class_name) => {
                 let Some(info) = self.struct_types.get(class_name) else {
@@ -5139,6 +5691,17 @@ impl Checker {
                 )
             }
             other => {
+                if let Some(method_type) =
+                    self.qualified_extension_member_type(object_type, qualifier, name, span)?
+                {
+                    if !allow_overload {
+                        return Err(VerseError::check_at(
+                            format!("extension method `({qualifier}:){name}` must be called"),
+                            span,
+                        ));
+                    }
+                    return Ok(method_type);
+                }
                 return Err(VerseError::check_at(
                     format!("cannot use qualified member on type `{other}`"),
                     span,
@@ -5151,6 +5714,17 @@ impl Checker {
             .filter(|method| method.name == name && method_has_qualifier(method, qualifier))
             .collect::<Vec<_>>();
         if methods.is_empty() {
+            if let Some(method_type) =
+                self.qualified_extension_member_type(object_type, qualifier, name, span)?
+            {
+                if !allow_overload {
+                    return Err(VerseError::check_at(
+                        format!("extension method `({qualifier}:){name}` must be called"),
+                        span,
+                    ));
+                }
+                return Ok(method_type);
+            }
             return Err(VerseError::check_at(
                 format!("{label} `{aggregate_name}` has no method `({qualifier}:){name}`"),
                 span,
@@ -5158,7 +5732,7 @@ impl Checker {
         }
         for method in &methods {
             let owner = method.owner.as_deref().unwrap_or(aggregate_name);
-            self.ensure_class_member_accessible(owner, method.access, name, "method", span)?;
+            self.ensure_aggregate_member_accessible(owner, method.access, name, "method", span)?;
         }
         let method_type = method_group_type(methods).expect("non-empty method group should type");
         if matches!(method_type, Type::Overload(_)) && !allow_overload {
@@ -5256,9 +5830,9 @@ impl Checker {
                             })
                             .and_then(|field| {
                                 let owner = field.owner.as_deref().unwrap_or(class_name);
-                                self.ensure_class_member_accessible(
+                                self.ensure_aggregate_member_accessible(
                                     owner,
-                                    field.access,
+                                    field.mutation_access,
                                     name,
                                     "field",
                                     target.span,
@@ -5281,6 +5855,17 @@ impl Checker {
                                     format!("interface `{interface_name}` has no field `{name}`"),
                                     target.span,
                                 )
+                            })
+                            .and_then(|field| {
+                                let owner = field.owner.as_deref().unwrap_or(interface_name);
+                                self.ensure_aggregate_member_accessible(
+                                    owner,
+                                    field.mutation_access,
+                                    name,
+                                    "field",
+                                    target.span,
+                                )?;
+                                Ok(field)
                             })?
                     }
                     _ => {
@@ -5461,6 +6046,13 @@ impl Checker {
     }
 
     fn check_spawn(&mut self, body: &Expr) -> Result<Type, VerseError> {
+        if self.data_member_default_depth > 0 {
+            return Err(VerseError::check_at(
+                "data-member default value cannot contain `spawn` expressions",
+                body.span,
+            ));
+        }
+
         self.push_scope();
         let result = self.with_suppressed_async_expr_marker(|checker| {
             let spawned_expr = spawn_body_expr(body)?;
@@ -5689,15 +6281,6 @@ impl Checker {
             let body_type = (|| {
                 for param in params {
                     let param_type = self.annotation_to_type(param.annotation.as_ref())?;
-                    if let Some(default) = &param.default {
-                        let default_type = self.check_expr(default)?;
-                        self.ensure_expr_assignable(&param_type, &default_type, default, || {
-                            format!(
-                                "default value for parameter `{}` must be `{param_type}`, got `{default_type}`",
-                                param.name
-                            )
-                        })?;
-                    }
                     self.define_param_pattern(param, &param_type)?;
                 }
 
@@ -5755,6 +6338,15 @@ impl Checker {
     fn define_param_pattern(&mut self, param: &Param, value_type: &Type) -> Result<(), VerseError> {
         match &param.pattern {
             ParamPattern::Binding => {
+                if let Some(default) = &param.default {
+                    let default_type = self.check_expr(default)?;
+                    self.ensure_expr_assignable(value_type, &default_type, default, || {
+                        format!(
+                            "default value for parameter `{}` must be `{value_type}`, got `{default_type}`",
+                            param.name
+                        )
+                    })?;
+                }
                 self.define(&param.name, value_type.clone(), false, param.span)
             }
             ParamPattern::Anonymous => Ok(()),
@@ -5767,7 +6359,8 @@ impl Checker {
                 }
                 Type::Unknown | Type::Any => {
                     for param in params {
-                        self.define_param_pattern(param, &Type::Unknown)?;
+                        let item_type = self.annotation_to_type(param.annotation.as_ref())?;
+                        self.define_param_pattern(param, &item_type)?;
                     }
                     Ok(())
                 }
@@ -6223,6 +6816,24 @@ impl Checker {
         arg_types: &[Type],
         span: Span,
     ) -> Result<(), VerseError> {
+        if let [param] = param_specs
+            && let Some(tuple_items) = param.tuple_items.as_deref()
+            && tuple_param_specs_have_named_or_default(tuple_items)
+        {
+            let positional_args = args.iter().map(call_arg_expr).collect::<Vec<_>>();
+            if args.len() == 1
+                && !args[0].is_named()
+                && self.expr_is_assignable_to_expected(
+                    &param.value_type,
+                    &arg_types[0],
+                    positional_args[0],
+                )?
+            {
+                return Ok(());
+            }
+            return self.check_spec_call_arguments(tuple_items, args, arg_types, span);
+        }
+
         if args.iter().all(|arg| !arg.is_named()) && param_specs.iter().all(|param| !param.named) {
             let param_types = param_specs
                 .iter()
@@ -6401,6 +7012,7 @@ impl Checker {
                 ));
             }
         };
+        self.ensure_data_member_default_archetype_not_recursive(&aggregate_name, callee.span)?;
 
         let Some(info) = self.struct_types.get(&aggregate_name).cloned() else {
             return Err(VerseError::check_at(
@@ -6425,6 +7037,9 @@ impl Checker {
                 format!("epic_internal class `{aggregate_name}` cannot be instantiated"),
                 callee.span,
             ));
+        }
+        if info.kind == AggregateKind::Class && info.unique {
+            self.ensure_current_function_allows_allocation(callee.span)?;
         }
 
         self.push_scope();
@@ -6465,7 +7080,7 @@ impl Checker {
 
                         if info.kind == AggregateKind::Class {
                             let owner = expected.owner.as_deref().unwrap_or(&aggregate_name);
-                            self.ensure_class_member_accessible(
+                            self.ensure_aggregate_member_accessible(
                                 owner,
                                 expected.access,
                                 &field.name,
@@ -6670,6 +7285,29 @@ impl Checker {
                 call.span,
             )),
         }
+    }
+
+    fn ensure_data_member_default_archetype_not_recursive(
+        &self,
+        aggregate_name: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if let Some(context) = self
+            .data_member_default_stack
+            .iter()
+            .rev()
+            .find(|context| context.aggregate_name == aggregate_name)
+        {
+            return Err(VerseError::check_at(
+                format!(
+                    "field default `{}.{}` recursively constructs `{aggregate_name}`",
+                    context.aggregate_name, context.field_name
+                ),
+                span,
+            ));
+        }
+
+        Ok(())
     }
 
     fn check_event_archetype(
@@ -6955,7 +7593,7 @@ impl Checker {
                 StmtKind::Expr(expr) => self.check_failure_expr(expr)?,
                 _ => self.check_stmt(statement)?,
             };
-            if last == Type::Never {
+            if last == Type::Never || self.statement_never_completes(statement) {
                 unreachable_after =
                     Some((unreachable_statement_message(statement), statement.span));
             }
@@ -6998,6 +7636,154 @@ impl Checker {
 
         self.define(name, checked_type.clone(), mutable, span)?;
         Ok(checked_type)
+    }
+
+    fn statement_never_completes(&self, statement: &Stmt) -> bool {
+        match &statement.kind {
+            StmtKind::Return(_) | StmtKind::Break => true,
+            StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
+                self.expr_never_completes(expr)
+            }
+            StmtKind::Set { target, expr, .. } => {
+                self.expr_never_completes(target) || self.expr_never_completes(expr)
+            }
+            StmtKind::Using { .. }
+            | StmtKind::ParametricType { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::ExtensionMethod(_)
+            | StmtKind::Defer(_) => false,
+        }
+    }
+
+    fn expr_never_completes(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Unary { expr, .. } => self.expr_never_completes(expr),
+            ExprKind::Binary { left, op, right } => {
+                self.expr_never_completes(left)
+                    || (!matches!(op, BinaryOp::And | BinaryOp::Or)
+                        && self.expr_never_completes(right))
+            }
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.expr_never_completes(condition)
+                    || else_branch.as_deref().is_some_and(|else_branch| {
+                        self.expr_never_completes(then_branch)
+                            && self.expr_never_completes(else_branch)
+                    })
+            }
+            ExprKind::FailureBind { expr, .. } => self.expr_never_completes(expr),
+            ExprKind::FailureSequence(items) => items
+                .first()
+                .is_some_and(|item| self.expr_never_completes(item)),
+            ExprKind::Set { target, expr, .. } => {
+                self.expr_never_completes(target) || self.expr_never_completes(expr)
+            }
+            ExprKind::Var { expr, .. } => self.expr_never_completes(expr),
+            ExprKind::For { clauses, .. } => clauses
+                .iter()
+                .any(|clause| self.for_clause_expr_never_completes(clause)),
+            ExprKind::Profile { description, body } => {
+                self.expr_never_completes(description) || self.expr_never_completes(body)
+            }
+            ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => statements
+                .last()
+                .is_some_and(|statement| self.statement_never_completes(statement)),
+            ExprKind::Call { callee, args } => {
+                self.expr_never_completes(callee)
+                    || args
+                        .iter()
+                        .any(|arg| self.expr_never_completes(call_arg_expr(arg)))
+                    || self.callee_returns_never(callee)
+            }
+            ExprKind::BracketCall { callee, args } => {
+                self.expr_never_completes(callee)
+                    || args.iter().any(|arg| self.expr_never_completes(arg))
+                    || self.callee_returns_never(callee)
+            }
+            ExprKind::Array(items) | ExprKind::Tuple(items) => {
+                items.iter().any(|item| self.expr_never_completes(item))
+            }
+            ExprKind::Map(entries) => entries.iter().any(|(key, value)| {
+                self.expr_never_completes(key) || self.expr_never_completes(value)
+            }),
+            ExprKind::Archetype {
+                callee, entries, ..
+            } => {
+                self.expr_never_completes(callee)
+                    || entries
+                        .iter()
+                        .any(|entry| self.archetype_entry_never_completes(entry))
+            }
+            ExprKind::Case { subject, arms } => {
+                self.expr_never_completes(subject)
+                    || (case_arms_have_wildcard(arms)
+                        && arms.iter().all(|arm| self.expr_never_completes(&arm.expr)))
+            }
+            ExprKind::Option(Some(value)) | ExprKind::UnwrapOption(value) => {
+                self.expr_never_completes(value)
+            }
+            ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match part {
+                InterpolatedStringPart::Text(_) => false,
+                InterpolatedStringPart::Expr(expr) => self.expr_never_completes(expr),
+            }),
+            ExprKind::Member { object, .. } | ExprKind::QualifiedMember { object, .. } => {
+                self.expr_never_completes(object)
+            }
+            ExprKind::Index { collection, index } => {
+                self.expr_never_completes(collection) || self.expr_never_completes(index)
+            }
+            ExprKind::Number { .. }
+            | ExprKind::Char { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::String(_)
+            | ExprKind::None
+            | ExprKind::Ident(_)
+            | ExprKind::External
+            | ExprKind::Loop { .. }
+            | ExprKind::Spawn { .. }
+            | ExprKind::Concurrent { .. }
+            | ExprKind::Function { .. }
+            | ExprKind::EnumDefinition { .. }
+            | ExprKind::StructDefinition { .. }
+            | ExprKind::ClassDefinition { .. }
+            | ExprKind::InterfaceDefinition { .. }
+            | ExprKind::ModuleDefinition { .. }
+            | ExprKind::Option(None)
+            | ExprKind::QualifiedName { .. } => false,
+        }
+    }
+
+    fn for_clause_expr_never_completes(&self, clause: &ForClause) -> bool {
+        match clause {
+            ForClause::Generator { iterable, .. }
+            | ForClause::Let { expr: iterable, .. }
+            | ForClause::RangeOrLet { expr: iterable, .. }
+            | ForClause::Filter(iterable) => self.expr_never_completes(iterable),
+        }
+    }
+
+    fn archetype_entry_never_completes(&self, entry: &ArchetypeEntry) -> bool {
+        match entry {
+            ArchetypeEntry::Field(field) => self.expr_never_completes(&field.expr),
+            ArchetypeEntry::Let(binding) => self.expr_never_completes(&binding.expr),
+            ArchetypeEntry::Block(block) => self.expr_never_completes(block),
+            ArchetypeEntry::ConstructorCall(call) => call
+                .args
+                .iter()
+                .any(|arg| self.expr_never_completes(call_arg_expr(arg))),
+        }
+    }
+
+    fn callee_returns_never(&self, callee: &Expr) -> bool {
+        match &callee.kind {
+            ExprKind::Ident(name) => self
+                .lookup(name)
+                .is_some_and(|symbol| type_returns_never(&symbol.value_type)),
+            _ => false,
+        }
     }
 
     fn check_var_expression(
@@ -7095,6 +7881,10 @@ impl Checker {
 
         if is_shuffle_callee(callee) && is_shuffle_function_type(&callee_type) {
             return self.check_shuffle_call(args, &arg_types, span);
+        }
+
+        if is_concatenate_callee(callee) && is_concatenate_function_type(&callee_type) {
+            return self.check_concatenate_call(args, &arg_types, span);
         }
 
         if is_make_classifiable_subset_callee(callee)
@@ -7202,6 +7992,7 @@ impl Checker {
                 Type::Unknown | Type::Any => return Ok(Type::Unknown),
                 Type::Struct(_)
                 | Type::Class(_)
+                | Type::Module(_)
                 | Type::Result(_, _)
                 | Type::Event(_)
                 | Type::Task(_)
@@ -7212,7 +8003,10 @@ impl Checker {
                 | Type::Awaitable(_)
                 | Type::Signalable(_)
                 | Type::Subscribable(_)
-                | Type::Listenable(_) => checked_arg_types = Some(arg_types),
+                | Type::Listenable(_)
+                | Type::Param(_, TypeParamConstraint::Subtype(_)) => {
+                    checked_arg_types = Some(arg_types)
+                }
                 other => {
                     return Err(VerseError::check_at(
                         format!("type `{other}` has no bracket method `{name}`"),
@@ -7360,7 +8154,7 @@ impl Checker {
             ));
         };
 
-        let mut result_type = Type::Unknown;
+        let mut result_type = None;
         let mut covered = Vec::<String>::new();
         let mut saw_wildcard = false;
 
@@ -7413,7 +8207,10 @@ impl Checker {
             }
 
             let next = self.check_case_arm_expr(&arm.expr)?;
-            result_type = unify_types(&result_type, &next, arm.expr.span)?;
+            result_type = Some(match result_type {
+                Some(current) => unify_types(&current, &next, arm.expr.span)?,
+                None => next,
+            });
         }
 
         if !saw_wildcard && !self.case_failure_allowed() {
@@ -7441,7 +8238,7 @@ impl Checker {
             }
         }
 
-        Ok(result_type)
+        Ok(result_type.unwrap_or(Type::Unknown))
     }
 
     fn check_scalar_case(
@@ -7450,7 +8247,7 @@ impl Checker {
         arms: &[CaseArm],
         span: Span,
     ) -> Result<Type, VerseError> {
-        let mut result_type = Type::Unknown;
+        let mut result_type = None;
         let mut covered = Vec::<CaseConstant>::new();
         let mut saw_wildcard = false;
 
@@ -7497,7 +8294,10 @@ impl Checker {
             }
 
             let next = self.check_case_arm_expr(&arm.expr)?;
-            result_type = unify_types(&result_type, &next, arm.expr.span)?;
+            result_type = Some(match result_type {
+                Some(current) => unify_types(&current, &next, arm.expr.span)?,
+                None => next,
+            });
         }
 
         if !saw_wildcard
@@ -7510,7 +8310,7 @@ impl Checker {
             ));
         }
 
-        Ok(result_type)
+        Ok(result_type.unwrap_or(Type::Unknown))
     }
 
     fn check_case_arm_expr(&mut self, expr: &Expr) -> Result<Type, VerseError> {
@@ -7530,7 +8330,7 @@ impl Checker {
         arms: &[CaseArm],
         span: Span,
     ) -> Result<Type, VerseError> {
-        let mut result_type = Type::Unknown;
+        let mut result_type = None;
         let mut saw_wildcard = false;
         for arm in arms {
             if saw_wildcard && !arm.ignore_unreachable {
@@ -7546,9 +8346,12 @@ impl Checker {
                 }
             }
             let next = self.check_expr(&arm.expr)?;
-            result_type = unify_types(&result_type, &next, span)?;
+            result_type = Some(match result_type {
+                Some(current) => unify_types(&current, &next, span)?,
+                None => next,
+            });
         }
-        Ok(result_type)
+        Ok(result_type.unwrap_or(Type::Unknown))
     }
 
     fn current_function_has_effect(&self, effect: &str) -> bool {
@@ -7660,6 +8463,19 @@ impl Checker {
         Ok(())
     }
 
+    fn ensure_current_function_allows_allocation(&self, span: Span) -> Result<(), VerseError> {
+        let Some(caller_effects) = self.function_effects.last() else {
+            return Ok(());
+        };
+
+        let allowed = call_allowed_capabilities(caller_effects);
+        if allowed.iter().any(|capability| capability == &"allocates") {
+            Ok(())
+        } else {
+            Err(effect_call_error(caller_effects, "allocates", span))
+        }
+    }
+
     fn in_failure_context(&self) -> bool {
         self.failure_context_depth > 0
     }
@@ -7722,14 +8538,19 @@ impl Checker {
     }
 
     fn ensure_current_function_allows_mutation(&self, span: Span) -> Result<(), VerseError> {
-        if self.function_effects.is_empty() || self.current_function_has_effect("transacts") {
+        let Some(caller_effects) = self.function_effects.last() else {
             return Ok(());
-        }
+        };
 
-        Err(VerseError::check_at(
-            "mutable assignment in function requires `<transacts>` effect",
-            span,
-        ))
+        let allowed = call_allowed_capabilities(caller_effects);
+        if allowed.iter().any(|capability| capability == &"writes") {
+            Ok(())
+        } else {
+            Err(VerseError::check_at(
+                "mutable assignment in function requires `<writes>` or `<transacts>` effect",
+                span,
+            ))
+        }
     }
 
     fn ensure_assignable(
@@ -7822,6 +8643,9 @@ impl Checker {
         matches!(expected, Type::Any | Type::Unknown)
             || matches!(actual, Type::Any | Type::Unknown | Type::Never)
             || expected == actual
+            || self
+                .constrained_type_param_supertype_for_assignability(actual)
+                .is_some_and(|supertype| self.is_assignable(expected, &supertype))
             || matches!(expected, Type::Comparable)
                 && ensure_comparable_key(actual, &self.struct_types, Span::new(0, 0, 0, 0)).is_ok()
             || matches!(expected, Type::Number) && is_numeric_type(actual)
@@ -7911,6 +8735,12 @@ impl Checker {
             (Type::Generator(expected), Type::Generator(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
             }
+            (Type::CastableSubtype(expected), Type::ClassType(actual)) => {
+                self.class_type_value_is_castable_subtype(actual, expected)
+            }
+            (Type::ConcreteSubtype(expected), Type::ClassType(actual)) => {
+                self.class_type_value_is_concrete_subtype(actual, expected)
+            }
             (Type::CastableSubtype(expected), Type::CastableSubtype(actual))
             | (Type::ConcreteSubtype(expected), Type::ConcreteSubtype(actual))
             | (Type::ClassifiableSubset(expected), Type::ClassifiableSubset(actual))
@@ -7936,6 +8766,31 @@ impl Checker {
                 .as_deref()
                 .is_some_and(|actual| self.is_assignable(expected, actual)),
             _ => false,
+        }
+    }
+
+    fn class_type_value_is_castable_subtype(&self, actual: &str, expected: &Type) -> bool {
+        self.struct_types.get(actual).is_some_and(|info| {
+            info.kind == AggregateKind::Class
+                && info.castable
+                && self.class_type_value_satisfies_subtype(actual, expected)
+        })
+    }
+
+    fn class_type_value_is_concrete_subtype(&self, actual: &str, expected: &Type) -> bool {
+        self.struct_types.get(actual).is_some_and(|info| {
+            info.kind == AggregateKind::Class
+                && info.concrete
+                && self.class_type_value_satisfies_subtype(actual, expected)
+        })
+    }
+
+    fn class_type_value_satisfies_subtype(&self, actual: &str, expected: &Type) -> bool {
+        match expected {
+            Type::CastableSubtype(expected) => {
+                self.class_type_value_is_castable_subtype(actual, expected)
+            }
+            _ => self.is_assignable(expected, &Type::Class(actual.to_string())),
         }
     }
 
@@ -8209,6 +9064,34 @@ impl Checker {
         }
     }
 
+    fn check_concatenate_call(
+        &mut self,
+        args: &[CallArg],
+        arg_types: &[Type],
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        let arrays_type = Type::Array(Box::new(Type::Array(Box::new(Type::Unknown))));
+        let param_types = vec![arrays_type.clone()];
+        let param_specs = vec![ParamSpec {
+            name: "Arrays".to_string(),
+            value_type: arrays_type,
+            named: false,
+            has_default: false,
+            tuple_items: None,
+        }];
+        self.check_call_arguments(
+            (Some(1), None),
+            Some(&param_types),
+            Some(&param_specs),
+            args,
+            arg_types,
+            span,
+        )?;
+
+        let item_type = infer_concatenate_item_type(args, arg_types, span)?;
+        Ok(Type::Array(Box::new(item_type)))
+    }
+
     fn check_make_classifiable_subset_call(
         &self,
         args: &[CallArg],
@@ -8335,6 +9218,7 @@ impl Checker {
                 Type::Unknown | Type::Any => return Ok(Type::Unknown),
                 Type::Struct(_)
                 | Type::Class(_)
+                | Type::Module(_)
                 | Type::Result(_, _)
                 | Type::Event(_)
                 | Type::Task(_)
@@ -8345,7 +9229,10 @@ impl Checker {
                 | Type::Awaitable(_)
                 | Type::Signalable(_)
                 | Type::Subscribable(_)
-                | Type::Listenable(_) => checked_arg_types = Some(arg_types),
+                | Type::Listenable(_)
+                | Type::Param(_, TypeParamConstraint::Subtype(_)) => {
+                    checked_arg_types = Some(arg_types)
+                }
                 other => {
                     if extension_type.is_some() {
                         checked_arg_types = Some(arg_types);
@@ -8484,7 +9371,7 @@ impl Checker {
     ) -> Result<Type, VerseError> {
         match name {
             "Slice" => {
-                ensure_exact_arg_count(name, args, 2, span)?;
+                ensure_arg_count_range(name, args, 1, 2, span)?;
                 for (arg, arg_type) in args.iter().zip(arg_types) {
                     ensure_int_index_type(arg_type, "`Slice` argument", arg.span)?;
                 }
@@ -8626,6 +9513,21 @@ impl Checker {
         )
     }
 
+    fn ensure_aggregate_member_accessible(
+        &self,
+        owner: &str,
+        access: AccessLevel,
+        member_name: &str,
+        member_kind: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if self.interface_types.contains_key(owner) {
+            self.ensure_interface_member_accessible(owner, access, member_name, member_kind, span)
+        } else {
+            self.ensure_class_member_accessible(owner, access, member_name, member_kind, span)
+        }
+    }
+
     fn ensure_class_member_accessible(
         &self,
         owner_class: &str,
@@ -8683,6 +9585,54 @@ impl Checker {
         }
     }
 
+    fn ensure_interface_member_accessible(
+        &self,
+        owner_interface: &str,
+        access: AccessLevel,
+        member_name: &str,
+        member_kind: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match access {
+            AccessLevel::Public => Ok(()),
+            AccessLevel::Internal => {
+                let current_module = self.current_module_name();
+                if current_module.as_deref() == aggregate_module_name(owner_interface) {
+                    Ok(())
+                } else {
+                    let module_name =
+                        aggregate_module_name(owner_interface).unwrap_or("<root module>");
+                    Err(VerseError::check_at(
+                        format!(
+                            "{member_kind} `{member_name}` is internal to module `{module_name}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+            AccessLevel::Private => Err(VerseError::check_at(
+                format!(
+                    "{member_kind} `{member_name}` is private to interface `{owner_interface}`"
+                ),
+                span,
+            )),
+            AccessLevel::Protected => {
+                if self.class_context.last().is_some_and(|current| {
+                    self.class_implements_interface(current, owner_interface)
+                }) {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!(
+                            "{member_kind} `{member_name}` is protected in interface `{owner_interface}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+        }
+    }
+
     fn ensure_module_member_accessible(
         &self,
         module_name: &str,
@@ -8706,12 +9656,16 @@ impl Checker {
     }
 
     fn check_member(
-        &self,
+        &mut self,
         object_type: &Type,
         name: &str,
         span: Span,
         allow_extension_method: bool,
     ) -> Result<Type, VerseError> {
+        if let Some(supertype) = self.constrained_type_param_supertype(object_type, span)? {
+            return self.check_member(&supertype, name, span, allow_extension_method);
+        }
+
         if let Type::Module(module_name) = object_type {
             let Some(info) = self.module_types.get(module_name) else {
                 return Err(VerseError::check_at(
@@ -8861,11 +9815,23 @@ impl Checker {
                 ));
             };
             if let Some(field) = info.fields.iter().find(|field| field.name == name) {
+                let owner = field.owner.as_deref().unwrap_or(interface_name);
+                self.ensure_aggregate_member_accessible(owner, field.access, name, "field", span)?;
                 return Ok(field.value_type.clone());
             }
             if let Some(method_type) =
                 method_group_type(info.methods.iter().filter(|method| method.name == name))
             {
+                for method in info.methods.iter().filter(|method| method.name == name) {
+                    let owner = method.owner.as_deref().unwrap_or(interface_name);
+                    self.ensure_aggregate_member_accessible(
+                        owner,
+                        method.access,
+                        name,
+                        "method",
+                        span,
+                    )?;
+                }
                 if matches!(method_type, Type::Overload(_)) && !allow_extension_method {
                     return Err(VerseError::check_at(
                         format!("overloaded method `{name}` must be called"),
@@ -8944,10 +9910,21 @@ impl Checker {
                 AggregateKind::Struct => "struct",
                 AggregateKind::Class => "class",
             };
+            let member_label = if info.kind == AggregateKind::Class {
+                "member"
+            } else {
+                "field"
+            };
             if let Some(field) = info.fields.iter().find(|field| field.name == name) {
                 if info.kind == AggregateKind::Class {
                     let owner = field.owner.as_deref().unwrap_or(aggregate_name);
-                    self.ensure_class_member_accessible(owner, field.access, name, "field", span)?;
+                    self.ensure_aggregate_member_accessible(
+                        owner,
+                        field.access,
+                        name,
+                        "field",
+                        span,
+                    )?;
                 }
                 return Ok(field.value_type.clone());
             }
@@ -8957,7 +9934,7 @@ impl Checker {
             {
                 for method in info.methods.iter().filter(|method| method.name == name) {
                     let owner = method.owner.as_deref().unwrap_or(aggregate_name);
-                    self.ensure_class_member_accessible(
+                    self.ensure_aggregate_member_accessible(
                         owner,
                         method.access,
                         name,
@@ -8983,11 +9960,6 @@ impl Checker {
                 return Ok(method_type);
             }
 
-            let member_label = if info.kind == AggregateKind::Class {
-                "member"
-            } else {
-                "field"
-            };
             return Err(VerseError::check_at(
                 format!("{label} `{aggregate_name}` has no {member_label} `{name}`"),
                 span,
@@ -9022,11 +9994,15 @@ impl Checker {
     }
 
     fn extension_member_type(
-        &self,
+        &mut self,
         object_type: &Type,
         name: &str,
         span: Span,
     ) -> Result<Option<Type>, VerseError> {
+        if let Some(supertype) = self.constrained_type_param_supertype(object_type, span)? {
+            return self.extension_member_type(&supertype, name, span);
+        }
+
         let Some(methods) = self.extension_methods.get(name) else {
             return Ok(None);
         };
@@ -9035,6 +10011,37 @@ impl Checker {
             .iter()
             .filter(|method| self.is_assignable(&method.receiver_type, object_type))
         {
+            if self.extension_method_is_visible(method, name, span)? {
+                candidates.push(method.method_type.clone());
+            }
+        }
+
+        Ok(match candidates.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => Some(Type::Overload(candidates)),
+        })
+    }
+
+    fn qualified_extension_member_type(
+        &mut self,
+        object_type: &Type,
+        qualifier: &str,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        if let Some(supertype) = self.constrained_type_param_supertype(object_type, span)? {
+            return self.qualified_extension_member_type(&supertype, qualifier, name, span);
+        }
+
+        let Some(methods) = self.extension_methods.get(name) else {
+            return Ok(None);
+        };
+        let mut candidates = Vec::new();
+        for method in methods.iter().filter(|method| {
+            self.is_assignable(&method.receiver_type, object_type)
+                && extension_method_has_qualifier(method, qualifier)
+        }) {
             if self.extension_method_is_visible(method, name, span)? {
                 candidates.push(method.method_type.clone());
             }
@@ -9158,6 +10165,7 @@ impl Checker {
         mutable: bool,
         span: Span,
     ) -> Result<(), VerseError> {
+        self.ensure_not_shadowing_class_member(name, span)?;
         let current = self
             .scopes
             .last_mut()
@@ -9176,6 +10184,92 @@ impl Checker {
             },
         );
         Ok(())
+    }
+
+    fn define_predeclared_aggregate_value(
+        &mut self,
+        name: &str,
+        qualified: &str,
+        value_type: Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_not_shadowing_class_member(name, span)?;
+        let current = self
+            .scopes
+            .last_mut()
+            .expect("checker should always have a scope");
+        if current.contains_key(name) {
+            return Err(VerseError::check_at(
+                format!("duplicate definition `{name}`"),
+                span,
+            ));
+        }
+        current.insert(name.to_string(), Symbol::immutable(value_type));
+        self.predeclared_aggregate_values
+            .insert(qualified.to_string());
+        Ok(())
+    }
+
+    fn define_aggregate_value(
+        &mut self,
+        name: &str,
+        qualified: &str,
+        value_type: Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_not_shadowing_class_member(name, span)?;
+        if self.predeclared_aggregate_values.remove(qualified) {
+            let current = self
+                .scopes
+                .last_mut()
+                .expect("checker should always have a scope");
+            match current.get_mut(name) {
+                Some(symbol) if !symbol.mutable && symbol.value_type == value_type => {
+                    symbol.value_type = value_type;
+                    return Ok(());
+                }
+                _ => {
+                    return Err(VerseError::check_at(
+                        format!("duplicate definition `{name}`"),
+                        span,
+                    ));
+                }
+            }
+        }
+
+        self.define(name, value_type, false, span)
+    }
+
+    fn push_class_member_shadow_names(&mut self, class_name: &str, fields: &[StructFieldInfo]) {
+        let mut names = fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<HashSet<_>>();
+        if let Some(info) = self.struct_types.get(class_name) {
+            names.extend(info.methods.iter().map(|method| method.name.clone()));
+        }
+        self.class_member_shadow_names.push(names);
+    }
+
+    fn pop_class_member_shadow_names(&mut self) {
+        self.class_member_shadow_names
+            .pop()
+            .expect("class member shadow stack should not underflow");
+    }
+
+    fn ensure_not_shadowing_class_member(&self, name: &str, span: Span) -> Result<(), VerseError> {
+        if self
+            .class_member_shadow_names
+            .last()
+            .is_some_and(|members| members.contains(name))
+        {
+            Err(VerseError::check_at(
+                format!("definition `{name}` cannot shadow class member `{name}`"),
+                span,
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<Symbol> {
@@ -9387,6 +10481,16 @@ fn call_arg_expr(arg: &CallArg) -> &Expr {
     }
 }
 
+fn type_returns_never(value_type: &Type) -> bool {
+    match value_type {
+        Type::Function { return_type, .. } => return_type.as_ref() == &Type::Never,
+        Type::Overload(overloads) => {
+            !overloads.is_empty() && overloads.iter().all(type_returns_never)
+        }
+        _ => false,
+    }
+}
+
 fn spawn_body_expr(body: &Expr) -> Result<&Expr, VerseError> {
     let ExprKind::Block(statements) = &body.kind else {
         return Err(VerseError::check_at(
@@ -9511,6 +10615,13 @@ fn qualifier_matches(stored: &str, requested: &str) -> bool {
 fn method_has_qualifier(method: &ClassMethodInfo, qualifier: &str) -> bool {
     method
         .qualifier
+        .as_deref()
+        .is_some_and(|stored| qualifier_matches(stored, qualifier))
+}
+
+fn extension_method_has_qualifier(method: &ExtensionMethodInfo, qualifier: &str) -> bool {
+    method
+        .module_name
         .as_deref()
         .is_some_and(|stored| qualifier_matches(stored, qualifier))
 }
@@ -9697,6 +10808,47 @@ fn function_signatures_conflict(
 }
 
 fn param_specs_overlap(
+    left: &[ParamSpec],
+    right: &[ParamSpec],
+    struct_types: &HashMap<String, StructInfo>,
+) -> bool {
+    if param_specs_overlap_direct(left, right, struct_types) {
+        return true;
+    }
+
+    let left_variants = expanded_single_tuple_param_spec_variants(left);
+    let right_variants = expanded_single_tuple_param_spec_variants(right);
+
+    for left_variant in &left_variants {
+        if param_specs_overlap_direct(left_variant, right, struct_types) {
+            return true;
+        }
+        for right_variant in &right_variants {
+            if param_specs_overlap_direct(left_variant, right_variant, struct_types) {
+                return true;
+            }
+        }
+    }
+
+    right_variants
+        .iter()
+        .any(|right_variant| param_specs_overlap_direct(left, right_variant, struct_types))
+}
+
+fn expanded_single_tuple_param_spec_variants(specs: &[ParamSpec]) -> Vec<Vec<ParamSpec>> {
+    let [single] = specs else {
+        return Vec::new();
+    };
+    let Some(items) = &single.tuple_items else {
+        return Vec::new();
+    };
+
+    let mut variants = vec![items.clone()];
+    variants.extend(expanded_single_tuple_param_spec_variants(items));
+    variants
+}
+
+fn param_specs_overlap_direct(
     left: &[ParamSpec],
     right: &[ParamSpec],
     struct_types: &HashMap<String, StructInfo>,
@@ -10049,12 +11201,7 @@ fn substitute_type_params(value_type: &Type, inferred: &HashMap<String, Type>) -
             param_specs: param_specs.as_ref().map(|specs| {
                 specs
                     .iter()
-                    .map(|spec| ParamSpec {
-                        name: spec.name.clone(),
-                        value_type: substitute_type_params(&spec.value_type, inferred),
-                        named: spec.named,
-                        has_default: spec.has_default,
-                    })
+                    .map(|spec| substitute_param_spec(spec, inferred))
                     .collect()
             }),
             return_type: Box::new(substitute_type_params(return_type, inferred)),
@@ -10066,6 +11213,93 @@ fn substitute_type_params(value_type: &Type, inferred: &HashMap<String, Type>) -
                 .collect(),
         ),
         _ => value_type.clone(),
+    }
+}
+
+fn type_contains_type_param(value_type: &Type) -> bool {
+    match value_type {
+        Type::Param(_, _) => true,
+        Type::Array(item)
+        | Type::Option(item)
+        | Type::Task(item)
+        | Type::CastableSubtype(item)
+        | Type::ConcreteSubtype(item)
+        | Type::ClassifiableSubset(item)
+        | Type::Modifier(item)
+        | Type::ModifierStack(item)
+        | Type::Signalable(item) => type_contains_type_param(item),
+        Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
+            type_contains_type_param(key) || type_contains_type_param(value)
+        }
+        Type::Tuple(items) | Type::Overload(items) => items.iter().any(type_contains_type_param),
+        Type::Event(payload)
+        | Type::Generator(payload)
+        | Type::Awaitable(payload)
+        | Type::Subscribable(payload)
+        | Type::Listenable(payload) => payload.as_deref().is_some_and(type_contains_type_param),
+        Type::Function {
+            param_types,
+            param_specs,
+            return_type,
+            ..
+        } => {
+            param_types
+                .as_ref()
+                .is_some_and(|params| params.iter().any(type_contains_type_param))
+                || param_specs
+                    .as_ref()
+                    .is_some_and(|specs| specs.iter().any(param_spec_contains_type_param))
+                || type_contains_type_param(return_type)
+        }
+        Type::Int
+        | Type::Float
+        | Type::Rational
+        | Type::Number
+        | Type::Bool
+        | Type::String
+        | Type::Message
+        | Type::Char
+        | Type::Char8
+        | Type::Char32
+        | Type::None
+        | Type::Any
+        | Type::Comparable
+        | Type::Unknown
+        | Type::Never
+        | Type::Range
+        | Type::Enum(_)
+        | Type::EnumType(_)
+        | Type::Struct(_)
+        | Type::StructType(_)
+        | Type::Class(_)
+        | Type::ClassType(_)
+        | Type::Interface(_)
+        | Type::InterfaceType(_)
+        | Type::Module(_)
+        | Type::ParametricType { .. } => false,
+    }
+}
+
+fn param_spec_contains_type_param(spec: &ParamSpec) -> bool {
+    type_contains_type_param(&spec.value_type)
+        || spec
+            .tuple_items
+            .as_ref()
+            .is_some_and(|items| items.iter().any(param_spec_contains_type_param))
+}
+
+fn substitute_param_spec(spec: &ParamSpec, inferred: &HashMap<String, Type>) -> ParamSpec {
+    ParamSpec {
+        name: spec.name.clone(),
+        value_type: substitute_type_params(&spec.value_type, inferred),
+        named: spec.named,
+        has_default: spec.has_default,
+        tuple_items: spec.tuple_items.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| substitute_param_spec(item, inferred))
+                .collect()
+        }),
     }
 }
 
@@ -10307,6 +11541,17 @@ fn rendered_param_name(param: &ParamSpec) -> String {
     } else {
         param.name.clone()
     }
+}
+
+fn tuple_param_specs_have_named_or_default(params: &[ParamSpec]) -> bool {
+    params.iter().any(|param| {
+        param.named
+            || param.has_default
+            || param
+                .tuple_items
+                .as_deref()
+                .is_some_and(tuple_param_specs_have_named_or_default)
+    })
 }
 
 fn rendered_argument_name(name: &str, optional: bool) -> String {
@@ -10693,6 +11938,15 @@ fn aggregate_module_name(aggregate_name: &str) -> Option<&str> {
     uninstantiated.rsplit_once('.').map(|(module, _)| module)
 }
 
+fn aggregate_unqualified_name(aggregate_name: &str) -> &str {
+    let uninstantiated = aggregate_name
+        .split_once('(')
+        .map_or(aggregate_name, |(name, _)| name);
+    uninstantiated
+        .rsplit_once('.')
+        .map_or(uninstantiated, |(_, name)| name)
+}
+
 fn has_effect(effects: &[String], name: &str) -> bool {
     effects.iter().any(|effect| effect == name)
 }
@@ -11018,6 +12272,10 @@ fn is_shuffle_callee(callee: &Expr) -> bool {
     matches!(&callee.kind, ExprKind::Ident(name) if name == "Shuffle")
 }
 
+fn is_concatenate_callee(callee: &Expr) -> bool {
+    matches!(&callee.kind, ExprKind::Ident(name) if name == "Concatenate")
+}
+
 fn is_make_classifiable_subset_callee(callee: &Expr) -> bool {
     matches!(&callee.kind, ExprKind::Ident(name) if name == "MakeClassifiableSubset")
 }
@@ -11046,6 +12304,83 @@ fn is_shuffle_function_type(callee_type: &Type) -> bool {
             && matches!(param_types.as_slice(), [Type::Array(_)])
             && matches!(return_type.as_ref(), Type::Array(_))
     )
+}
+
+fn is_concatenate_function_type(callee_type: &Type) -> bool {
+    matches!(
+        callee_type,
+        Type::Function {
+            arity: Some(1),
+            param_types: Some(param_types),
+            return_type,
+            ..
+        } if matches!(param_types.as_slice(), [Type::Array(item)] if matches!(item.as_ref(), Type::Array(_)))
+            && matches!(return_type.as_ref(), Type::Array(_))
+    )
+}
+
+fn infer_concatenate_item_type(
+    args: &[CallArg],
+    arg_types: &[Type],
+    span: Span,
+) -> Result<Type, VerseError> {
+    if args.len() == 1
+        && let Some(item_type) = concatenate_arrays_argument_item_type(&arg_types[0], span)?
+    {
+        return Ok(item_type);
+    }
+
+    let mut item_type = Type::Unknown;
+    for arg_type in arg_types {
+        let next = concatenate_packed_argument_item_type(arg_type, span)?;
+        item_type = unify_types(&item_type, &next, span)?;
+    }
+    Ok(item_type)
+}
+
+fn concatenate_arrays_argument_item_type(
+    value_type: &Type,
+    span: Span,
+) -> Result<Option<Type>, VerseError> {
+    match value_type {
+        Type::Array(item) => match item.as_ref() {
+            Type::Array(nested) => Ok(Some(nested.as_ref().clone())),
+            Type::Unknown | Type::Any => Ok(Some(Type::Unknown)),
+            _ => Ok(None),
+        },
+        Type::Tuple(items) => {
+            let mut item_type = Type::Unknown;
+            for item in items {
+                let next = match item {
+                    Type::Array(nested) => nested.as_ref().clone(),
+                    Type::Unknown | Type::Any => Type::Unknown,
+                    _ => return Ok(None),
+                };
+                item_type = unify_types(&item_type, &next, span)?;
+            }
+            Ok(Some(item_type))
+        }
+        Type::Unknown | Type::Any => Ok(Some(Type::Unknown)),
+        _ => Ok(None),
+    }
+}
+
+fn concatenate_packed_argument_item_type(
+    value_type: &Type,
+    span: Span,
+) -> Result<Type, VerseError> {
+    match value_type {
+        Type::Array(item) => Ok(item.as_ref().clone()),
+        Type::Tuple(items) => {
+            let mut item_type = Type::Unknown;
+            for item in items {
+                item_type = unify_types(&item_type, item, span)?;
+            }
+            Ok(item_type)
+        }
+        Type::Unknown | Type::Any => Ok(Type::Unknown),
+        other => Ok(other.clone()),
+    }
 }
 
 fn is_make_classifiable_subset_function_type(callee_type: &Type) -> bool {
@@ -11166,6 +12501,7 @@ fn native_function_type(
                     value_type,
                     named: false,
                     has_default: false,
+                    tuple_items: None,
                 })
                 .collect(),
         ),
@@ -11421,6 +12757,10 @@ fn is_builtin_class_type_name(name: &str) -> bool {
     )
 }
 
+fn is_builtin_class_base_name(name: &str) -> bool {
+    matches!(name, "component" | "tag")
+}
+
 fn is_builtin_comparable_class_name(name: &str) -> bool {
     matches!(name, "session" | "player" | "team")
 }
@@ -11487,18 +12827,21 @@ fn print_function_type(message_type: Type) -> Type {
                 value_type: message_type,
                 named: false,
                 has_default: false,
+                tuple_items: None,
             },
             ParamSpec {
                 name: "Duration".to_string(),
                 value_type: Type::Float,
                 named: true,
                 has_default: true,
+                tuple_items: None,
             },
             ParamSpec {
                 name: "Color".to_string(),
                 value_type: color_type(),
                 named: true,
                 has_default: true,
+                tuple_items: None,
             },
         ]),
         return_type: Box::new(Type::None),
@@ -11607,6 +12950,7 @@ fn builtin_interface_field(
         mutable,
         final_member: false,
         access: AccessLevel::Public,
+        mutation_access: AccessLevel::Public,
         owner: Some(interface_name.to_string()),
         span: Span::new(0, 0, 1, 1),
     }
@@ -11621,7 +12965,9 @@ fn builtin_color_info() -> StructInfo {
         abstract_class: false,
         epic_internal_class: false,
         final_class: false,
-        persistable: false,
+        concrete: false,
+        castable: false,
+        persistable: true,
         computes: false,
         fields: ["R", "G", "B"]
             .into_iter()
@@ -11632,6 +12978,7 @@ fn builtin_color_info() -> StructInfo {
                 mutable: false,
                 final_member: false,
                 access: AccessLevel::Public,
+                mutation_access: AccessLevel::Public,
                 owner: Some("color".to_string()),
                 span: Span::new(0, 0, 1, 1),
             })
@@ -11649,6 +12996,8 @@ fn builtin_color_alpha_info() -> StructInfo {
         abstract_class: false,
         epic_internal_class: false,
         final_class: false,
+        concrete: false,
+        castable: false,
         persistable: false,
         computes: false,
         fields: [
@@ -11663,6 +13012,7 @@ fn builtin_color_alpha_info() -> StructInfo {
             mutable: false,
             final_member: false,
             access: AccessLevel::Public,
+            mutation_access: AccessLevel::Public,
             owner: Some("color_alpha".to_string()),
             span: Span::new(0, 0, 1, 1),
         })
@@ -11680,6 +13030,8 @@ fn builtin_locale_info() -> StructInfo {
         abstract_class: false,
         epic_internal_class: false,
         final_class: false,
+        concrete: false,
+        castable: false,
         persistable: false,
         computes: false,
         fields: Vec::new(),
@@ -11834,6 +13186,13 @@ fn ensure_bool_like(value_type: &Type, context: &str, span: Span) -> Result<(), 
     }
 }
 
+fn type_param_constraint_declares_comparable(constraint: &TypeParamConstraint) -> bool {
+    matches!(
+        constraint,
+        TypeParamConstraint::Subtype(TypeName::Comparable)
+    )
+}
+
 fn ensure_comparable_key(
     value_type: &Type,
     struct_types: &HashMap<String, StructInfo>,
@@ -11867,7 +13226,6 @@ fn ensure_equality_comparable_inner(
         | Type::Interface(_)
         | Type::InterfaceType(_)
         | Type::Module(_)
-        | Type::Param(_, _)
         | Type::ParametricType { .. }
         | Type::WeakMap(_, _)
         | Type::Result(_, _)
@@ -11883,6 +13241,13 @@ fn ensure_equality_comparable_inner(
         | Type::Signalable(_)
         | Type::Subscribable(_)
         | Type::Listenable(_) => Err(VerseError::check_at(
+            format!("equality operand type `{value_type}` is not comparable"),
+            span,
+        )),
+        Type::Param(_, constraint) if type_param_constraint_declares_comparable(constraint) => {
+            Ok(())
+        }
+        Type::Param(_, _) => Err(VerseError::check_at(
             format!("equality operand type `{value_type}` is not comparable"),
             span,
         )),
@@ -12013,7 +13378,6 @@ fn ensure_comparable_key_inner(
         | Type::Interface(_)
         | Type::InterfaceType(_)
         | Type::Module(_)
-        | Type::Param(_, _)
         | Type::ParametricType { .. }
         | Type::Result(_, _)
         | Type::Event(_)
@@ -12028,6 +13392,13 @@ fn ensure_comparable_key_inner(
         | Type::Signalable(_)
         | Type::Subscribable(_)
         | Type::Listenable(_) => Err(VerseError::check_at(
+            format!("map key type `{value_type}` is not comparable"),
+            span,
+        )),
+        Type::Param(_, constraint) if type_param_constraint_declares_comparable(constraint) => {
+            Ok(())
+        }
+        Type::Param(_, _) => Err(VerseError::check_at(
             format!("map key type `{value_type}` is not comparable"),
             span,
         )),
@@ -12128,6 +13499,26 @@ fn ensure_exact_arg_count(
     } else {
         Err(VerseError::check_at(
             format!("`{name}` expected {expected} arguments, got {}", args.len()),
+            span,
+        ))
+    }
+}
+
+fn ensure_arg_count_range(
+    name: &str,
+    args: &[Expr],
+    min: usize,
+    max: usize,
+    span: Span,
+) -> Result<(), VerseError> {
+    if (min..=max).contains(&args.len()) {
+        Ok(())
+    } else {
+        Err(VerseError::check_at(
+            format!(
+                "`{name}` expected {min}..={max} arguments, got {}",
+                args.len()
+            ),
             span,
         ))
     }
