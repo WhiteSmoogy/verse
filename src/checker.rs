@@ -19,7 +19,7 @@ use semantic_class::{
 };
 
 mod definition;
-use definition::{ModuleInfo, ParametricTypeInfo, TypeAliasInfo};
+use definition::{ModuleInfo, ParametricTypeInfo, TypeAliasInfo, type_to_constraint_type_name};
 
 mod effects;
 pub use effects::{Effect, EffectSet};
@@ -33,7 +33,7 @@ mod semantic_expression;
 mod semantic_function;
 use semantic_function::{
     class_is_subtype_of, collect_function_type_params, extension_method_has_qualifier,
-    function_signatures_conflict, function_signatures_match_exactly, infer_function_type_params,
+    function_signatures_conflict, function_signatures_match_exactly,
     inherited_method_duplicate_index, inherited_method_override_index, method_binding_types,
     method_group_type, method_has_qualifier, method_qualifiers_conflict,
     method_signatures_conflict, positional_call_args, push_distinct_local_method_info,
@@ -46,6 +46,7 @@ use semantic_scope::Symbol;
 mod semantic_statement;
 
 mod semantic_types;
+pub use crate::ast::FloatRange;
 use semantic_types::*;
 pub use semantic_types::{IntRange, ParamSpec, Type};
 
@@ -126,11 +127,21 @@ pub enum ParametricTypeKind {
     Struct,
     Class,
     Interface,
+    Alias,
 }
 
 #[derive(Clone)]
 struct PlayerWeakMapInfo {
     value_type: Type,
+}
+
+#[derive(Clone)]
+struct TypeFunctionInfo {
+    params: Vec<TypeParam>,
+    inferred_params: Vec<TypeParam>,
+    target: TypeName,
+    module_path: Vec<String>,
+    signature: Type,
 }
 
 #[derive(Clone)]
@@ -175,9 +186,11 @@ pub struct Checker {
     module_types: HashMap<String, ModuleInfo>,
     extension_methods: HashMap<String, Vec<ExtensionMethodInfo>>,
     parametric_types: HashMap<String, ParametricTypeInfo>,
+    parametric_type_instances: HashMap<String, Vec<Type>>,
     predeclared_aggregate_values: HashSet<String>,
     type_alias_defs: HashMap<String, TypeAliasInfo>,
     type_aliases: HashMap<String, Type>,
+    type_functions: HashMap<String, Vec<TypeFunctionInfo>>,
     type_param_scopes: Vec<HashMap<String, Type>>,
     player_weak_maps: Vec<PlayerWeakMapInfo>,
     module_path: Vec<String>,
@@ -245,6 +258,8 @@ impl Checker {
         self.predeclare_top_level_parametric_types(&program)?;
         self.predeclare_using_imports_recursive(&program.statements)?;
         self.predeclare_top_level_type_aliases(&program)?;
+        self.predeclare_top_level_type_functions(&program)?;
+        self.resolve_predeclared_type_aliases()?;
         self.predeclare_extension_methods_in_current_scope(&program.statements)?;
         self.predeclare_top_level_functions(&program)?;
         self.validate_public_module_surface_access(&program.statements)?;
@@ -275,6 +290,8 @@ impl Checker {
             checker.predeclare_using_imports_recursive(&program.statements)
         });
         self.run_recovering_pass(|checker| checker.predeclare_top_level_type_aliases(&program));
+        self.run_recovering_pass(|checker| checker.predeclare_top_level_type_functions(&program));
+        self.run_recovering_pass(|checker| checker.resolve_predeclared_type_aliases());
         self.run_recovering_pass(|checker| {
             checker.predeclare_extension_methods_in_current_scope(&program.statements)
         });
@@ -399,11 +416,20 @@ fn concurrent_op_name(op: ConcurrentOp) -> &'static str {
     }
 }
 
-fn official_event_archetype_args(callee: &Expr) -> Option<&[CallArg]> {
+fn official_event_archetype_name_and_args(callee: &Expr) -> Option<(&str, &[CallArg])> {
     let ExprKind::Call { callee, args } = &callee.kind else {
         return None;
     };
-    matches!(&callee.kind, ExprKind::Ident(name) if name == "event").then_some(args.as_slice())
+    match &callee.kind {
+        ExprKind::Ident(name) if matches!(name.as_str(), "event" | "sticky_event") => {
+            Some((name.as_str(), args.as_slice()))
+        }
+        _ => None,
+    }
+}
+
+fn official_event_archetype_args(callee: &Expr) -> Option<&[CallArg]> {
+    official_event_archetype_name_and_args(callee).map(|(_, args)| args)
 }
 
 fn is_official_event_archetype_callee(callee: &Expr) -> bool {
@@ -586,6 +612,7 @@ fn failure_statement_has_failable_expr(statement: &Stmt) -> bool {
         | StmtKind::TypeAlias { .. }
         | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::ParametricType { .. }
+        | StmtKind::ParametricTypeAlias { .. }
         | StmtKind::ExtensionMethod(_) => false,
         StmtKind::Break => false,
     }
@@ -698,8 +725,21 @@ fn is_reserved_type_alias_name(name: &str) -> bool {
     matches!(
         name,
         "number"
+            | "nat"
+            | "nat8"
+            | "nat16"
+            | "nat32"
+            | "nat64"
             | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
             | "float"
+            | "float16"
+            | "float32"
+            | "float64"
+            | "float128"
             | "rational"
             | "bool"
             | "logic"
@@ -726,6 +766,9 @@ fn is_reserved_type_alias_name(name: &str) -> bool {
             | "player"
             | "team"
             | "event"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
             | "task"
             | "generator"
             | "subtype"
@@ -733,14 +776,40 @@ fn is_reserved_type_alias_name(name: &str) -> bool {
             | "concrete_subtype"
             | "castable_concrete_subtype"
             | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
             | "modifier"
             | "modifier_stack"
             | "result"
+            | "success_result"
+            | "error_result"
             | "awaitable"
             | "signalable"
             | "listenable"
             | "subscribable"
     )
+}
+
+fn nat_type() -> Type {
+    int_range_type(0, i64::MAX)
+}
+
+fn int_range_type(min: i64, max: i64) -> Type {
+    Type::IntRange(IntRange::new(min, max))
+}
+
+fn builtin_numeric_alias_type(name: &str) -> Option<Type> {
+    match name {
+        "nat" | "nat64" => Some(nat_type()),
+        "nat8" => Some(int_range_type(0, u8::MAX.into())),
+        "nat16" => Some(int_range_type(0, u16::MAX.into())),
+        "nat32" => Some(int_range_type(0, u32::MAX.into())),
+        "int8" => Some(int_range_type(i8::MIN.into(), i8::MAX.into())),
+        "int16" => Some(int_range_type(i16::MIN.into(), i16::MAX.into())),
+        "int32" => Some(int_range_type(i32::MIN.into(), i32::MAX.into())),
+        "int64" => Some(int_range_type(i64::MIN, i64::MAX)),
+        _ => None,
+    }
 }
 
 fn defer_body_is_empty(body: &Expr) -> bool {
@@ -878,6 +947,7 @@ fn defer_body_failable_expr(body: &Expr) -> Option<Span> {
         | ExprKind::None
         | ExprKind::External
         | ExprKind::Ident(_)
+        | ExprKind::TypeAnnotationLiteral { .. }
         | ExprKind::EnumDefinition { .. }
         | ExprKind::InterfaceDefinition { .. }
         | ExprKind::ModuleDefinition { .. }
@@ -903,6 +973,7 @@ fn defer_statement_failable_expr(statement: &Stmt) -> Option<Span> {
         | StmtKind::TypeAlias { .. }
         | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::ParametricType { .. }
+        | StmtKind::ParametricTypeAlias { .. }
         | StmtKind::ExtensionMethod(_)
         | StmtKind::Break => None,
     }
@@ -1027,6 +1098,7 @@ fn archetype_body_escape(body: &Expr, loop_depth: usize) -> Option<Span> {
         | ExprKind::None
         | ExprKind::External
         | ExprKind::Ident(_)
+        | ExprKind::TypeAnnotationLiteral { .. }
         | ExprKind::EnumDefinition { .. }
         | ExprKind::Option(None) => None,
     }
@@ -1041,6 +1113,7 @@ fn archetype_statement_escape(statement: &Stmt, loop_depth: usize) -> Option<Spa
         | StmtKind::TypeAlias { .. }
         | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::ParametricType { .. }
+        | StmtKind::ParametricTypeAlias { .. }
         | StmtKind::ExtensionMethod(_) => None,
         StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
             archetype_body_escape(expr, loop_depth)
@@ -1161,6 +1234,7 @@ fn defer_body_escape(body: &Expr, loop_depth: usize) -> Option<(&'static str, Sp
         | ExprKind::None
         | ExprKind::External
         | ExprKind::Ident(_)
+        | ExprKind::TypeAnnotationLiteral { .. }
         | ExprKind::EnumDefinition { .. }
         | ExprKind::InterfaceDefinition { .. }
         | ExprKind::ModuleDefinition { .. } => None,
@@ -1178,6 +1252,7 @@ fn defer_statement_escape(statement: &Stmt, loop_depth: usize) -> Option<(&'stat
         StmtKind::TypeAlias { .. } => None,
         StmtKind::ScopedAccessLevel { .. } => None,
         StmtKind::ParametricType { .. } => None,
+        StmtKind::ParametricTypeAlias { .. } => None,
         StmtKind::ExtensionMethod(_) => None,
         StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
             defer_body_escape(expr, loop_depth)
@@ -1397,6 +1472,10 @@ fn is_make_classifiable_subset_callee(callee: &Expr) -> bool {
     matches!(&callee.kind, ExprKind::Ident(name) if name == "MakeClassifiableSubset")
 }
 
+fn is_make_classifiable_subset_var_callee(callee: &Expr) -> bool {
+    matches!(&callee.kind, ExprKind::Ident(name) if name == "MakeClassifiableSubsetVar")
+}
+
 fn make_result_callee_name(callee: &Expr) -> Option<&str> {
     let ExprKind::Ident(name) = &callee.kind else {
         return None;
@@ -1510,6 +1589,20 @@ fn is_make_classifiable_subset_function_type(callee_type: &Type) -> bool {
             ..
         } if matches!(param_types.as_slice(), [Type::Array(_)])
             && matches!(return_type.as_ref(), Type::ClassifiableSubset(_))
+    )
+}
+
+fn is_make_classifiable_subset_var_function_type(callee_type: &Type) -> bool {
+    matches!(
+        callee_type,
+        Type::Function {
+            arity: Some(1),
+            param_types: Some(params),
+            return_type,
+            ..
+        } if params.len() == 1
+            && matches!(params[0], Type::Array(_))
+            && matches!(return_type.as_ref(), Type::ClassifiableSubsetVar(_))
     )
 }
 
@@ -1631,10 +1724,21 @@ fn native_function_type(
 }
 
 fn result_accessor_type(return_type: &Type) -> Type {
+    result_accessor_type_with_effects(
+        return_type,
+        vec!["computes".to_string(), "decides".to_string()],
+    )
+}
+
+fn result_present_accessor_type(return_type: &Type) -> Type {
+    result_accessor_type_with_effects(return_type, vec!["computes".to_string()])
+}
+
+fn result_accessor_type_with_effects(return_type: &Type, effects: Vec<String>) -> Type {
     Type::Function {
         arity: Some(0),
         arity_range: None,
-        effects: vec!["computes".to_string(), "decides".to_string()],
+        effects,
         param_types: Some(Vec::new()),
         param_specs: None,
         return_type: Box::new(return_type.clone()),
@@ -1679,12 +1783,68 @@ fn signal_type(payload: Option<&Type>) -> Type {
     }
 }
 
+fn subscribable_event_signal_type(payload: Option<&Type>) -> Type {
+    let param_types = payload.iter().copied().cloned().collect::<Vec<_>>();
+    Type::Function {
+        arity: Some(param_types.len()),
+        arity_range: None,
+        effects: vec!["predicts".to_string()],
+        param_types: Some(param_types),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn subscribable_event_broadcast_type(payload: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["predicts".to_string()],
+        param_types: Some(vec![payload.clone()]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn sticky_event_is_signaled_type() -> Type {
+    Type::Function {
+        arity: Some(0),
+        arity_range: None,
+        effects: vec!["reads".to_string(), "decides".to_string()],
+        param_types: Some(Vec::new()),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn sticky_event_clear_signal_type() -> Type {
+    Type::Function {
+        arity: Some(0),
+        arity_range: None,
+        effects: vec!["writes".to_string()],
+        param_types: Some(Vec::new()),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
 fn classifiable_subset_contains_type(item_type: &Type) -> Type {
     Type::Function {
         arity: Some(1),
         arity_range: None,
         effects: vec!["transacts".to_string(), "decides".to_string()],
-        param_types: Some(vec![Type::CastableSubtype(Box::new(item_type.clone()))]),
+        param_types: Some(vec![classifiable_subset_query_type(item_type)]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn classifiable_subset_not_contains_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["reads".to_string(), "decides".to_string()],
+        param_types: Some(vec![classifiable_subset_query_type(item_type)]),
         param_specs: None,
         return_type: Box::new(Type::None),
     }
@@ -1695,9 +1855,97 @@ fn classifiable_subset_contains_many_type(item_type: &Type) -> Type {
         arity: Some(1),
         arity_range: None,
         effects: vec!["transacts".to_string(), "decides".to_string()],
-        param_types: Some(vec![Type::Array(Box::new(Type::CastableSubtype(
-            Box::new(item_type.clone()),
+        param_types: Some(vec![Type::Array(Box::new(classifiable_subset_query_type(
+            item_type,
         )))]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn classifiable_subset_contains_none_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["reads".to_string(), "decides".to_string()],
+        param_types: Some(vec![Type::Array(Box::new(classifiable_subset_query_type(
+            item_type,
+        )))]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn classifiable_subset_filter_by_type_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["transacts".to_string()],
+        param_types: Some(vec![classifiable_subset_query_type(item_type)]),
+        param_specs: None,
+        return_type: Box::new(Type::ClassifiableSubset(Box::new(item_type.clone()))),
+    }
+}
+
+fn classifiable_subset_query_type(item_type: &Type) -> Type {
+    Type::CastableSubtype(Box::new(Type::TypeValueBounds {
+        lower: Box::new(item_type.clone()),
+        upper: Box::new(Type::Any),
+    }))
+}
+
+fn castable_instance_is_of_type_type() -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["reads".to_string(), "decides".to_string()],
+        param_types: Some(vec![Type::CastableSubtype(Box::new(Type::Any))]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn classifiable_subset_var_read_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(0),
+        arity_range: None,
+        effects: vec!["reads".to_string()],
+        param_types: Some(Vec::new()),
+        param_specs: None,
+        return_type: Box::new(Type::ClassifiableSubset(Box::new(item_type.clone()))),
+    }
+}
+
+fn classifiable_subset_var_write_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["writes".to_string()],
+        param_types: Some(vec![Type::ClassifiableSubset(Box::new(item_type.clone()))]),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
+fn classifiable_subset_var_add_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["transacts".to_string()],
+        param_types: Some(vec![item_type.clone()]),
+        param_specs: None,
+        return_type: Box::new(Type::ClassifiableSubsetKey(Box::new(item_type.clone()))),
+    }
+}
+
+fn classifiable_subset_var_remove_type(item_type: &Type) -> Type {
+    Type::Function {
+        arity: Some(1),
+        arity_range: None,
+        effects: vec!["transacts".to_string(), "decides".to_string()],
+        param_types: Some(vec![Type::ClassifiableSubsetKey(Box::new(
+            item_type.clone(),
+        ))]),
         param_specs: None,
         return_type: Box::new(Type::None),
     }
@@ -1782,6 +2030,9 @@ fn is_official_parametric_type_name(name: &str) -> bool {
     matches!(
         name,
         "event"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
             | "task"
             | "generator"
             | "subtype"
@@ -1789,9 +2040,13 @@ fn is_official_parametric_type_name(name: &str) -> bool {
             | "concrete_subtype"
             | "castable_concrete_subtype"
             | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
             | "modifier"
             | "modifier_stack"
             | "result"
+            | "success_result"
+            | "error_result"
             | "awaitable"
             | "signalable"
             | "listenable"
@@ -1805,12 +2060,34 @@ fn official_parametric_type(name: &str, args: &[Type], span: Span) -> Result<Typ
             ensure_parametric_type_arity(name, args, &[0, 1], span)?;
             Ok(Type::Event(args.first().cloned().map(Box::new)))
         }
+        "subscribable_event" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::SubscribableEvent(Box::new(args[0].clone())))
+        }
+        "subscribable_event_intrnl" => {
+            ensure_parametric_type_arity(name, args, &[0, 1], span)?;
+            Ok(Type::SubscribableEventIntrnl(
+                args.first().cloned().map(Box::new),
+            ))
+        }
+        "sticky_event" => {
+            ensure_parametric_type_arity(name, args, &[0, 1], span)?;
+            Ok(Type::StickyEvent(args.first().cloned().map(Box::new)))
+        }
         "result" => {
             ensure_parametric_type_arity(name, args, &[2], span)?;
             Ok(Type::Result(
                 Box::new(args[0].clone()),
                 Box::new(args[1].clone()),
             ))
+        }
+        "success_result" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::SuccessResult(Box::new(args[0].clone())))
+        }
+        "error_result" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::ErrorResult(Box::new(args[0].clone())))
         }
         "task" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
@@ -1841,6 +2118,14 @@ fn official_parametric_type(name: &str, args: &[Type], span: Span) -> Result<Typ
         "classifiable_subset" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
             Ok(Type::ClassifiableSubset(Box::new(args[0].clone())))
+        }
+        "classifiable_subset_key" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::ClassifiableSubsetKey(Box::new(args[0].clone())))
+        }
+        "classifiable_subset_var" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::ClassifiableSubsetVar(Box::new(args[0].clone())))
         }
         "modifier" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
@@ -2257,6 +2542,32 @@ fn expr_int_literal_value(expr: &Expr) -> Option<i64> {
     }
 }
 
+fn expr_float_literal_value(expr: &Expr) -> Option<f64> {
+    match &expr.kind {
+        ExprKind::Number { value, .. } => Some(number_literal_value_to_f64(*value, false)),
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr,
+        } => match &expr.kind {
+            ExprKind::Number { value, .. } => Some(number_literal_value_to_f64(*value, true)),
+            _ => None,
+        },
+        ExprKind::Unary {
+            op: UnaryOp::Positive,
+            expr,
+        } => expr_float_literal_value(expr),
+        _ => None,
+    }
+}
+
+fn number_literal_value_to_f64(value: NumberLiteral, negative: bool) -> f64 {
+    let value = match value {
+        NumberLiteral::Int(value) => value as f64,
+        NumberLiteral::Float(value) => value,
+    };
+    if negative { -value } else { value }
+}
+
 fn int_literal_value_to_i64(value: i128, negative: bool) -> Option<i64> {
     if negative {
         let min_magnitude = i128::from(i64::MAX) + 1;
@@ -2327,6 +2638,7 @@ fn is_persistable_type_name(
         Type::Int
         | Type::IntRange(_)
         | Type::Float
+        | Type::FloatRange(_)
         | Type::Rational
         | Type::Number
         | Type::Bool
@@ -2364,15 +2676,24 @@ fn is_persistable_type_name(
         | Type::Param(_, _)
         | Type::ParametricType { .. }
         | Type::TypeValue
+        | Type::TypeValueOf(_)
+        | Type::TypeValueBounds { .. }
         | Type::WeakMap(_, _)
         | Type::Result(_, _)
+        | Type::SuccessResult(_)
+        | Type::ErrorResult(_)
         | Type::Event(_)
+        | Type::SubscribableEvent(_)
+        | Type::SubscribableEventIntrnl(_)
+        | Type::StickyEvent(_)
         | Type::Task(_)
         | Type::Generator(_)
         | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)
+        | Type::ClassifiableSubsetKey(_)
+        | Type::ClassifiableSubsetVar(_)
         | Type::Modifier(_)
         | Type::ModifierStack(_)
         | Type::Awaitable(_)

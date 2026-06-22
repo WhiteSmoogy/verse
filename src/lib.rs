@@ -18,10 +18,11 @@ pub mod syntax;
 pub mod token;
 
 pub use checker::{
-    CheckResult, Checker, Effect, EffectSet, IntRange, RecoveredCheckResult, Type, TypeVariable,
-    TypeVariableBounds, check_source, check_source_in_package, check_source_to_typed_program,
-    check_source_to_typed_program_in_package, check_source_with_diagnostics,
-    check_source_with_diagnostics_in_package, check_source_with_recovery,
+    CheckResult, Checker, Effect, EffectSet, FloatRange, IntRange, RecoveredCheckResult, Type,
+    TypeVariable, TypeVariableBounds, check_source, check_source_in_package,
+    check_source_to_typed_program, check_source_to_typed_program_in_package,
+    check_source_with_diagnostics, check_source_with_diagnostics_in_package,
+    check_source_with_recovery,
 };
 pub use compiler_passes::{
     DefaultParserPass, IrGeneratorPass, ParserPass, PostVstPass, SemanticAnalyzerPass,

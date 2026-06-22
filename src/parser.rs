@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, ArchetypeField, ArchetypeLet, AssignOp,
     AttributeArgument, BinaryOp, CallArg, CaseArm, CasePattern, ClassBlock, ClassMethod,
-    ConcurrentOp, EnumVariant, Expr, ExprKind, ExtensionMethod, FieldAttribute, ForBinding,
-    ForClause, InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind, StructField,
-    TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
+    ConcurrentOp, EnumVariant, Expr, ExprKind, ExtensionMethod, FieldAttribute, FloatRange,
+    ForBinding, ForClause, InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind,
+    StructField, TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::error::VerseError;
 use crate::lexer::lex;
@@ -280,6 +280,19 @@ impl Parser {
         let params = self.parse_type_param_list("parametric type")?;
         self.consume_colon_equal("expected `:=` after parametric type parameters")?;
         self.skip_separators();
+        if self.parametric_type_definition_body_is_type_name() {
+            let target = self.consume_type_name("expected parametric type alias target")?;
+            let span = name_span.through(target.span);
+            return Ok(Stmt::new(
+                StmtKind::ParametricTypeAlias {
+                    name,
+                    specifiers,
+                    params,
+                    target,
+                },
+                span,
+            ));
+        }
         let expr = self.parse_expression()?;
         let span = name_span.through(expr.span);
         Ok(Stmt::new(
@@ -293,6 +306,11 @@ impl Parser {
         ))
     }
 
+    fn parametric_type_definition_body_is_type_name(&self) -> bool {
+        let end = self.skip_type_name_at(self.current);
+        end != self.current && self.is_statement_boundary_at(end)
+    }
+
     fn parse_extension_method_definition(&mut self) -> Result<Stmt, VerseError> {
         let open_span = self.consume_lparen("expected `(` before extension method receiver")?;
         let (receiver_name, receiver_name_span) =
@@ -300,6 +318,7 @@ impl Parser {
         self.consume_colon("expected `:` after extension method receiver name")?;
         let receiver_type =
             self.consume_type_name("expected extension method receiver type after `:`")?;
+        let receiver_type_params = self.parse_optional_where_type_params()?;
         let receiver_close_span =
             self.consume_rparen("expected `)` after extension method receiver")?;
         self.consume_dot("expected `.` after extension method receiver")?;
@@ -321,7 +340,7 @@ impl Parser {
                 receiver: Param {
                     name: receiver_name,
                     annotation: Some(receiver_type),
-                    type_params: Vec::new(),
+                    type_params: receiver_type_params,
                     named: false,
                     default: None,
                     pattern: ParamPattern::Binding,
@@ -829,6 +848,15 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, VerseError> {
+        if self.is_prefix_type_annotation_literal_start() {
+            let annotation = self.consume_type_name("expected type expression")?;
+            let span = annotation.span;
+            return Ok(Expr::new(
+                ExprKind::TypeAnnotationLiteral { annotation },
+                span,
+            ));
+        }
+
         let token = self.advance().clone();
         match token.kind {
             TokenKind::Number {
@@ -899,6 +927,27 @@ impl Parser {
         }
     }
 
+    fn is_prefix_type_annotation_literal_start(&self) -> bool {
+        if matches!(self.peek_kind(), TokenKind::Question) {
+            return self.is_type_name_at(self.current + 1);
+        }
+
+        if !matches!(self.peek_kind(), TokenKind::LBracket) {
+            return false;
+        }
+
+        if matches!(self.kind_at(self.current + 1), Some(TokenKind::RBracket)) {
+            return self.is_type_name_at(self.current + 2);
+        }
+
+        if !self.is_type_name_at(self.current + 1) {
+            return false;
+        }
+        let key_end = self.skip_type_name_at(self.current + 1);
+        matches!(self.kind_at(key_end), Some(TokenKind::RBracket))
+            && self.is_type_name_at(key_end + 1)
+    }
+
     fn parse_var_declaration_parts(
         &mut self,
     ) -> Result<(String, TypeAnnotation, Expr), VerseError> {
@@ -926,6 +975,23 @@ impl Parser {
     }
 
     fn finish_type_literal(&mut self, type_span: Span) -> Result<Expr, VerseError> {
+        if matches!(self.peek_kind(), TokenKind::Ident(name) if name == "_") {
+            let annotation = self.finish_function_type(type_span)?;
+            return Ok(Expr::new(
+                ExprKind::TypeAnnotationLiteral { annotation },
+                type_span.through(self.previous_span()),
+            ));
+        }
+
+        if self.is_where_type_literal_start() {
+            let annotation = self.finish_where_type_annotation(type_span)?;
+            let span = annotation.span;
+            return Ok(Expr::new(
+                ExprKind::TypeAnnotationLiteral { annotation },
+                span,
+            ));
+        }
+
         let expr = self.parse_expression()?;
         let close_span = self.consume_rbrace("expected `}` after type expression")?;
         Ok(Expr::new(
@@ -3124,7 +3190,26 @@ impl Parser {
             let (constraint, constraint_span) =
                 self.consume_ident("expected type parameter constraint")?;
             let constraint = match constraint.as_str() {
-                "type" => TypeParamConstraint::Type,
+                "type" => {
+                    if self.match_lparen() {
+                        let lower = self
+                            .consume_type_name("expected lower bound in `type(...)` constraint")?;
+                        if !self.match_comma() {
+                            return Err(self.error_at_current(
+                                "expected `,` between `type(...)` constraint bounds",
+                            ));
+                        }
+                        let upper = self
+                            .consume_type_name("expected upper bound in `type(...)` constraint")?;
+                        self.consume_rparen("expected `)` after `type(...)` constraint")?;
+                        TypeParamConstraint::TypeBounds {
+                            lower: lower.name,
+                            upper: upper.name,
+                        }
+                    } else {
+                        TypeParamConstraint::Type
+                    }
+                }
                 "subtype"
                 | "castable_subtype"
                 | "concrete_subtype"
@@ -3149,7 +3234,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(VerseError::parse(
-                        "type parameter constraints must be `type`, `subtype(...)`, `castable_subtype(...)`, `concrete_subtype(...)`, or `castable_concrete_subtype(...)`",
+                        "type parameter constraints must be `type`, `type(..., ...)`, `subtype(...)`, `castable_subtype(...)`, `concrete_subtype(...)`, or `castable_concrete_subtype(...)`",
                         constraint_span,
                     ));
                 }
@@ -3408,7 +3493,26 @@ impl Parser {
             && name == "type"
             && self.match_lbrace()
         {
-            return self.finish_function_type(token.span);
+            return self.finish_type_brace_annotation(token.span);
+        }
+
+        if let TokenKind::Ident(name) = &token.kind
+            && name == "type"
+            && self.match_lparen()
+        {
+            let lower = self.consume_type_name("expected lower bound in `type(...)`")?;
+            if !self.match_comma() {
+                return Err(self.error_at_current("expected `,` between `type(...)` bounds"));
+            }
+            let upper = self.consume_type_name("expected upper bound in `type(...)`")?;
+            let close_span = self.consume_rparen("expected `)` after `type(...)` bounds")?;
+            return Ok(TypeAnnotation {
+                name: TypeName::TypeBounds {
+                    lower: Box::new(lower.name),
+                    upper: Box::new(upper.name),
+                },
+                span: token.span.through(close_span),
+            });
         }
 
         let mut name = match token.kind {
@@ -3477,6 +3581,293 @@ impl Parser {
         };
 
         Ok((signed, span))
+    }
+
+    fn finish_type_brace_annotation(
+        &mut self,
+        type_span: Span,
+    ) -> Result<TypeAnnotation, VerseError> {
+        if matches!(self.peek_kind(), TokenKind::Ident(name) if name == "_") {
+            self.finish_function_type(type_span)
+        } else {
+            self.finish_where_type_annotation(type_span)
+        }
+    }
+
+    fn is_where_type_literal_start(&self) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(_))
+            && matches!(self.kind_at(self.current + 1), Some(TokenKind::Colon))
+    }
+
+    fn finish_where_type_annotation(
+        &mut self,
+        type_span: Span,
+    ) -> Result<TypeAnnotation, VerseError> {
+        let (variable, _) = self.consume_ident("expected constrained type variable")?;
+        self.consume_colon("expected `:` after constrained type variable")?;
+        let base = self.consume_type_name("expected constrained type base")?;
+        if !matches!(self.peek_kind(), TokenKind::Ident(name) if name == "where") {
+            return Err(self.error_at_current("expected `where` in constrained type literal"));
+        }
+        self.advance();
+
+        match base.name {
+            TypeName::Int => self.finish_int_where_type_annotation(type_span, &variable),
+            TypeName::Float => self.finish_float_where_type_annotation(type_span, &variable),
+            _ => Err(VerseError::parse(
+                "constrained `where` type literals currently support only `int` or `float`",
+                base.span,
+            )),
+        }
+    }
+
+    fn finish_int_where_type_annotation(
+        &mut self,
+        type_span: Span,
+        variable: &str,
+    ) -> Result<TypeAnnotation, VerseError> {
+        let mut min = i64::MIN;
+        let mut max = i64::MAX;
+        loop {
+            self.skip_separators();
+            if self.check_rbrace() {
+                return Err(self.error_at_current("expected comparison after `where`"));
+            }
+
+            let (op, bound, bound_span) = self.consume_int_where_clause(&variable)?;
+            Self::update_int_where_bounds(&mut min, &mut max, op, bound, bound_span)?;
+
+            self.skip_separators();
+            if self.match_comma() {
+                continue;
+            }
+
+            let close_span = self.consume_rbrace("expected `}` after constrained type literal")?;
+            if min > max {
+                return Err(VerseError::parse(
+                    "where type range is empty",
+                    type_span.through(close_span),
+                ));
+            }
+            return Ok(TypeAnnotation {
+                name: TypeName::IntRange { min, max },
+                span: type_span.through(close_span),
+            });
+        }
+    }
+
+    fn finish_float_where_type_annotation(
+        &mut self,
+        type_span: Span,
+        variable: &str,
+    ) -> Result<TypeAnnotation, VerseError> {
+        let mut min = f64::NEG_INFINITY;
+        let mut max = f64::INFINITY;
+        loop {
+            self.skip_separators();
+            if self.check_rbrace() {
+                return Err(self.error_at_current("expected comparison after `where`"));
+            }
+
+            let (op, bound, bound_span) = self.consume_float_where_clause(&variable)?;
+            Self::update_float_where_bounds(&mut min, &mut max, op, bound, bound_span)?;
+
+            self.skip_separators();
+            if self.match_comma() {
+                continue;
+            }
+
+            let close_span = self.consume_rbrace("expected `}` after constrained type literal")?;
+            let Some(range) = FloatRange::new(min, max) else {
+                return Err(VerseError::parse(
+                    "where type range is empty",
+                    type_span.through(close_span),
+                ));
+            };
+            return Ok(TypeAnnotation {
+                name: TypeName::FloatRange(range),
+                span: type_span.through(close_span),
+            });
+        }
+    }
+
+    fn consume_int_where_clause(
+        &mut self,
+        variable: &str,
+    ) -> Result<(BinaryOp, i64, Span), VerseError> {
+        if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            self.consume_where_variable(variable)?;
+            let op = self.consume_where_comparison_op()?;
+            let (bound, bound_span) =
+                self.consume_int_range_bound("expected integer literal bound in `where` clause")?;
+            return Ok((op, bound, bound_span));
+        }
+
+        let (bound, bound_span) =
+            self.consume_int_range_bound("expected `where` comparison with integer literal bound")?;
+        let op = flip_where_comparison_op(self.consume_where_comparison_op()?);
+        self.consume_where_variable(variable)?;
+        Ok((op, bound, bound_span))
+    }
+
+    fn consume_float_where_clause(
+        &mut self,
+        variable: &str,
+    ) -> Result<(BinaryOp, f64, Span), VerseError> {
+        if matches!(self.peek_kind(), TokenKind::Ident(name) if name == variable) {
+            self.consume_where_variable(variable)?;
+            let op = self.consume_where_comparison_op()?;
+            let (bound, bound_span) =
+                self.consume_float_where_bound("expected float literal bound in `where` clause")?;
+            return Ok((op, bound, bound_span));
+        }
+
+        let (bound, bound_span) =
+            self.consume_float_where_bound("expected `where` comparison with float literal bound")?;
+        let op = flip_where_comparison_op(self.consume_where_comparison_op()?);
+        self.consume_where_variable(variable)?;
+        Ok((op, bound, bound_span))
+    }
+
+    fn consume_float_where_bound(&mut self, message: &str) -> Result<(f64, Span), VerseError> {
+        let minus_span = self.match_minus().then(|| self.previous_span());
+        let token = self.advance().clone();
+        let (value, span) = match token.kind {
+            TokenKind::Number { value, .. } => {
+                let value = match value {
+                    NumberLiteral::Int(value) => value as f64,
+                    NumberLiteral::Float(value) => value,
+                };
+                let span = minus_span
+                    .map(|minus_span| minus_span.through(token.span))
+                    .unwrap_or(token.span);
+                (value, span)
+            }
+            TokenKind::Ident(name) if name == "Inf" => {
+                let span = minus_span
+                    .map(|minus_span| minus_span.through(token.span))
+                    .unwrap_or(token.span);
+                (f64::INFINITY, span)
+            }
+            _ => return Err(VerseError::parse(message, token.span)),
+        };
+        let value = if minus_span.is_some() { -value } else { value };
+        if value.is_nan() {
+            return Err(VerseError::parse(
+                "NaN is not supported as a `where` float bound",
+                span,
+            ));
+        }
+        Ok((value, span))
+    }
+
+    fn consume_where_variable(&mut self, variable: &str) -> Result<Span, VerseError> {
+        let (name, span) = self.consume_ident("expected constrained type variable")?;
+        if name != variable {
+            return Err(VerseError::parse(
+                format!("`where` comparison must reference `{variable}`"),
+                span,
+            ));
+        }
+        Ok(span)
+    }
+
+    fn consume_where_comparison_op(&mut self) -> Result<BinaryOp, VerseError> {
+        if self.match_less() {
+            Ok(BinaryOp::Less)
+        } else if self.match_less_equal() {
+            Ok(BinaryOp::LessEqual)
+        } else if self.match_greater() {
+            Ok(BinaryOp::Greater)
+        } else if self.match_greater_equal() {
+            Ok(BinaryOp::GreaterEqual)
+        } else {
+            Err(self.error_at_current("expected `<`, `<=`, `>`, or `>=` in `where` clause"))
+        }
+    }
+
+    fn update_int_where_bounds(
+        min: &mut i64,
+        max: &mut i64,
+        op: BinaryOp,
+        bound: i64,
+        bound_span: Span,
+    ) -> Result<(), VerseError> {
+        match op {
+            BinaryOp::Less => {
+                if bound == i64::MIN {
+                    return Err(VerseError::parse(
+                        "int cannot be strictly less than the minimum int64 value",
+                        bound_span,
+                    ));
+                }
+                *max = (*max).min(bound - 1);
+            }
+            BinaryOp::LessEqual => {
+                *max = (*max).min(bound);
+            }
+            BinaryOp::Greater => {
+                if bound == i64::MAX {
+                    return Err(VerseError::parse(
+                        "int cannot be strictly greater than the maximum int64 value",
+                        bound_span,
+                    ));
+                }
+                *min = (*min).max(bound + 1);
+            }
+            BinaryOp::GreaterEqual => {
+                *min = (*min).max(bound);
+            }
+            _ => unreachable!("where comparison op should be normalized before bounds update"),
+        }
+        Ok(())
+    }
+
+    fn update_float_where_bounds(
+        min: &mut f64,
+        max: &mut f64,
+        op: BinaryOp,
+        mut bound: f64,
+        bound_span: Span,
+    ) -> Result<(), VerseError> {
+        match op {
+            BinaryOp::Less => {
+                if bound == f64::NEG_INFINITY {
+                    return Err(VerseError::parse(
+                        "float cannot be strictly less than negative infinity",
+                        bound_span,
+                    ));
+                }
+                bound = if bound == f64::INFINITY {
+                    f64::MAX
+                } else {
+                    next_float_down(if bound != 0.0 { bound } else { -0.0 })
+                };
+                *max = (*max).min(bound);
+            }
+            BinaryOp::LessEqual => {
+                *max = (*max).min(bound);
+            }
+            BinaryOp::Greater => {
+                if bound == f64::INFINITY {
+                    return Err(VerseError::parse(
+                        "float cannot be strictly greater than infinity",
+                        bound_span,
+                    ));
+                }
+                bound = if bound == f64::NEG_INFINITY {
+                    -f64::MAX
+                } else {
+                    next_float_up(if bound != 0.0 { bound } else { 0.0 })
+                };
+                *min = (*min).max(bound);
+            }
+            BinaryOp::GreaterEqual => {
+                *min = (*min).max(bound);
+            }
+            _ => unreachable!("where comparison op should be normalized before bounds update"),
+        }
+        Ok(())
     }
 
     fn finish_parametric_type_args(&mut self) -> Result<(Vec<TypeName>, Span), VerseError> {
@@ -3753,18 +4144,22 @@ impl Parser {
         }
 
         let receiver_type_end = self.skip_type_name_at(self.current + 3);
+        let Some(receiver_close_index) = self.skip_optional_where_type_params_at(receiver_type_end)
+        else {
+            return false;
+        };
         if receiver_type_end == self.current + 3
-            || !matches!(self.kind_at(receiver_type_end), Some(TokenKind::RParen))
-            || !matches!(self.kind_at(receiver_type_end + 1), Some(TokenKind::Dot))
+            || !matches!(self.kind_at(receiver_close_index), Some(TokenKind::RParen))
+            || !matches!(self.kind_at(receiver_close_index + 1), Some(TokenKind::Dot))
             || !matches!(
-                self.kind_at(receiver_type_end + 2),
+                self.kind_at(receiver_close_index + 2),
                 Some(TokenKind::Ident(_))
             )
         {
             return false;
         }
 
-        let open_index = self.skip_specifiers_at(receiver_type_end + 3);
+        let open_index = self.skip_specifiers_at(receiver_close_index + 3);
         if !matches!(self.kind_at(open_index), Some(TokenKind::LParen)) {
             return false;
         }
@@ -3775,6 +4170,69 @@ impl Parser {
         let index = self.skip_effect_specifiers_at(close_index + 1);
         let index = self.skip_optional_type_annotation_at(index);
         self.is_definition_operator_at(index)
+    }
+
+    fn skip_optional_where_type_params_at(&self, index: usize) -> Option<usize> {
+        if !matches!(self.kind_at(index), Some(TokenKind::Ident(name)) if name == "where") {
+            return Some(index);
+        }
+
+        self.skip_type_param_constraints_at(index + 1)
+    }
+
+    fn skip_type_param_constraints_at(&self, mut index: usize) -> Option<usize> {
+        loop {
+            if !matches!(self.kind_at(index), Some(TokenKind::Ident(_))) {
+                return None;
+            }
+            index += 1;
+            while matches!(self.kind_at(index), Some(TokenKind::Ampersand)) {
+                index += 1;
+                if !matches!(self.kind_at(index), Some(TokenKind::Ident(_))) {
+                    return None;
+                }
+                index += 1;
+            }
+            if !matches!(self.kind_at(index), Some(TokenKind::Colon)) {
+                return None;
+            }
+            index += 1;
+            let Some(TokenKind::Ident(constraint)) = self.kind_at(index) else {
+                return None;
+            };
+            index += 1;
+            match constraint.as_str() {
+                "type" => {
+                    if matches!(self.kind_at(index), Some(TokenKind::LParen)) {
+                        index = self.skip_type_bounds_args_at(index)?;
+                    }
+                }
+                "subtype"
+                | "castable_subtype"
+                | "concrete_subtype"
+                | "castable_concrete_subtype" => {
+                    if !matches!(self.kind_at(index), Some(TokenKind::LParen)) {
+                        return None;
+                    }
+                    index += 1;
+                    let type_end = self.skip_type_name_at(index);
+                    if type_end == index {
+                        return None;
+                    }
+                    index = type_end;
+                    if !matches!(self.kind_at(index), Some(TokenKind::RParen)) {
+                        return None;
+                    }
+                    index += 1;
+                }
+                _ => return None,
+            }
+            if matches!(self.kind_at(index), Some(TokenKind::Comma)) {
+                index += 1;
+                continue;
+            }
+            return Some(index);
+        }
     }
 
     fn is_class_method(&self) -> bool {
@@ -3906,38 +4364,27 @@ impl Parser {
             return false;
         }
         let body_start = self.skip_separators_at(after_params + 1);
-        matches!(
+        if matches!(
             self.kind_at(body_start),
             Some(TokenKind::Ident(name)) if matches!(name.as_str(), "class" | "struct" | "interface")
-        )
+        ) {
+            return true;
+        }
+        let body_end = self.skip_type_name_at(body_start);
+        body_end != body_start && self.is_statement_boundary_at(body_end)
     }
 
     fn skip_type_parameter_list_at(&self, open_index: usize) -> Option<usize> {
-        let mut index = open_index + 1;
+        let index = open_index + 1;
         if matches!(self.kind_at(index), Some(TokenKind::RParen)) {
             return None;
         }
 
-        loop {
-            if !matches!(self.kind_at(index), Some(TokenKind::Ident(_))) {
-                return None;
-            }
-            if !matches!(self.kind_at(index + 1), Some(TokenKind::Colon)) {
-                return None;
-            }
-            if !matches!(self.kind_at(index + 2), Some(TokenKind::Ident(name)) if name == "type") {
-                return None;
-            }
-            index += 3;
-            if matches!(self.kind_at(index), Some(TokenKind::Comma)) {
-                index += 1;
-                continue;
-            }
-            if matches!(self.kind_at(index), Some(TokenKind::RParen)) {
-                return Some(index + 1);
-            }
-            return None;
+        let index = self.skip_type_param_constraints_at(index)?;
+        if matches!(self.kind_at(index), Some(TokenKind::RParen)) {
+            return Some(index + 1);
         }
+        None
     }
 
     fn is_type_alias_target_start_at(&self, index: usize) -> bool {
@@ -3954,7 +4401,10 @@ impl Parser {
                 matches!(self.kind_at(index + 1), Some(TokenKind::LParen))
             }
             Some(TokenKind::Ident(name)) if name == "type" => {
-                matches!(self.kind_at(index + 1), Some(TokenKind::LBrace))
+                matches!(
+                    self.kind_at(index + 1),
+                    Some(TokenKind::LBrace | TokenKind::LParen)
+                )
             }
             _ => false,
         }
@@ -4269,6 +4719,12 @@ impl Parser {
             return close_index + 1;
         }
 
+        if matches!(self.kind_at(index), Some(TokenKind::Ident(name)) if name == "type")
+            && let Some(end) = self.skip_type_bounds_args_at(index + 1)
+        {
+            return end;
+        }
+
         let mut end = index + 1;
         while matches!(self.kind_at(end), Some(TokenKind::Dot))
             && matches!(self.kind_at(end + 1), Some(TokenKind::Ident(_)))
@@ -4277,6 +4733,32 @@ impl Parser {
         }
 
         self.skip_parametric_type_args_after_name_at(end)
+    }
+
+    fn skip_type_bounds_args_at(&self, open_index: usize) -> Option<usize> {
+        if !matches!(self.kind_at(open_index), Some(TokenKind::LParen)) {
+            return None;
+        }
+
+        let lower_start = open_index + 1;
+        if !self.is_type_name_at(lower_start) {
+            return None;
+        }
+        let lower_end = self.skip_type_name_at(lower_start);
+        if lower_end == lower_start || !matches!(self.kind_at(lower_end), Some(TokenKind::Comma)) {
+            return None;
+        }
+
+        let upper_start = lower_end + 1;
+        if !self.is_type_name_at(upper_start) {
+            return None;
+        }
+        let upper_end = self.skip_type_name_at(upper_start);
+        if upper_end == upper_start || !matches!(self.kind_at(upper_end), Some(TokenKind::RParen)) {
+            return None;
+        }
+
+        Some(upper_end + 1)
     }
 
     fn skip_int_range_bound_at(&self, index: usize) -> Option<usize> {
@@ -4747,6 +5229,46 @@ impl Parser {
     }
 }
 
+fn flip_where_comparison_op(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Less => BinaryOp::Greater,
+        BinaryOp::LessEqual => BinaryOp::GreaterEqual,
+        BinaryOp::Greater => BinaryOp::Less,
+        BinaryOp::GreaterEqual => BinaryOp::LessEqual,
+        _ => unreachable!("where comparison op should be a range comparison"),
+    }
+}
+
+fn next_float_up(value: f64) -> f64 {
+    if value.is_nan() || value == f64::INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    if value > 0.0 {
+        f64::from_bits(bits + 1)
+    } else {
+        f64::from_bits(bits - 1)
+    }
+}
+
+fn next_float_down(value: f64) -> f64 {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(0x8000_0000_0000_0001);
+    }
+    let bits = value.to_bits();
+    if value > 0.0 {
+        f64::from_bits(bits - 1)
+    } else {
+        f64::from_bits(bits + 1)
+    }
+}
+
 fn collect_scoped_access_level_definitions(tokens: &[Token]) -> HashMap<String, Vec<String>> {
     let mut definitions = HashMap::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -5127,7 +5649,16 @@ fn is_builtin_type_alias_target_name(name: &str) -> bool {
     matches!(
         name,
         "number"
+            | "nat"
+            | "nat8"
+            | "nat16"
+            | "nat32"
+            | "nat64"
             | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
             | "float"
             | "rational"
             | "bool"
@@ -5151,6 +5682,9 @@ fn is_builtin_type_alias_target_name(name: &str) -> bool {
             | "agent"
             | "team"
             | "event"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
             | "task"
             | "generator"
             | "subtype"
@@ -5158,9 +5692,13 @@ fn is_builtin_type_alias_target_name(name: &str) -> bool {
             | "concrete_subtype"
             | "castable_concrete_subtype"
             | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
             | "modifier"
             | "modifier_stack"
             | "result"
+            | "success_result"
+            | "error_result"
             | "awaitable"
             | "signalable"
             | "listenable"
@@ -5194,6 +5732,7 @@ fn stmt_consumed_trailing_separator(statement: &Stmt) -> bool {
             .is_some_and(expr_consumed_trailing_separator),
         StmtKind::ScopedAccessLevel { .. } => false,
         StmtKind::TypeAlias { .. } => false,
+        StmtKind::ParametricTypeAlias { .. } => false,
         StmtKind::Using { .. } => false,
         StmtKind::Break => false,
         StmtKind::Defer(expr) => expr_consumed_trailing_separator(expr),
@@ -5260,7 +5799,7 @@ fn is_archetype_callee(expr: &Expr) -> bool {
         ExprKind::Member { object, .. } => is_archetype_callee(object),
         ExprKind::Call { callee, args } => {
             if args.is_empty() {
-                return is_named_type_constructor(callee, "event");
+                return is_zero_arg_type_constructor(callee);
             }
             is_type_constructor_callee(callee)
                 && args.iter().all(|arg| {
@@ -5300,13 +5839,13 @@ fn is_type_argument_expr(expr: &Expr) -> bool {
     }
 }
 
-fn is_named_type_constructor(expr: &Expr, expected: &str) -> bool {
-    matches!(&expr.kind, ExprKind::Ident(name) if name == expected)
-}
-
 fn is_zero_arg_type_constructor(expr: &Expr) -> bool {
     matches!(
         &expr.kind,
-        ExprKind::Ident(name) if matches!(name.as_str(), "event" | "generator" | "subscribable")
+            ExprKind::Ident(name)
+                if matches!(
+                    name.as_str(),
+                    "event" | "generator" | "subscribable" | "sticky_event"
+                )
     )
 }

@@ -817,16 +817,28 @@ impl Checker {
             | Type::Option(item)
             | Type::Generator(Some(item))
             | Type::Task(item)
+            | Type::TypeValueOf(item)
             | Type::Subtype(item)
             | Type::CastableSubtype(item)
             | Type::ConcreteSubtype(item)
             | Type::ClassifiableSubset(item)
+            | Type::ClassifiableSubsetKey(item)
+            | Type::ClassifiableSubsetVar(item)
             | Type::Modifier(item)
             | Type::ModifierStack(item)
             | Type::Awaitable(Some(item))
+            | Type::SubscribableEvent(item)
+            | Type::SubscribableEventIntrnl(Some(item))
+            | Type::StickyEvent(Some(item))
             | Type::Signalable(item)
             | Type::Subscribable(Some(item))
             | Type::Listenable(Some(item)) => self.non_native_aggregate_in_type(item, context),
+            Type::TypeValueBounds { lower, upper } => self
+                .non_native_aggregate_in_type(lower, context)
+                .or_else(|| self.non_native_aggregate_in_type(upper, context)),
+            Type::SuccessResult(item) | Type::ErrorResult(item) => {
+                self.non_native_aggregate_in_type(item, context)
+            }
             Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => self
                 .non_native_aggregate_in_type(key, context)
                 .or_else(|| self.non_native_aggregate_in_type(value, context)),
@@ -836,12 +848,15 @@ impl Checker {
             Type::Function { .. }
             | Type::Generator(None)
             | Type::Awaitable(None)
+            | Type::SubscribableEventIntrnl(None)
+            | Type::StickyEvent(None)
             | Type::Subscribable(None)
             | Type::Listenable(None)
             | Type::Event(_)
             | Type::Int
             | Type::IntRange(_)
             | Type::Float
+            | Type::FloatRange(_)
             | Type::Rational
             | Type::Number
             | Type::Bool
@@ -1769,7 +1784,19 @@ impl Checker {
                 extension.receiver.span,
             ));
         };
-        self.type_name_to_type(annotation)
+        self.validate_type_parameter_constraints(
+            &extension.receiver.type_params,
+            extension.receiver.span,
+        )?;
+        self.push_type_param_scope(extension.receiver.type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = self.type_name_to_type(annotation);
+        self.pop_type_param_scope();
+        result
     }
 
     pub(super) fn ensure_extension_method_not_conflicting_with_member(
@@ -1840,6 +1867,21 @@ impl Checker {
         result
     }
 
+    pub(super) fn extension_declared_method_type(
+        &mut self,
+        extension: &ExtensionMethod,
+    ) -> Result<Type, VerseError> {
+        self.push_type_param_scope(extension.receiver.type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = self.extension_method_declared_type(&extension.method);
+        self.pop_type_param_scope();
+        result
+    }
+
     pub(super) fn extension_method_type_with_return(
         &mut self,
         method: &ClassMethod,
@@ -1864,6 +1906,22 @@ impl Checker {
                 return_type: Box::new(return_type.clone()),
             })
         })();
+        self.pop_type_param_scope();
+        result
+    }
+
+    pub(super) fn extension_type_with_return(
+        &mut self,
+        extension: &ExtensionMethod,
+        return_type: Type,
+    ) -> Result<Type, VerseError> {
+        self.push_type_param_scope(extension.receiver.type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = self.extension_method_type_with_return(&extension.method, return_type);
         self.pop_type_param_scope();
         result
     }
@@ -2104,8 +2162,7 @@ impl Checker {
             let Type::Function { return_type, .. } = checked_type? else {
                 unreachable!("check_function should always return a function type");
             };
-            let visible_type =
-                self.extension_method_type_with_return(&extension.method, *return_type)?;
+            let visible_type = self.extension_type_with_return(extension, *return_type)?;
             self.update_local_extension_method_type(
                 &extension.method.name,
                 &receiver_type,

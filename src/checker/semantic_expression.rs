@@ -1,3 +1,4 @@
+use super::semantic_function::merge_type_param_lists;
 use super::*;
 
 impl Checker {
@@ -29,7 +30,7 @@ impl Checker {
                 Ok(Type::String)
             }
             ExprKind::None => Ok(Type::None),
-            ExprKind::Ident(name) => self.check_ident(name, expr.span, false),
+            ExprKind::Ident(name) => self.check_ident(name, expr.span, false, false),
             ExprKind::Unary {
                 op: UnaryOp::Not, ..
             } => {
@@ -78,8 +79,12 @@ impl Checker {
                 expr,
             } => self.check_var_expression(name, annotation, expr, false, expr.span),
             ExprKind::TypeLiteral { expr } => {
-                self.check_expr(expr)?;
-                Ok(Type::TypeValue)
+                let value_type = self.check_expr(expr)?;
+                Ok(Type::TypeValueOf(Box::new(value_type)))
+            }
+            ExprKind::TypeAnnotationLiteral { annotation } => {
+                let value_type = self.type_name_to_type(annotation)?;
+                Ok(Type::TypeValueOf(Box::new(value_type)))
             }
             ExprKind::External => Ok(Type::Unknown),
             ExprKind::Case { subject, arms } => self.check_case(subject, arms, expr.span),
@@ -127,10 +132,21 @@ impl Checker {
                 checker.check_function(params, effects, return_type.as_ref(), body)
             }),
             ExprKind::Call { callee, args } => {
+                if let Some(value_type) =
+                    self.check_type_function_value_call(callee, args, expr.span)?
+                {
+                    self.semantic_facts
+                        .record_static_type_function_call(expr.span);
+                    return Ok(value_type);
+                }
+
                 let callee_type = self.check_callee_expr(callee)?;
                 if let Type::ParametricType { name, kind, .. } = &callee_type {
                     let type_args = self.check_parametric_type_call_args(name, args, expr.span)?;
                     let instance = self.instantiate_parametric_type(name, &type_args, expr.span)?;
+                    if *kind == ParametricTypeKind::Alias {
+                        return Ok(Type::TypeValueOf(Box::new(instance)));
+                    }
                     return match (kind, instance) {
                         (ParametricTypeKind::Struct, Type::Struct(name)) => {
                             Ok(Type::StructType(name))
@@ -179,7 +195,16 @@ impl Checker {
                     && is_make_classifiable_subset_function_type(&callee_type)
                 {
                     self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
-                    return self.check_make_classifiable_subset_call(args, &arg_types, expr.span);
+                    return self
+                        .check_make_classifiable_subset_call(args, &arg_types, expr.span, false);
+                }
+
+                if is_make_classifiable_subset_var_callee(callee)
+                    && is_make_classifiable_subset_var_function_type(&callee_type)
+                {
+                    self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
+                    return self
+                        .check_make_classifiable_subset_call(args, &arg_types, expr.span, true);
                 }
 
                 if is_make_result_callee(callee) {
@@ -208,24 +233,32 @@ impl Checker {
                         self.ensure_callable_in_async_context(&effects, expr.span)?;
                         self.ensure_current_function_allows_call_effects(&effects, expr.span)?;
                         let mut return_type = *return_type;
-                        if let Some(inferred) =
-                            infer_function_type_params(param_types.as_deref(), &arg_types)
-                                .filter(|inferred| !inferred.is_empty())
+                        if let Some(inferred) = self
+                            .infer_function_type_params(
+                                param_types.as_deref(),
+                                Some(&return_type),
+                                &arg_types,
+                            )
+                            .filter(|inferred| !inferred.is_empty())
                         {
                             self.ensure_inferred_type_param_constraints(
                                 param_types.as_deref(),
+                                Some(&return_type),
                                 &inferred,
                                 expr.span,
                             )?;
                             if let Some(types) = param_types.as_mut() {
                                 for value_type in types {
-                                    *value_type = substitute_type_params(value_type, &inferred);
+                                    *value_type = self.substitute_type_params_runtime(
+                                        value_type, &inferred, expr.span,
+                                    )?;
                                 }
                             }
                             if let Some(specs) = param_specs.as_mut() {
                                 for spec in specs {
-                                    spec.value_type =
-                                        substitute_type_params(&spec.value_type, &inferred);
+                                    *spec = self.substitute_param_spec_runtime(
+                                        spec, &inferred, expr.span,
+                                    )?;
                                 }
                             }
                             return_type = self.substitute_type_params_runtime(
@@ -339,7 +372,7 @@ impl Checker {
                 self.check_failure_expr(expr)
             }
             ExprKind::QualifiedName { qualifier, name } => {
-                self.check_qualified_name(qualifier, name, expr.span, false)
+                self.check_qualified_name(qualifier, name, expr.span, false, false)
             }
             ExprKind::QualifiedMember {
                 object,
@@ -377,7 +410,7 @@ impl Checker {
 
     pub(super) fn check_callee_expr(&mut self, callee: &Expr) -> Result<Type, VerseError> {
         match &callee.kind {
-            ExprKind::Ident(name) => self.check_ident(name, callee.span, true),
+            ExprKind::Ident(name) => self.check_ident(name, callee.span, true, true),
             ExprKind::Member { object, name } => {
                 self.check_member_expr(object, name, callee.span, true)
             }
@@ -387,7 +420,7 @@ impl Checker {
                 name,
             } => self.check_qualified_member_expr(object, qualifier, name, callee.span, true),
             ExprKind::QualifiedName { qualifier, name } => {
-                self.check_qualified_name(qualifier, name, callee.span, true)
+                self.check_qualified_name(qualifier, name, callee.span, true, true)
             }
             _ => self.check_expr(callee),
         }
@@ -395,7 +428,7 @@ impl Checker {
 
     pub(super) fn check_failure_callee_expr(&mut self, callee: &Expr) -> Result<Type, VerseError> {
         match &callee.kind {
-            ExprKind::Ident(name) => self.check_ident(name, callee.span, true),
+            ExprKind::Ident(name) => self.check_ident(name, callee.span, true, true),
             ExprKind::Member { object, name } => {
                 self.check_failure_member_expr(object, name, callee.span, true)
             }
@@ -407,7 +440,7 @@ impl Checker {
                 self.check_failure_qualified_member_expr(object, qualifier, name, callee.span, true)
             }
             ExprKind::QualifiedName { qualifier, name } => {
-                self.check_qualified_name(qualifier, name, callee.span, true)
+                self.check_qualified_name(qualifier, name, callee.span, true, true)
             }
             _ if is_failable_condition_expr(callee) => self.check_failure_expr(callee),
             _ => self.check_expr(callee),
@@ -415,12 +448,26 @@ impl Checker {
     }
 
     pub(super) fn check_ident(
-        &self,
+        &mut self,
         name: &str,
         span: Span,
         allow_overload: bool,
+        _allow_parametric_alias_value: bool,
     ) -> Result<Type, VerseError> {
         let Some(symbol) = self.lookup_accessible(name, span)? else {
+            if let Some(value_type) = self.resolve_type_param(name) {
+                return Ok(Type::TypeValueOf(Box::new(value_type)));
+            }
+            if let Some(alias_name) = self.resolve_type_alias_reference(name, span)? {
+                let value_type = self.resolve_type_alias(&alias_name, &mut Vec::new())?;
+                return Ok(Type::TypeValueOf(Box::new(value_type)));
+            }
+            if is_builtin_class_type_name(name) {
+                return Ok(Type::ClassType(name.to_string()));
+            }
+            if let Some(value_type) = Self::builtin_type_value(name) {
+                return Ok(Type::TypeValueOf(Box::new(value_type)));
+            }
             if let Some(qualified) = self.resolve_parametric_type_reference(name)
                 && let Some(info) = self.parametric_types.get(&qualified)
             {
@@ -446,11 +493,12 @@ impl Checker {
     }
 
     pub(super) fn check_qualified_name(
-        &self,
+        &mut self,
         qualifier: &str,
         name: &str,
         span: Span,
         allow_overload: bool,
+        _allow_parametric_alias_value: bool,
     ) -> Result<Type, VerseError> {
         if qualifier != "super" {
             let Some(module_info) = self.module_types.get(qualifier) else {
@@ -460,6 +508,11 @@ impl Checker {
                 ));
             };
             let Some(value_type) = module_info.members.get(name) else {
+                let qualified = format!("{qualifier}.{name}");
+                if let Some(alias_name) = self.resolve_type_alias_reference(&qualified, span)? {
+                    let value_type = self.resolve_type_alias(&alias_name, &mut Vec::new())?;
+                    return Ok(Type::TypeValueOf(Box::new(value_type)));
+                }
                 return Err(VerseError::check_at(
                     format!("module `{qualifier}` has no member `{name}`"),
                     span,
@@ -654,6 +707,13 @@ impl Checker {
                     self.qualified_extension_member_type(object_type, qualifier, name, span)?
                 {
                     if !allow_overload {
+                        if let Some(return_type) = self.type_value_extension_accessor_return_type(
+                            object_type,
+                            &method_type,
+                            span,
+                        )? {
+                            return Ok(return_type);
+                        }
                         return Err(VerseError::check_at(
                             format!("extension method `({qualifier}:){name}` must be called"),
                             span,
@@ -677,6 +737,13 @@ impl Checker {
                 self.qualified_extension_member_type(object_type, qualifier, name, span)?
             {
                 if !allow_overload {
+                    if let Some(return_type) = self.type_value_extension_accessor_return_type(
+                        object_type,
+                        &method_type,
+                        span,
+                    )? {
+                        return Ok(return_type);
+                    }
                     return Err(VerseError::check_at(
                         format!("extension method `({qualifier}:){name}` must be called"),
                         span,
@@ -859,6 +926,37 @@ impl Checker {
         }
     }
 
+    fn builtin_type_value(name: &str) -> Option<Type> {
+        if let Some(value_type) = builtin_numeric_alias_type(name) {
+            return Some(value_type);
+        }
+
+        match name {
+            "int" => Some(Type::Int),
+            "float" => Some(Type::Float),
+            "rational" => Some(Type::Rational),
+            "number" => Some(Type::Number),
+            "logic" | "bool" => Some(Type::Bool),
+            "string" => Some(Type::String),
+            "message" => Some(Type::Message),
+            "char" => Some(Type::Char),
+            "char8" => Some(Type::Char8),
+            "char32" => Some(Type::Char32),
+            "void" => Some(Type::None),
+            "any" => Some(Type::Any),
+            "comparable" => Some(Type::Comparable),
+            "type" => Some(Type::TypeValue),
+            "function" => Some(Type::Function {
+                arity: None,
+                arity_range: None,
+                effects: Vec::new(),
+                param_types: None,
+                param_specs: None,
+                return_type: Box::new(Type::Unknown),
+            }),
+            _ => None,
+        }
+    }
     pub(super) fn check_set_expression(
         &mut self,
         target: &Expr,
@@ -1236,8 +1334,20 @@ impl Checker {
         return_type: Option<&TypeAnnotation>,
         body: &Expr,
     ) -> Result<Type, VerseError> {
+        self.check_function_with_static_type_params(params, effects, return_type, body, &[])
+    }
+
+    pub(super) fn check_function_with_static_type_params(
+        &mut self,
+        params: &[Param],
+        effects: &[String],
+        return_type: Option<&TypeAnnotation>,
+        body: &Expr,
+        static_type_params: &[TypeParam],
+    ) -> Result<Type, VerseError> {
         validate_function_effect_combination(effects, body.span)?;
-        let type_params = collect_function_type_params(params)?;
+        let type_params =
+            merge_type_param_lists(&collect_function_type_params(params)?, static_type_params)?;
         self.validate_type_parameter_constraints(&type_params, body.span)?;
         self.push_type_param_scope(type_params.iter().map(|param| {
             (
@@ -1246,14 +1356,33 @@ impl Checker {
             )
         }));
         let result = (|| {
+            let (param_types, param_specs, body_param_types) =
+                self.dependent_type_value_param_signature(params, return_type)?;
             let checked_return = self.annotation_to_type(return_type)?;
+            let static_type_body_type = if type_can_be_used_as_type_value(&checked_return)
+                && static_type_function_body_needs_type_value_short_circuit(body)
+            {
+                match self.expr_to_type_name(body) {
+                    Ok(name) => Some(Type::TypeValueOf(Box::new(
+                        self.type_name_to_type_name(&name, body.span)?,
+                    ))),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             self.push_scope();
             self.function_returns.push(checked_return.clone());
             self.function_effects.push(effects.to_vec());
             let body_type = (|| {
-                for param in params {
-                    let param_type = self.annotation_to_type(param.annotation.as_ref())?;
+                for (param, param_type) in params.iter().zip(&body_param_types) {
                     self.define_param_pattern(param, &param_type)?;
+                }
+
+                if let Some(static_type_body_type) = &static_type_body_type {
+                    self.semantic_facts
+                        .record_expression_type(body.span, static_type_body_type.clone());
+                    return Ok(static_type_body_type.clone());
                 }
 
                 if has_effect(effects, "decides") {
@@ -1292,8 +1421,6 @@ impl Checker {
                 ));
             }
 
-            let param_types = self.param_types(params)?;
-            let param_specs = self.param_specs(params)?;
             let function_type = Type::Function {
                 arity: Some(params.len()),
                 arity_range: None,
@@ -1772,6 +1899,28 @@ impl Checker {
                     + self.type_match_score(expected_error, actual_error)?
                     + 1,
             ),
+            (Type::Result(expected_success, _), Type::SuccessResult(actual_success)) => self
+                .type_match_score(expected_success, actual_success)
+                .map(|score| score + 1),
+            (Type::Result(_, expected_error), Type::ErrorResult(actual_error)) => self
+                .type_match_score(expected_error, actual_error)
+                .map(|score| score + 1),
+            (Type::SuccessResult(expected_success), Type::SuccessResult(actual_success))
+            | (Type::ErrorResult(expected_success), Type::ErrorResult(actual_success)) => self
+                .type_match_score(expected_success, actual_success)
+                .map(|score| score + 1),
+            (Type::SuccessResult(expected_success), Type::Result(actual_success, actual_error))
+                if matches!(actual_error.as_ref(), Type::Never) =>
+            {
+                self.type_match_score(expected_success, actual_success)
+                    .map(|score| score + 1)
+            }
+            (Type::ErrorResult(expected_error), Type::Result(actual_success, actual_error))
+                if matches!(actual_success.as_ref(), Type::Never) =>
+            {
+                self.type_match_score(expected_error, actual_error)
+                    .map(|score| score + 1)
+            }
             (Type::Tuple(expected_items), Type::Tuple(actual_items))
                 if expected_items.len() == actual_items.len() =>
             {
@@ -2325,7 +2474,7 @@ impl Checker {
             ));
         }
 
-        let args = official_event_archetype_args(callee)
+        let (name, args) = official_event_archetype_name_and_args(callee)
             .expect("event archetype callee should have been recognized");
         let mut type_args = Vec::with_capacity(args.len());
         for arg in args {
@@ -2339,18 +2488,26 @@ impl Checker {
             type_args.push(self.type_name_to_type_name(&type_name, expr.span)?);
         }
 
-        official_parametric_type("event", &type_args, callee.span)
+        official_parametric_type(name, &type_args, callee.span)
     }
 
     pub(super) fn expr_to_type_name(&self, expr: &Expr) -> Result<TypeName, VerseError> {
         match &expr.kind {
             ExprKind::Ident(name) => Ok(TypeName::parse(name.clone())),
+            ExprKind::TypeAnnotationLiteral { annotation } => Ok(annotation.name.clone()),
+            ExprKind::TypeLiteral { expr } => self.type_literal_expr_to_type_name(expr),
             ExprKind::Member { .. } => expr_to_type_path(expr)
                 .map(TypeName::parse)
                 .ok_or_else(|| VerseError::check_at("expected type argument", expr.span)),
             ExprKind::QualifiedName { qualifier, name } => {
                 Ok(TypeName::Named(format!("{qualifier}.{name}")))
             }
+            ExprKind::Tuple(items) => Ok(TypeName::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.expr_to_type_name(item))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
             ExprKind::Call { callee, args } => {
                 let Some(name) = expr_to_type_path(callee) else {
                     return Err(VerseError::check_at(
@@ -2371,6 +2528,21 @@ impl Checker {
                 }
 
                 match name.as_str() {
+                    "type" => {
+                        if type_args.len() != 2 {
+                            return Err(VerseError::check_at(
+                                format!(
+                                    "`type` bounds former expected 2 type arguments, got {}",
+                                    type_args.len()
+                                ),
+                                expr.span,
+                            ));
+                        }
+                        Ok(TypeName::TypeBounds {
+                            lower: Box::new(type_args[0].clone()),
+                            upper: Box::new(type_args[1].clone()),
+                        })
+                    }
                     "tuple" => {
                         if type_args.len() < 2 {
                             return Err(VerseError::check_at(
@@ -2396,6 +2568,9 @@ impl Checker {
                         ))
                     }
                     "event"
+                    | "subscribable_event"
+                    | "subscribable_event_intrnl"
+                    | "sticky_event"
                     | "task"
                     | "generator"
                     | "subtype"
@@ -2403,9 +2578,13 @@ impl Checker {
                     | "concrete_subtype"
                     | "castable_concrete_subtype"
                     | "classifiable_subset"
+                    | "classifiable_subset_key"
+                    | "classifiable_subset_var"
                     | "modifier"
                     | "modifier_stack"
                     | "result"
+                    | "success_result"
+                    | "error_result"
                     | "awaitable"
                     | "signalable"
                     | "listenable"
@@ -2413,6 +2592,12 @@ impl Checker {
                         name,
                         args: type_args,
                     }),
+                    _ if self.resolve_type_function_reference(&name).is_some() => {
+                        Ok(TypeName::Applied {
+                            name,
+                            args: type_args,
+                        })
+                    }
                     _ if self.resolve_parametric_type_reference(&name).is_some() => {
                         Ok(TypeName::Applied {
                             name,
@@ -2426,6 +2611,201 @@ impl Checker {
                 }
             }
             _ => Err(VerseError::check_at("expected type argument", expr.span)),
+        }
+    }
+
+    fn check_type_function_value_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        let Some(display_name) = expr_to_type_path(callee) else {
+            return Ok(None);
+        };
+        let Some(qualified) = self.resolve_type_function_reference(&display_name) else {
+            return Ok(None);
+        };
+
+        let mut type_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let CallArg::Positional(expr) = arg else {
+                if self.callee_has_non_static_type_function_overload(&qualified, callee) {
+                    return Ok(None);
+                }
+                return Err(VerseError::check_at(
+                    format!("type function `{display_name}` does not accept named type arguments"),
+                    call_arg_expr(arg).span,
+                ));
+            };
+            let Ok(type_name) = self.expr_to_type_name(expr) else {
+                return Ok(None);
+            };
+            type_args.push(self.type_name_to_type_name(&type_name, expr.span)?);
+        }
+
+        match self.instantiate_type_function(&display_name, &qualified, &type_args, span) {
+            Ok(result) => Ok(Some(Type::TypeValueOf(Box::new(result)))),
+            Err(error)
+                if self.non_static_overload_can_handle_type_function_value_call(
+                    &qualified, callee, args, span,
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn non_static_overload_can_handle_type_function_value_call(
+        &self,
+        qualified: &str,
+        callee: &Expr,
+        args: &[CallArg],
+        span: Span,
+    ) -> bool {
+        let mut checker = self.clone();
+        let Ok(callee_type) = checker.check_callee_expr(callee) else {
+            return false;
+        };
+        let Ok(arg_types) = args
+            .iter()
+            .map(|arg| checker.check_expr(call_arg_expr(arg)))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return false;
+        };
+
+        let overloads = match callee_type {
+            Type::Function { .. } => {
+                if self.function_type_is_registered_type_function(qualified, &callee_type) {
+                    return false;
+                }
+                vec![callee_type]
+            }
+            Type::Overload(overloads) => overloads
+                .into_iter()
+                .filter(|overload| {
+                    matches!(overload, Type::Function { .. })
+                        && !self.function_type_is_registered_type_function(qualified, overload)
+                })
+                .collect::<Vec<_>>(),
+            _ => return false,
+        };
+        if overloads.is_empty() {
+            return false;
+        }
+
+        let require_rollback = checker.in_failure_context();
+        checker
+            .check_overloaded_call(&overloads, false, require_rollback, args, &arg_types, span)
+            .is_ok()
+    }
+
+    fn callee_has_non_static_type_function_overload(&self, qualified: &str, callee: &Expr) -> bool {
+        let mut checker = self.clone();
+        match checker.check_callee_expr(callee) {
+            Ok(callee_type @ Type::Function { .. }) => {
+                !self.function_type_is_registered_type_function(qualified, &callee_type)
+            }
+            Ok(Type::Overload(overloads)) => overloads.iter().any(|overload| {
+                matches!(overload, Type::Function { .. })
+                    && !self.function_type_is_registered_type_function(qualified, overload)
+            }),
+            _ => false,
+        }
+    }
+
+    fn function_type_is_registered_type_function(
+        &self,
+        qualified: &str,
+        value_type: &Type,
+    ) -> bool {
+        self.type_functions
+            .get(qualified)
+            .is_some_and(|infos| infos.iter().any(|info| info.signature == *value_type))
+    }
+
+    fn type_literal_expr_to_type_name(&self, expr: &Expr) -> Result<TypeName, VerseError> {
+        match &expr.kind {
+            ExprKind::Number { kind, .. } => match kind {
+                NumberKind::Int => Ok(TypeName::Int),
+                NumberKind::Float => Ok(TypeName::Float),
+            },
+            ExprKind::Unary {
+                op: UnaryOp::Positive | UnaryOp::Negate,
+                expr: inner,
+            } => match self.type_literal_expr_to_type_name(inner)? {
+                TypeName::Int => Ok(TypeName::Int),
+                TypeName::Float => Ok(TypeName::Float),
+                _ => Err(VerseError::check_at(
+                    "static type literal sign can only be applied to a number",
+                    expr.span,
+                )),
+            },
+            ExprKind::Char { kind, .. } => match kind {
+                CharacterKind::Char => Ok(TypeName::Char),
+                CharacterKind::Char32 => Ok(TypeName::Char32),
+            },
+            ExprKind::Bool(_) => Ok(TypeName::Bool),
+            ExprKind::String(_) | ExprKind::InterpolatedString(_) => Ok(TypeName::String),
+            ExprKind::None => Ok(TypeName::None),
+            ExprKind::TypeAnnotationLiteral { annotation } => Ok(annotation.name.clone()),
+            ExprKind::Array(items) => {
+                let mut item_types = items
+                    .iter()
+                    .map(|item| self.type_literal_expr_to_type_name(item));
+                let Some(first) = item_types.next() else {
+                    return Ok(TypeName::Array(None));
+                };
+                let first = first?;
+                if item_types.all(|item| item.is_ok_and(|item| item == first)) {
+                    Ok(TypeName::Array(Some(Box::new(first))))
+                } else {
+                    Err(VerseError::check_at(
+                        "static type literal array elements must have one type",
+                        expr.span,
+                    ))
+                }
+            }
+            ExprKind::Map(entries) => {
+                let Some((first_key, first_value)) = entries.first() else {
+                    return Err(VerseError::check_at(
+                        "static type literal map cannot be empty",
+                        expr.span,
+                    ));
+                };
+                let key_type = self.type_literal_expr_to_type_name(first_key)?;
+                let value_type = self.type_literal_expr_to_type_name(first_value)?;
+                if entries.iter().skip(1).all(|(key, value)| {
+                    self.type_literal_expr_to_type_name(key)
+                        .is_ok_and(|item| item == key_type)
+                        && self
+                            .type_literal_expr_to_type_name(value)
+                            .is_ok_and(|item| item == value_type)
+                }) {
+                    Ok(TypeName::Map(Box::new(key_type), Box::new(value_type)))
+                } else {
+                    Err(VerseError::check_at(
+                        "static type literal map entries must have one key type and one value type",
+                        expr.span,
+                    ))
+                }
+            }
+            ExprKind::Tuple(items) => Ok(TypeName::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.type_literal_expr_to_type_name(item))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            ExprKind::Option(Some(item)) => Ok(TypeName::Option(Box::new(
+                self.type_literal_expr_to_type_name(item)?,
+            ))),
+            ExprKind::Archetype { callee, .. } => self.expr_to_type_name(callee),
+            _ => Err(VerseError::check_at(
+                "static type function cannot use this `type{...}` expression yet",
+                expr.span,
+            )),
         }
     }
 
@@ -2662,6 +3042,7 @@ impl Checker {
             }
             StmtKind::Using { .. }
             | StmtKind::ParametricType { .. }
+            | StmtKind::ParametricTypeAlias { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::ScopedAccessLevel { .. }
             | StmtKind::ExtensionMethod(_)
@@ -2697,6 +3078,7 @@ impl Checker {
             }
             ExprKind::Var { expr, .. } => self.expr_never_completes(expr),
             ExprKind::TypeLiteral { expr } => self.expr_never_completes(expr),
+            ExprKind::TypeAnnotationLiteral { .. } => false,
             ExprKind::For { clauses, .. } => clauses
                 .iter()
                 .any(|clause| self.for_clause_expr_never_completes(clause)),
@@ -2908,7 +3290,14 @@ impl Checker {
             && is_make_classifiable_subset_function_type(&callee_type)
         {
             self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
-            return self.check_make_classifiable_subset_call(args, &arg_types, span);
+            return self.check_make_classifiable_subset_call(args, &arg_types, span, false);
+        }
+
+        if is_make_classifiable_subset_var_callee(callee)
+            && is_make_classifiable_subset_var_function_type(&callee_type)
+        {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
+            return self.check_make_classifiable_subset_call(args, &arg_types, span, true);
         }
 
         if is_make_result_callee(callee) {
@@ -2999,7 +3388,12 @@ impl Checker {
                         callee.span,
                     );
                 }
-                Type::Int | Type::Float | Type::Rational | Type::Number => {
+                Type::Int
+                | Type::IntRange(_)
+                | Type::Float
+                | Type::FloatRange(_)
+                | Type::Rational
+                | Type::Number => {
                     return self.check_number_method(
                         name,
                         &object_type,
@@ -3013,20 +3407,26 @@ impl Checker {
                 | Type::Class(_)
                 | Type::Module(_)
                 | Type::Result(_, _)
+                | Type::SuccessResult(_)
+                | Type::ErrorResult(_)
                 | Type::Event(_)
+                | Type::SubscribableEventIntrnl(_)
+                | Type::StickyEvent(_)
                 | Type::Task(_)
                 | Type::Generator(_)
                 | Type::Subtype(_)
                 | Type::CastableSubtype(_)
                 | Type::ConcreteSubtype(_)
                 | Type::ClassifiableSubset(_)
+                | Type::ClassifiableSubsetVar(_)
                 | Type::Awaitable(_)
                 | Type::Signalable(_)
                 | Type::Subscribable(_)
                 | Type::Listenable(_)
-                | Type::Param(_, TypeParamConstraint::Subtype(_)) => {
-                    checked_arg_types = Some(arg_types)
-                }
+                | Type::Param(
+                    _,
+                    TypeParamConstraint::Subtype(_) | TypeParamConstraint::TypeBounds { .. },
+                ) => checked_arg_types = Some(arg_types),
                 other => {
                     return Err(VerseError::check_at(
                         format!("type `{other}` has no bracket method `{name}`"),
@@ -3084,23 +3484,33 @@ impl Checker {
                 self.ensure_current_function_allows_call_effects(&effects, callee.span)?;
                 let call_args = positional_call_args(args);
                 let mut return_type = *return_type;
-                if let Some(inferred) =
-                    infer_function_type_params(param_types.as_deref(), &arg_types)
-                        .filter(|inferred| !inferred.is_empty())
+                if let Some(inferred) = self
+                    .infer_function_type_params(
+                        param_types.as_deref(),
+                        Some(&return_type),
+                        &arg_types,
+                    )
+                    .filter(|inferred| !inferred.is_empty())
                 {
                     self.ensure_inferred_type_param_constraints(
                         param_types.as_deref(),
+                        Some(&return_type),
                         &inferred,
                         callee.span,
                     )?;
                     if let Some(types) = param_types.as_mut() {
                         for value_type in types {
-                            *value_type = substitute_type_params(value_type, &inferred);
+                            *value_type = self.substitute_type_params_runtime(
+                                value_type,
+                                &inferred,
+                                callee.span,
+                            )?;
                         }
                     }
                     if let Some(specs) = param_specs.as_mut() {
                         for spec in specs {
-                            spec.value_type = substitute_type_params(&spec.value_type, &inferred);
+                            *spec =
+                                self.substitute_param_spec_runtime(spec, &inferred, callee.span)?;
                         }
                     }
                     return_type =
@@ -3129,6 +3539,9 @@ impl Checker {
             }
             Type::ClassType(target) => {
                 self.check_class_cast(&target, args, &arg_types, callee.span)
+            }
+            Type::Subtype(_) | Type::CastableSubtype(_) | Type::ConcreteSubtype(_) => {
+                self.check_type_value_cast(callee, &callee_type, args, &arg_types, callee.span)
             }
             Type::Unknown | Type::Any => Ok(Type::Unknown),
             other => Err(VerseError::check_at(
@@ -3406,6 +3819,11 @@ impl Checker {
         {
             return Ok(range.contains(value));
         }
+        if let Type::FloatRange(range) = expected
+            && let Some(value) = expr_float_literal_value(expr)
+        {
+            return Ok(range.contains(value));
+        }
 
         if is_empty_option_literal(expected, expr) {
             return Ok(true);
@@ -3470,9 +3888,13 @@ impl Checker {
                 && ensure_comparable_key(actual, &self.struct_types, Span::new(0, 0, 0, 0)).is_ok()
             || matches!((expected, actual), (Type::Int, Type::IntRange(_)))
             || matches!((expected, actual), (Type::IntRange(expected), Type::IntRange(actual)) if expected.contains_range(*actual))
+            || matches!((expected, actual), (Type::Float, Type::FloatRange(_)))
+            || matches!((expected, actual), (Type::FloatRange(expected), Type::FloatRange(actual)) if expected.contains_range(*actual))
             || matches!(expected, Type::Number) && is_numeric_type(actual)
             || matches!((expected, actual), (Type::Rational, Type::Int))
             || matches!((expected, actual), (Type::Float, Type::Int))
+            || matches!(expected, Type::TypeValueOf(expected) if self.type_value_instance_is_assignable(expected, actual))
+            || matches!(expected, Type::TypeValueBounds { lower, upper } if self.type_value_satisfies_bounds(lower, upper, actual))
             || matches!(expected, Type::TypeValue) && Self::is_type_value_type(actual)
             || matches!((expected, actual), (Type::Message, Type::String))
             || is_byte_char_type(expected) && is_byte_char_type(actual)
@@ -3529,6 +3951,28 @@ impl Checker {
                     if self.is_assignable(expected_success, actual_success)
                         && self.is_assignable(expected_error, actual_error)
             )
+            || matches!(
+                (expected, actual),
+                (Type::Result(expected_success, _), Type::SuccessResult(actual_success))
+                    if self.is_assignable(expected_success, actual_success)
+            )
+            || matches!(
+                (expected, actual),
+                (Type::Result(_, expected_error), Type::ErrorResult(actual_error))
+                    if self.is_assignable(expected_error, actual_error)
+            )
+            || matches!(
+                (expected, actual),
+                (Type::SuccessResult(expected_success), Type::Result(actual_success, actual_error))
+                    if matches!(actual_error.as_ref(), Type::Never)
+                        && self.is_assignable(expected_success, actual_success)
+            )
+            || matches!(
+                (expected, actual),
+                (Type::ErrorResult(expected_error), Type::Result(actual_success, actual_error))
+                    if matches!(actual_success.as_ref(), Type::Never)
+                        && self.is_assignable(expected_error, actual_error)
+            )
             || self.parametric_builtin_is_assignable(expected, actual)
             || matches!(
                 (expected, actual),
@@ -3550,14 +3994,27 @@ impl Checker {
     pub(super) fn parametric_builtin_is_assignable(&self, expected: &Type, actual: &Type) -> bool {
         match (expected, actual) {
             (Type::Event(expected), Type::Event(actual))
+            | (Type::SubscribableEventIntrnl(expected), Type::SubscribableEventIntrnl(actual))
+            | (Type::StickyEvent(expected), Type::StickyEvent(actual))
             | (Type::Awaitable(expected), Type::Awaitable(actual))
             | (Type::Subscribable(expected), Type::Subscribable(actual))
             | (Type::Listenable(expected), Type::Listenable(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
             }
+            (Type::SubscribableEvent(expected), Type::SubscribableEvent(actual)) => {
+                self.is_assignable(expected, actual)
+            }
             (Type::Task(expected), Type::Task(actual)) => self.is_assignable(expected, actual),
             (Type::Generator(expected), Type::Generator(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
+            }
+            (Type::TypeValueOf(expected), actual) => {
+                self.type_value_instance_is_assignable(expected, actual)
+            }
+            (Type::CastableSubtype(expected), Type::ClassType(actual))
+                if self.classifiable_subset_query_class_value_is_assignable(expected, actual) =>
+            {
+                true
             }
             (Type::Subtype(expected), Type::ClassType(actual)) => {
                 self.class_type_value_satisfies_subtype(actual, expected)
@@ -3576,8 +4033,17 @@ impl Checker {
                 self.subtype_constraint_implies(actual, expected)
             }
             (Type::CastableSubtype(expected), Type::CastableSubtype(actual))
+                if self.classifiable_subset_query_base_is_assignable(expected, actual) =>
+            {
+                true
+            }
+            (Type::CastableSubtype(expected), Type::CastableSubtype(actual))
             | (Type::ConcreteSubtype(expected), Type::ConcreteSubtype(actual))
             | (Type::ClassifiableSubset(expected), Type::ClassifiableSubset(actual))
+            | (Type::ClassifiableSubsetKey(expected), Type::ClassifiableSubsetKey(actual))
+            | (Type::ClassifiableSubsetVar(expected), Type::ClassifiableSubsetVar(actual))
+            | (Type::SuccessResult(expected), Type::SuccessResult(actual))
+            | (Type::ErrorResult(expected), Type::ErrorResult(actual))
             | (Type::Modifier(expected), Type::Modifier(actual))
             | (Type::ModifierStack(expected), Type::ModifierStack(actual)) => {
                 self.is_assignable(expected, actual)
@@ -3591,22 +4057,84 @@ impl Checker {
             (Type::Awaitable(expected), Type::Task(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), Some(actual.as_ref()))
             }
+            (Type::Awaitable(expected), Type::SubscribableEvent(actual))
+            | (Type::SubscribableEventIntrnl(expected), Type::SubscribableEvent(actual))
+            | (Type::Event(expected), Type::SubscribableEvent(actual))
+            | (Type::Listenable(expected), Type::SubscribableEvent(actual)) => {
+                self.optional_payload_is_assignable(expected.as_deref(), Some(actual.as_ref()))
+            }
             (Type::Awaitable(expected), Type::Event(actual))
+            | (Type::Awaitable(expected), Type::SubscribableEventIntrnl(actual))
+            | (Type::Awaitable(expected), Type::StickyEvent(actual))
+            | (Type::Event(expected), Type::SubscribableEventIntrnl(actual))
+            | (Type::Event(expected), Type::StickyEvent(actual))
             | (Type::Awaitable(expected), Type::Listenable(actual))
+            | (Type::Listenable(expected), Type::SubscribableEventIntrnl(actual))
             | (Type::Subscribable(expected), Type::Listenable(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
             }
             (Type::Signalable(expected), Type::Event(actual)) => actual
                 .as_deref()
                 .is_some_and(|actual| self.is_assignable(expected, actual)),
+            (Type::Signalable(expected), Type::SubscribableEvent(actual)) => {
+                self.is_assignable(expected, actual)
+            }
+            (Type::Signalable(expected), Type::SubscribableEventIntrnl(actual)) => actual
+                .as_deref()
+                .is_some_and(|actual| self.is_assignable(expected, actual)),
+            (Type::Signalable(expected), Type::StickyEvent(actual)) => actual
+                .as_deref()
+                .is_some_and(|actual| self.is_assignable(expected, actual)),
+            (Type::Subscribable(expected), Type::SubscribableEvent(actual)) => {
+                self.optional_payload_is_assignable(expected.as_deref(), Some(actual.as_ref()))
+            }
+            (Type::Subscribable(expected), Type::SubscribableEventIntrnl(actual)) => {
+                self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
+            }
             _ => false,
         }
+    }
+
+    fn type_value_instance_is_assignable(&self, expected: &Type, actual: &Type) -> bool {
+        let Some(actual) = type_value_instance_type(actual) else {
+            return false;
+        };
+        self.is_assignable(expected, &actual)
+    }
+
+    fn type_value_satisfies_bounds(&self, lower: &Type, upper: &Type, actual: &Type) -> bool {
+        let Some(actual) = type_value_instance_type(actual) else {
+            return false;
+        };
+        self.is_assignable(upper, &actual) && self.is_assignable(&actual, lower)
+    }
+
+    fn classifiable_subset_query_base_is_assignable(&self, expected: &Type, actual: &Type) -> bool {
+        let Type::TypeValueBounds { lower, upper } = expected else {
+            return false;
+        };
+        self.is_assignable(upper, actual)
+            && (self.is_assignable(actual, lower) || self.is_assignable(lower, actual))
+    }
+
+    fn classifiable_subset_query_class_value_is_assignable(
+        &self,
+        expected: &Type,
+        actual: &str,
+    ) -> bool {
+        self.class_type_value_is_castable_subtype(actual, &Type::Any)
+            && self.classifiable_subset_query_base_is_assignable(
+                expected,
+                &Type::Class(actual.to_string()),
+            )
     }
 
     fn is_type_value_type(actual: &Type) -> bool {
         matches!(
             actual,
-            Type::StructType(_)
+            Type::TypeValueOf(_)
+                | Type::TypeValueBounds { .. }
+                | Type::StructType(_)
                 | Type::ClassType(_)
                 | Type::InterfaceType(_)
                 | Type::ParametricType { .. }
@@ -3694,6 +4222,7 @@ impl Checker {
             Type::Int
             | Type::IntRange(_)
             | Type::Float
+            | Type::FloatRange(_)
             | Type::Rational
             | Type::Number
             | Type::Bool
@@ -3719,6 +4248,8 @@ impl Checker {
             Type::Any
             | Type::Comparable
             | Type::TypeValue
+            | Type::TypeValueOf(_)
+            | Type::TypeValueBounds { .. }
             | Type::Unknown
             | Type::Never
             | Type::Range
@@ -3732,13 +4263,20 @@ impl Checker {
             | Type::ParametricType { .. }
             | Type::WeakMap(_, _)
             | Type::Result(_, _)
+            | Type::SuccessResult(_)
+            | Type::ErrorResult(_)
             | Type::Event(_)
+            | Type::SubscribableEvent(_)
+            | Type::SubscribableEventIntrnl(_)
+            | Type::StickyEvent(_)
             | Type::Task(_)
             | Type::Generator(_)
             | Type::Subtype(_)
             | Type::CastableSubtype(_)
             | Type::ConcreteSubtype(_)
             | Type::ClassifiableSubset(_)
+            | Type::ClassifiableSubsetKey(_)
+            | Type::ClassifiableSubsetVar(_)
             | Type::Modifier(_)
             | Type::ModifierStack(_)
             | Type::Awaitable(_)
@@ -3752,7 +4290,7 @@ impl Checker {
 
     pub(super) fn is_predicts_var_data_type(&self, value_type: &Type) -> bool {
         match value_type {
-            Type::Int | Type::IntRange(_) | Type::Float | Type::Bool => true,
+            Type::Int | Type::IntRange(_) | Type::Float | Type::FloatRange(_) | Type::Bool => true,
             Type::Option(item) | Type::Array(item) => self.is_predicts_var_data_type(item),
             Type::Map(key, value) => {
                 self.is_predicts_var_data_type(key) && self.is_predicts_var_data_type(value)
@@ -3773,6 +4311,8 @@ impl Checker {
             | Type::Any
             | Type::Comparable
             | Type::TypeValue
+            | Type::TypeValueOf(_)
+            | Type::TypeValueBounds { .. }
             | Type::Unknown
             | Type::Never
             | Type::Range
@@ -3788,13 +4328,20 @@ impl Checker {
             | Type::WeakMap(_, _)
             | Type::Tuple(_)
             | Type::Result(_, _)
+            | Type::SuccessResult(_)
+            | Type::ErrorResult(_)
             | Type::Event(_)
+            | Type::SubscribableEvent(_)
+            | Type::SubscribableEventIntrnl(_)
+            | Type::StickyEvent(_)
             | Type::Task(_)
             | Type::Generator(_)
             | Type::Subtype(_)
             | Type::CastableSubtype(_)
             | Type::ConcreteSubtype(_)
             | Type::ClassifiableSubset(_)
+            | Type::ClassifiableSubsetKey(_)
+            | Type::ClassifiableSubsetVar(_)
             | Type::Modifier(_)
             | Type::ModifierStack(_)
             | Type::Awaitable(_)
@@ -3946,7 +4493,10 @@ impl Checker {
         span: Span,
     ) -> Result<Type, VerseError> {
         ensure_exact_arg_count("class cast", args, 1, span)?;
-        match &arg_types[0] {
+        let actual_type = self
+            .constrained_type_param_supertype_for_assignability(&arg_types[0])
+            .unwrap_or_else(|| arg_types[0].clone());
+        match &actual_type {
             Type::Class(source) if self.classes_are_cast_related(target, source) => {
                 Ok(Type::Class(target.to_string()))
             }
@@ -3959,6 +4509,82 @@ impl Checker {
                 format!("class cast expected class instance, got `{other}`"),
                 args[0].span,
             )),
+        }
+    }
+
+    fn check_type_value_cast(
+        &self,
+        callee: &Expr,
+        callee_type: &Type,
+        args: &[Expr],
+        arg_types: &[Type],
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        ensure_exact_arg_count("type value cast", args, 1, span)?;
+        let target = self.type_value_cast_target(callee, callee_type);
+        let Some(bound) = self.type_value_cast_bound(&target) else {
+            return Err(VerseError::check_at(
+                format!("type value cast target `{target}` is not a class type"),
+                callee.span,
+            ));
+        };
+
+        let actual_type = self
+            .constrained_type_param_supertype_for_assignability(&arg_types[0])
+            .unwrap_or_else(|| arg_types[0].clone());
+        match (&actual_type, bound) {
+            (Type::Class(source), Type::Class(bound))
+                if self.classes_are_cast_related(&bound, source) =>
+            {
+                Ok(target)
+            }
+            (Type::Class(_), Type::Any | Type::Unknown) => Ok(target),
+            (Type::Class(source), Type::Class(bound)) => Err(VerseError::check_at(
+                format!("cannot cast class `{source}` to unrelated class `{bound}`"),
+                args[0].span,
+            )),
+            (Type::Unknown | Type::Any, _) => Ok(target),
+            (other, _) => Err(VerseError::check_at(
+                format!("type value cast expected class instance, got `{other}`"),
+                args[0].span,
+            )),
+        }
+    }
+
+    fn type_value_cast_target(&self, callee: &Expr, callee_type: &Type) -> Type {
+        if let ExprKind::Ident(name) = &callee.kind
+            && let Some(
+                target @ Type::Param(
+                    _,
+                    TypeParamConstraint::Subtype(_) | TypeParamConstraint::TypeBounds { .. },
+                ),
+            ) = self.resolve_type_param(name)
+        {
+            return target;
+        }
+
+        match callee_type {
+            Type::Subtype(item) | Type::CastableSubtype(item) | Type::ConcreteSubtype(item) => {
+                item.as_ref().clone()
+            }
+            other => other.clone(),
+        }
+    }
+
+    fn type_value_cast_bound(&self, value_type: &Type) -> Option<Type> {
+        match value_type {
+            Type::Class(name) => Some(Type::Class(name.clone())),
+            Type::Any | Type::Unknown => Some(value_type.clone()),
+            Type::Param(_, TypeParamConstraint::Subtype(parent)) => self
+                .type_name_to_type_name_for_assignability(parent)
+                .and_then(|parent| self.type_value_cast_bound(&parent)),
+            Type::Param(_, TypeParamConstraint::TypeBounds { upper, .. }) => self
+                .type_name_to_type_name_for_assignability(upper)
+                .and_then(|parent| self.type_value_cast_bound(&parent)),
+            Type::Subtype(item) | Type::CastableSubtype(item) | Type::ConcreteSubtype(item) => {
+                self.type_value_cast_bound(item)
+            }
+            _ => None,
         }
     }
 
@@ -4039,28 +4665,38 @@ impl Checker {
         args: &[CallArg],
         arg_types: &[Type],
         span: Span,
+        as_var: bool,
     ) -> Result<Type, VerseError> {
+        let function_name = if as_var {
+            "MakeClassifiableSubsetVar"
+        } else {
+            "MakeClassifiableSubset"
+        };
         if args.len() != 1 {
             return Err(VerseError::check_at(
-                format!(
-                    "`MakeClassifiableSubset` expected 1 arguments, got {}",
-                    args.len()
-                ),
+                format!("`{function_name}` expected 1 arguments, got {}", args.len()),
                 span,
             ));
         }
         if args[0].is_named() {
             return Err(VerseError::check_at(
-                "`MakeClassifiableSubset` does not accept named arguments",
+                format!("`{function_name}` does not accept named arguments"),
                 span,
             ));
         }
 
+        let wrap = |item_type| {
+            if as_var {
+                Type::ClassifiableSubsetVar(Box::new(item_type))
+            } else {
+                Type::ClassifiableSubset(Box::new(item_type))
+            }
+        };
         match &arg_types[0] {
-            Type::Array(item_type) => Ok(Type::ClassifiableSubset(Box::new(
-                classifiable_subset_element_type(item_type.as_ref()),
-            ))),
-            Type::Unknown | Type::Any => Ok(Type::ClassifiableSubset(Box::new(Type::Unknown))),
+            Type::Array(item_type) => {
+                Ok(wrap(classifiable_subset_element_type(item_type.as_ref())))
+            }
+            Type::Unknown | Type::Any => Ok(wrap(Type::Unknown)),
             other => Err(VerseError::check_at(
                 format!("argument 1 expected `array`, got `{other}`"),
                 call_arg_expr(&args[0]).span,
@@ -4141,7 +4777,12 @@ impl Checker {
                         Err(_) => checked_arg_types = Some(arg_types),
                     }
                 }
-                Type::Int | Type::Float | Type::Rational | Type::Number => {
+                Type::Int
+                | Type::IntRange(_)
+                | Type::Float
+                | Type::FloatRange(_)
+                | Type::Rational
+                | Type::Number => {
                     match self.check_number_method(
                         name,
                         &object_type,
@@ -4162,20 +4803,26 @@ impl Checker {
                 | Type::Class(_)
                 | Type::Module(_)
                 | Type::Result(_, _)
+                | Type::SuccessResult(_)
+                | Type::ErrorResult(_)
                 | Type::Event(_)
+                | Type::SubscribableEventIntrnl(_)
+                | Type::StickyEvent(_)
                 | Type::Task(_)
                 | Type::Generator(_)
                 | Type::Subtype(_)
                 | Type::CastableSubtype(_)
                 | Type::ConcreteSubtype(_)
                 | Type::ClassifiableSubset(_)
+                | Type::ClassifiableSubsetVar(_)
                 | Type::Awaitable(_)
                 | Type::Signalable(_)
                 | Type::Subscribable(_)
                 | Type::Listenable(_)
-                | Type::Param(_, TypeParamConstraint::Subtype(_)) => {
-                    checked_arg_types = Some(arg_types)
-                }
+                | Type::Param(
+                    _,
+                    TypeParamConstraint::Subtype(_) | TypeParamConstraint::TypeBounds { .. },
+                ) => checked_arg_types = Some(arg_types),
                 other => {
                     if extension_type.is_some() {
                         checked_arg_types = Some(arg_types);
@@ -4245,23 +4892,33 @@ impl Checker {
                 self.ensure_current_function_allows_call_effects(&effects, callee.span)?;
                 let call_args = positional_call_args(args);
                 let mut return_type = *return_type;
-                if let Some(inferred) =
-                    infer_function_type_params(param_types.as_deref(), &arg_types)
-                        .filter(|inferred| !inferred.is_empty())
+                if let Some(inferred) = self
+                    .infer_function_type_params(
+                        param_types.as_deref(),
+                        Some(&return_type),
+                        &arg_types,
+                    )
+                    .filter(|inferred| !inferred.is_empty())
                 {
                     self.ensure_inferred_type_param_constraints(
                         param_types.as_deref(),
+                        Some(&return_type),
                         &inferred,
                         callee.span,
                     )?;
                     if let Some(types) = param_types.as_mut() {
                         for value_type in types {
-                            *value_type = substitute_type_params(value_type, &inferred);
+                            *value_type = self.substitute_type_params_runtime(
+                                value_type,
+                                &inferred,
+                                callee.span,
+                            )?;
                         }
                     }
                     if let Some(specs) = param_specs.as_mut() {
                         for spec in specs {
-                            spec.value_type = substitute_type_params(&spec.value_type, &inferred);
+                            *spec =
+                                self.substitute_param_spec_runtime(spec, &inferred, callee.span)?;
                         }
                     }
                     return_type =
@@ -4293,6 +4950,17 @@ impl Checker {
             }
             Type::ClassType(target) => {
                 let value_type = self.check_class_cast(&target, args, &arg_types, callee.span)?;
+                self.ensure_failable_expression_allowed(call.span)?;
+                Ok(value_type)
+            }
+            Type::Subtype(_) | Type::CastableSubtype(_) | Type::ConcreteSubtype(_) => {
+                let value_type = self.check_type_value_cast(
+                    callee,
+                    &callee_type,
+                    args,
+                    &arg_types,
+                    callee.span,
+                )?;
                 self.ensure_failable_expression_allowed(call.span)?;
                 Ok(value_type)
             }
@@ -4869,6 +5537,11 @@ impl Checker {
                 ));
             };
             let Some(value_type) = info.members.get(name) else {
+                let qualified = format!("{module_name}.{name}");
+                if let Some(alias_name) = self.resolve_type_alias_reference(&qualified, span)? {
+                    let value_type = self.resolve_type_alias(&alias_name, &mut Vec::new())?;
+                    return Ok(Type::TypeValueOf(Box::new(value_type)));
+                }
                 return Err(VerseError::check_at(
                     format!("module `{module_name}` has no member `{name}`"),
                     span,
@@ -4910,11 +5583,70 @@ impl Checker {
             };
         }
 
+        if let Type::SuccessResult(success_type) = object_type {
+            return match name {
+                "Success" => Ok(success_type.as_ref().clone()),
+                "GetSuccess" => Ok(result_present_accessor_type(success_type.as_ref())),
+                "GetError" => Ok(result_accessor_type(&Type::Never)),
+                _ => Err(VerseError::check_at(
+                    format!("class `{object_type}` has no member `{name}`"),
+                    span,
+                )),
+            };
+        }
+
+        if let Type::ErrorResult(error_type) = object_type {
+            return match name {
+                "Error" => Ok(error_type.as_ref().clone()),
+                "GetSuccess" => Ok(result_accessor_type(&Type::Never)),
+                "GetError" => Ok(result_present_accessor_type(error_type.as_ref())),
+                _ => Err(VerseError::check_at(
+                    format!("class `{object_type}` has no member `{name}`"),
+                    span,
+                )),
+            };
+        }
+
         match object_type {
             Type::Event(payload) => {
                 return match name {
                     "Await" => Ok(await_type(payload.as_deref())),
                     "Signal" => Ok(signal_type(payload.as_deref())),
+                    _ => Err(VerseError::check_at(
+                        format!("class `{object_type}` has no member `{name}`"),
+                        span,
+                    )),
+                };
+            }
+            Type::SubscribableEvent(payload) => {
+                return match name {
+                    "Await" => Ok(await_type(Some(payload.as_ref()))),
+                    "Signal" => Ok(subscribable_event_signal_type(Some(payload.as_ref()))),
+                    "Subscribe" => Ok(subscribe_type(Some(payload.as_ref()))),
+                    "Broadcast" => Ok(subscribable_event_broadcast_type(payload.as_ref())),
+                    _ => Err(VerseError::check_at(
+                        format!("class `{object_type}` has no member `{name}`"),
+                        span,
+                    )),
+                };
+            }
+            Type::SubscribableEventIntrnl(payload) => {
+                return match name {
+                    "Await" => Ok(await_type(payload.as_deref())),
+                    "Signal" => Ok(subscribable_event_signal_type(payload.as_deref())),
+                    "Subscribe" => Ok(subscribe_type(payload.as_deref())),
+                    _ => Err(VerseError::check_at(
+                        format!("class `{object_type}` has no member `{name}`"),
+                        span,
+                    )),
+                };
+            }
+            Type::StickyEvent(payload) => {
+                return match name {
+                    "Await" => Ok(await_type(payload.as_deref())),
+                    "Signal" => Ok(signal_type(payload.as_deref())),
+                    "IsSignaled" => Ok(sticky_event_is_signaled_type()),
+                    "ClearSignal" => Ok(sticky_event_clear_signal_type()),
                     _ => Err(VerseError::check_at(
                         format!("class `{object_type}` has no member `{name}`"),
                         span,
@@ -4934,9 +5666,31 @@ impl Checker {
             Type::ClassifiableSubset(item) => {
                 return match name {
                     "Contains" => Ok(classifiable_subset_contains_type(item.as_ref())),
+                    "NotContains" => Ok(classifiable_subset_not_contains_type(item.as_ref())),
                     "ContainsAny" | "ContainsAll" => {
                         Ok(classifiable_subset_contains_many_type(item.as_ref()))
                     }
+                    "ContainsNone" => Ok(classifiable_subset_contains_none_type(item.as_ref())),
+                    "FilterByType" => Ok(classifiable_subset_filter_by_type_type(item.as_ref())),
+                    _ => Err(VerseError::check_at(
+                        format!("class `{object_type}` has no member `{name}`"),
+                        span,
+                    )),
+                };
+            }
+            Type::ClassifiableSubsetVar(item) => {
+                return match name {
+                    "Read" => Ok(classifiable_subset_var_read_type(item.as_ref())),
+                    "Write" => Ok(classifiable_subset_var_write_type(item.as_ref())),
+                    "Add" => Ok(classifiable_subset_var_add_type(item.as_ref())),
+                    "Remove" => Ok(classifiable_subset_var_remove_type(item.as_ref())),
+                    "Contains" => Ok(classifiable_subset_contains_type(item.as_ref())),
+                    "NotContains" => Ok(classifiable_subset_not_contains_type(item.as_ref())),
+                    "ContainsAny" | "ContainsAll" => {
+                        Ok(classifiable_subset_contains_many_type(item.as_ref()))
+                    }
+                    "ContainsNone" => Ok(classifiable_subset_contains_none_type(item.as_ref())),
+                    "FilterByType" => Ok(classifiable_subset_filter_by_type_type(item.as_ref())),
                     _ => Err(VerseError::check_at(
                         format!("class `{object_type}` has no member `{name}`"),
                         span,
@@ -4954,7 +5708,7 @@ impl Checker {
             }
             Type::ModifierStack(item) => {
                 return match name {
-                    "FirstPosition" | "LastPosition" => Ok(Type::Option(Box::new(Type::Rational))),
+                    "FirstPosition" | "LastPosition" => Ok(Type::Rational),
                     "Evaluate" => Ok(modifier_evaluate_type(item.as_ref())),
                     "AddModifier" => Ok(modifier_stack_add_modifier_type(item.as_ref())),
                     _ => Err(VerseError::check_at(
@@ -5156,8 +5910,18 @@ impl Checker {
                 }
                 return Ok(method_type);
             }
+            if info.kind == AggregateKind::Class && info.castable && name == "IsOfType" {
+                return Ok(castable_instance_is_of_type_type());
+            }
             if let Some(method_type) = self.extension_member_type(object_type, name, span)? {
                 if !allow_extension_method {
+                    if let Some(return_type) = self.type_value_extension_accessor_return_type(
+                        object_type,
+                        &method_type,
+                        span,
+                    )? {
+                        return Ok(return_type);
+                    }
                     return Err(VerseError::check_at(
                         format!("extension method `{name}` must be called"),
                         span,
@@ -5174,6 +5938,11 @@ impl Checker {
 
         if let Some(method_type) = self.extension_member_type(object_type, name, span)? {
             if !allow_extension_method {
+                if let Some(return_type) =
+                    self.type_value_extension_accessor_return_type(object_type, &method_type, span)?
+                {
+                    return Ok(return_type);
+                }
                 return Err(VerseError::check_at(
                     format!("extension method `{name}` must be called"),
                     span,
@@ -5199,6 +5968,43 @@ impl Checker {
         }
     }
 
+    fn type_value_extension_accessor_return_type(
+        &mut self,
+        object_type: &Type,
+        method_type: &Type,
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        if !Self::is_type_value_type(object_type) {
+            return Ok(None);
+        }
+        let Type::Function {
+            arity,
+            effects,
+            param_types,
+            return_type,
+            ..
+        } = method_type
+        else {
+            return Ok(None);
+        };
+        if *arity != Some(0)
+            || param_types
+                .as_ref()
+                .is_some_and(|params| !params.is_empty())
+        {
+            return Ok(None);
+        }
+        if has_effect(effects, "decides") {
+            return Ok(None);
+        }
+        if self.in_failure_context() {
+            ensure_callable_in_failure_context(effects, span)?;
+        }
+        self.ensure_callable_in_async_context(effects, span)?;
+        self.ensure_current_function_allows_call_effects(effects, span)?;
+        Ok(Some(return_type.as_ref().clone()))
+    }
+
     pub(super) fn extension_member_type(
         &mut self,
         object_type: &Type,
@@ -5212,13 +6018,15 @@ impl Checker {
         let Some(methods) = self.extension_methods.get(name) else {
             return Ok(None);
         };
+        let methods = methods.clone();
         let mut candidates = Vec::new();
-        for method in methods
-            .iter()
-            .filter(|method| self.is_assignable(&method.receiver_type, object_type))
-        {
+        for method in methods.iter() {
             if self.extension_method_is_visible(method, name, span)? {
-                candidates.push(method.method_type.clone());
+                if let Some(method_type) =
+                    self.extension_method_type_for_receiver(method, object_type, span)?
+                {
+                    candidates.push(method_type);
+                }
             }
         }
 
@@ -5243,13 +6051,18 @@ impl Checker {
         let Some(methods) = self.extension_methods.get(name) else {
             return Ok(None);
         };
+        let methods = methods.clone();
         let mut candidates = Vec::new();
-        for method in methods.iter().filter(|method| {
-            self.is_assignable(&method.receiver_type, object_type)
-                && extension_method_has_qualifier(method, qualifier)
-        }) {
+        for method in methods
+            .iter()
+            .filter(|method| extension_method_has_qualifier(method, qualifier))
+        {
             if self.extension_method_is_visible(method, name, span)? {
-                candidates.push(method.method_type.clone());
+                if let Some(method_type) =
+                    self.extension_method_type_for_receiver(method, object_type, span)?
+                {
+                    candidates.push(method_type);
+                }
             }
         }
 
@@ -5258,6 +6071,38 @@ impl Checker {
             [single] => Some(single.clone()),
             _ => Some(Type::Overload(candidates)),
         })
+    }
+
+    fn extension_method_type_for_receiver(
+        &mut self,
+        method: &ExtensionMethodInfo,
+        object_type: &Type,
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        if self.is_assignable(&method.receiver_type, object_type) {
+            return Ok(Some(method.method_type.clone()));
+        }
+
+        let receiver_types = [method.receiver_type.clone()];
+        let object_types = [object_type.clone()];
+        let Some(inferred) = self
+            .infer_function_type_params(Some(&receiver_types), None, &object_types)
+            .filter(|inferred| !inferred.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let receiver_type =
+            self.substitute_type_params_runtime(&method.receiver_type, &inferred, span)?;
+        if !self.is_assignable(&receiver_type, object_type) {
+            return Ok(None);
+        }
+
+        Ok(Some(self.substitute_type_params_runtime(
+            &method.method_type,
+            &inferred,
+            span,
+        )?))
     }
 
     pub(super) fn extension_method_is_visible(
@@ -5328,6 +6173,10 @@ impl Checker {
                 if matches!(
                     (&left_type, &right_type),
                     (Type::ClassifiableSubset(_), Type::ClassifiableSubset(_))
+                        | (
+                            Type::ClassifiableSubsetVar(_),
+                            Type::ClassifiableSubsetVar(_)
+                        )
                 ) {
                     self.ensure_current_function_allows_call_effects(
                         &["transacts".to_string()],
@@ -5372,4 +6221,41 @@ impl Checker {
             }
         }
     }
+}
+
+fn static_type_function_body_needs_type_value_short_circuit(body: &Expr) -> bool {
+    matches!(&body.kind, ExprKind::Tuple(_))
+        || matches!(&body.kind, ExprKind::Call { callee, .. } if expr_to_type_path(callee)
+        .is_some_and(|name| is_static_type_function_body_type_value_former(&name)))
+}
+
+fn is_static_type_function_body_type_value_former(name: &str) -> bool {
+    matches!(
+        name,
+        "type"
+            | "tuple"
+            | "weak_map"
+            | "subtype"
+            | "castable_subtype"
+            | "concrete_subtype"
+            | "castable_concrete_subtype"
+            | "event"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
+            | "task"
+            | "generator"
+            | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
+            | "modifier"
+            | "modifier_stack"
+            | "result"
+            | "success_result"
+            | "error_result"
+            | "awaitable"
+            | "signalable"
+            | "listenable"
+            | "subscribable"
+    )
 }

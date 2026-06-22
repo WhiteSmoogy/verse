@@ -110,6 +110,18 @@ impl Checker {
                 expr,
                 statement.span,
             ),
+            StmtKind::ParametricTypeAlias {
+                name,
+                specifiers,
+                params,
+                target,
+            } => self.check_parametric_type_alias_definition(
+                name,
+                specifiers,
+                params,
+                target,
+                statement.span,
+            ),
             StmtKind::TypeAlias {
                 name, specifiers, ..
             } => {
@@ -241,6 +253,45 @@ impl Checker {
         Ok(value_type)
     }
 
+    pub(super) fn check_parametric_type_alias_definition(
+        &mut self,
+        name: &str,
+        specifiers: &[String],
+        params: &[TypeParam],
+        target: &TypeAnnotation,
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        if !self.current_definition_level() {
+            return Err(VerseError::check_at(
+                "parametric type definitions are only supported at module level",
+                span,
+            ));
+        }
+        self.validate_data_specifiers(name, specifiers, None, false, span)?;
+        access_level_from_specifiers(specifiers, "parametric type", span)?;
+        ensure_private_protected_access_only_in_classes(specifiers, span)?;
+        self.validate_type_parameter_names(params, span)?;
+        self.validate_type_parameter_constraints(params, span)?;
+        self.push_type_param_scope(params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = self.type_name_to_type(target);
+        self.pop_type_param_scope();
+        result?;
+        let qualified = self.current_qualified_name(name);
+        let value_type = Type::ParametricType {
+            name: qualified,
+            params: params.iter().map(|param| param.name.clone()).collect(),
+            kind: ParametricTypeKind::Alias,
+        };
+        self.define(name, value_type.clone(), false, span)?;
+        self.record_current_module_member(name, value_type.clone(), specifiers, span)?;
+        Ok(value_type)
+    }
+
     pub(super) fn check_parametric_type_field_attributes(
         &mut self,
         params: &[TypeParam],
@@ -300,8 +351,15 @@ impl Checker {
         }));
         let result = (|| {
             for param in params {
-                if let TypeParamConstraint::Subtype(parent) = &param.constraint {
-                    self.type_name_to_type_name(parent, span)?;
+                match &param.constraint {
+                    TypeParamConstraint::Subtype(parent) => {
+                        self.type_name_to_type_name(parent, span)?;
+                    }
+                    TypeParamConstraint::TypeBounds { lower, upper } => {
+                        self.type_name_to_type_name(lower, span)?;
+                        self.type_name_to_type_name(upper, span)?;
+                    }
+                    TypeParamConstraint::Type => {}
                 }
             }
             Ok(())
@@ -347,8 +405,7 @@ impl Checker {
         let Type::Function { return_type, .. } = checked_type else {
             unreachable!("check_function should always return a function type");
         };
-        let visible_type =
-            self.extension_method_type_with_return(&extension.method, *return_type)?;
+        let visible_type = self.extension_type_with_return(extension, *return_type)?;
         let access = access_level_from_specifiers(
             &extension.method.effects,
             "extension method",
@@ -696,7 +753,7 @@ impl Checker {
             ));
         }
 
-        let inferred = self.check_expr(expr)?;
+        let inferred = self.check_binding_expr(name, expr)?;
         let checked_type = if let Some(annotation) = annotation {
             let expected = self.type_name_to_type(annotation)?;
             self.ensure_expr_assignable(&expected, &inferred, expr, || {
@@ -706,8 +763,10 @@ impl Checker {
             })?;
             expected
         } else {
-            inferred
+            inferred.clone()
         };
+        let binding_checked_type =
+            precise_type_value_binding_type(&checked_type, &inferred, mutable);
 
         if specifiers.iter().any(|specifier| specifier == "predicts") {
             return Err(VerseError::check_at(
@@ -725,13 +784,13 @@ impl Checker {
 
         let binding_type = if !mutable && matches!(&expr.kind, ExprKind::Function { .. }) {
             if self.current_definition_level() && self.is_current_predeclared_function(name) {
-                self.update_current_function_binding(name, checked_type.clone(), span)?
+                self.update_current_function_binding(name, binding_checked_type.clone(), span)?
             } else {
-                self.define_or_overload_function(name, checked_type.clone(), span)?
+                self.define_or_overload_function(name, binding_checked_type.clone(), span)?
             }
         } else {
-            self.define(name, checked_type.clone(), mutable, span)?;
-            checked_type.clone()
+            self.define(name, binding_checked_type.clone(), mutable, span)?;
+            binding_checked_type.clone()
         };
         if self.current_definition_level() {
             let access = access_level_from_specifiers(
@@ -752,6 +811,75 @@ impl Checker {
         self.semantic_facts
             .record_binding_type(span, binding_type.clone());
         Ok(binding_type)
+    }
+
+    fn check_binding_expr(&mut self, name: &str, expr: &Expr) -> Result<Type, VerseError> {
+        let ExprKind::Function {
+            params,
+            effects,
+            return_type,
+            body,
+        } = &expr.kind
+        else {
+            return self.check_expr(expr);
+        };
+        let qualified = self.current_qualified_name(name);
+        let Some(infos) = self.type_functions.get(&qualified).cloned() else {
+            return self.check_expr(expr);
+        };
+        let Some((static_type_params, inferred_type_params)) = self.type_function_params(params)?
+        else {
+            return self.check_expr(expr);
+        };
+        let Some(return_type_annotation) = return_type.as_ref() else {
+            return self.check_expr(expr);
+        };
+        let mut all_type_params = inferred_type_params.clone();
+        all_type_params.extend(static_type_params.iter().cloned());
+        self.push_type_param_scope(all_type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let return_value_type = self.annotation_to_type(Some(return_type_annotation));
+        self.pop_type_param_scope();
+        let return_value_type = return_value_type?;
+        if !type_can_be_used_as_type_value(&return_value_type) {
+            return self.check_expr(expr);
+        };
+        if self.expr_to_type_name(body).is_err() {
+            return self.check_expr(expr);
+        }
+        if !infos.iter().any(|info| {
+            info.params.len() == static_type_params.len()
+                && info
+                    .params
+                    .iter()
+                    .zip(&static_type_params)
+                    .all(|(left, right)| {
+                        left.name == right.name && left.constraint == right.constraint
+                    })
+                && info.inferred_params.len() == inferred_type_params.len()
+                && info
+                    .inferred_params
+                    .iter()
+                    .zip(&inferred_type_params)
+                    .all(|(left, right)| {
+                        left.name == right.name && left.constraint == right.constraint
+                    })
+        }) {
+            return self.check_expr(expr);
+        }
+        self.without_enclosing_failure_context(|checker| {
+            checker.check_function_with_static_type_params(
+                params,
+                effects,
+                return_type.as_ref(),
+                body,
+                &static_type_params,
+            )
+        })
     }
 
     pub(super) fn record_player_weak_map_binding(
@@ -975,6 +1103,7 @@ impl Checker {
         let result = (|| {
             self.predeclare_using_imports(statements)?;
             self.predeclare_aggregate_values_in_current_scope(statements)?;
+            self.predeclare_type_functions_in_current_scope(statements)?;
             self.predeclare_extension_methods_in_current_scope(statements)?;
             self.predeclare_functions_in_current_scope(statements)?;
             self.validate_public_module_surface_access(statements)?;
@@ -985,6 +1114,17 @@ impl Checker {
         self.pop_scope();
         self.module_path = previous_module_path;
         result
+    }
+}
+
+fn precise_type_value_binding_type(expected: &Type, inferred: &Type, mutable: bool) -> Type {
+    if mutable || type_value_instance_type(inferred).is_none() {
+        return expected.clone();
+    }
+
+    match expected {
+        Type::TypeValue | Type::TypeValueOf(_) | Type::TypeValueBounds { .. } => inferred.clone(),
+        _ => expected.clone(),
     }
 }
 

@@ -766,6 +766,41 @@ fn evaluates_f64_suffixed_float_literals() {
 }
 
 #[test]
+fn evaluates_integer_f64_suffixed_float_literals() {
+    let source = "42f64 + 0.5";
+
+    assert_eq!(eval(source), Value::Float(42.5));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Float
+    );
+}
+
+#[test]
+fn rejects_unsupported_float_literal_suffix_widths() {
+    for source in ["12.25f32", "42f16", "42f128"] {
+        let error = parse_source(source).expect_err("source should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported float format; only `f64` is supported"),
+            "expected unsupported float format error in {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_float_literal_suffix_without_width() {
+    let error = parse_source("42f").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("float suffix must specify a bit width; only `f64` is supported")
+    );
+}
+
+#[test]
 fn rejects_float_literal_exponent_without_digits() {
     let error = parse_source("1.0e+").expect_err("source should fail");
 

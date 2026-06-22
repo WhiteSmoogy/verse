@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::ast::{Expr, TypeName, TypeParamConstraint};
+use crate::ast::{Expr, FloatRange, TypeName, TypeParamConstraint};
 use crate::error::VerseError;
 use crate::token::Span;
 
@@ -36,6 +36,7 @@ pub enum Type {
     Int,
     IntRange(IntRange),
     Float,
+    FloatRange(FloatRange),
     Rational,
     Number,
     Bool,
@@ -48,6 +49,11 @@ pub enum Type {
     Any,
     Comparable,
     TypeValue,
+    TypeValueOf(Box<Type>),
+    TypeValueBounds {
+        lower: Box<Type>,
+        upper: Box<Type>,
+    },
     Unknown,
     Never,
     Range,
@@ -72,13 +78,20 @@ pub enum Type {
     Tuple(Vec<Type>),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
+    SuccessResult(Box<Type>),
+    ErrorResult(Box<Type>),
     Event(Option<Box<Type>>),
+    SubscribableEvent(Box<Type>),
+    SubscribableEventIntrnl(Option<Box<Type>>),
+    StickyEvent(Option<Box<Type>>),
     Task(Box<Type>),
     Generator(Option<Box<Type>>),
     Subtype(Box<Type>),
     CastableSubtype(Box<Type>),
     ConcreteSubtype(Box<Type>),
     ClassifiableSubset(Box<Type>),
+    ClassifiableSubsetKey(Box<Type>),
+    ClassifiableSubsetVar(Box<Type>),
     Modifier(Box<Type>),
     ModifierStack(Box<Type>),
     Awaitable(Option<Box<Type>>),
@@ -111,6 +124,12 @@ impl fmt::Display for Type {
             Self::Int => write!(formatter, "int"),
             Self::IntRange(range) => write!(formatter, "int_range({}, {})", range.min, range.max),
             Self::Float => write!(formatter, "float"),
+            Self::FloatRange(range) => write!(
+                formatter,
+                "float_range({}, {})",
+                range.min.render(),
+                range.max.render()
+            ),
             Self::Rational => write!(formatter, "rational"),
             Self::Number => write!(formatter, "number"),
             Self::Bool => write!(formatter, "bool"),
@@ -123,6 +142,8 @@ impl fmt::Display for Type {
             Self::Any => write!(formatter, "any"),
             Self::Comparable => write!(formatter, "comparable"),
             Self::TypeValue => write!(formatter, "type"),
+            Self::TypeValueOf(_) => write!(formatter, "type"),
+            Self::TypeValueBounds { lower, upper } => write!(formatter, "type({lower}, {upper})"),
             Self::Unknown => write!(formatter, "unknown"),
             Self::Never => write!(formatter, "never"),
             Self::Range => write!(formatter, "range"),
@@ -152,15 +173,37 @@ impl fmt::Display for Type {
             }
             Self::Option(item) => write!(formatter, "?{item}"),
             Self::Result(success, error) => write!(formatter, "result({success},{error})"),
+            Self::SuccessResult(success) => write!(formatter, "success_result({success})"),
+            Self::ErrorResult(error) => write!(formatter, "error_result({error})"),
             Self::Event(Some(payload)) => write!(formatter, "event({payload})"),
             Self::Event(None) => write!(formatter, "event()"),
+            Self::SubscribableEvent(payload) => write!(formatter, "subscribable_event({payload})"),
+            Self::SubscribableEventIntrnl(Some(payload)) => {
+                write!(formatter, "subscribable_event_intrnl({payload})")
+            }
+            Self::SubscribableEventIntrnl(None) => {
+                write!(formatter, "subscribable_event_intrnl()")
+            }
+            Self::StickyEvent(Some(payload)) => write!(formatter, "sticky_event({payload})"),
+            Self::StickyEvent(None) => write!(formatter, "sticky_event()"),
             Self::Task(payload) => write!(formatter, "task({payload})"),
             Self::Generator(Some(item)) => write!(formatter, "generator({item})"),
             Self::Generator(None) => write!(formatter, "generator()"),
             Self::Subtype(item) => write!(formatter, "subtype({item})"),
-            Self::CastableSubtype(item) => write!(formatter, "castable_subtype({item})"),
+            Self::CastableSubtype(item) => match item.as_ref() {
+                Self::TypeValueBounds { lower, .. } => {
+                    write!(formatter, "castable_subtype({lower})")
+                }
+                _ => write!(formatter, "castable_subtype({item})"),
+            },
             Self::ConcreteSubtype(item) => write!(formatter, "concrete_subtype({item})"),
             Self::ClassifiableSubset(item) => write!(formatter, "classifiable_subset({item})"),
+            Self::ClassifiableSubsetKey(item) => {
+                write!(formatter, "classifiable_subset_key({item})")
+            }
+            Self::ClassifiableSubsetVar(item) => {
+                write!(formatter, "classifiable_subset_var({item})")
+            }
             Self::Modifier(item) => write!(formatter, "modifier({item})"),
             Self::ModifierStack(item) => write!(formatter, "modifier_stack({item})"),
             Self::Awaitable(Some(payload)) => write!(formatter, "awaitable({payload})"),
@@ -209,6 +252,32 @@ impl fmt::Display for Type {
     }
 }
 
+pub(super) fn type_value_instance_type(value_type: &Type) -> Option<Type> {
+    match value_type {
+        Type::TypeValueOf(item) => Some(item.as_ref().clone()),
+        Type::StructType(name) => Some(Type::Struct(name.clone())),
+        Type::ClassType(name) => Some(Type::Class(name.clone())),
+        Type::InterfaceType(name) => Some(Type::Interface(name.clone())),
+        _ => None,
+    }
+}
+
+pub(super) fn type_can_be_used_as_type_value(value_type: &Type) -> bool {
+    matches!(
+        value_type,
+        Type::TypeValue
+            | Type::TypeValueOf(_)
+            | Type::TypeValueBounds { .. }
+            | Type::StructType(_)
+            | Type::ClassType(_)
+            | Type::InterfaceType(_)
+            | Type::ParametricType { .. }
+            | Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+    )
+}
+
 pub(super) fn ensure_number_like(
     value_type: &Type,
     context: &str,
@@ -218,6 +287,7 @@ pub(super) fn ensure_number_like(
         Type::Int
         | Type::IntRange(_)
         | Type::Float
+        | Type::FloatRange(_)
         | Type::Rational
         | Type::Number
         | Type::Unknown
@@ -247,6 +317,10 @@ pub(super) fn type_param_constraint_declares_comparable(constraint: &TypeParamCo
     matches!(
         constraint,
         TypeParamConstraint::Subtype(TypeName::Comparable)
+            | TypeParamConstraint::TypeBounds {
+                upper: TypeName::Comparable,
+                ..
+            }
     )
 }
 
@@ -278,6 +352,8 @@ pub(super) fn ensure_equality_comparable_inner(
         | Type::Range
         | Type::Never
         | Type::TypeValue
+        | Type::TypeValueOf(_)
+        | Type::TypeValueBounds { .. }
         | Type::EnumType(_)
         | Type::StructType(_)
         | Type::ClassType(_)
@@ -287,13 +363,19 @@ pub(super) fn ensure_equality_comparable_inner(
         | Type::ParametricType { .. }
         | Type::WeakMap(_, _)
         | Type::Result(_, _)
+        | Type::SuccessResult(_)
+        | Type::ErrorResult(_)
         | Type::Event(_)
+        | Type::SubscribableEvent(_)
+        | Type::SubscribableEventIntrnl(_)
+        | Type::StickyEvent(_)
         | Type::Task(_)
         | Type::Generator(_)
         | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)
+        | Type::ClassifiableSubsetVar(_)
         | Type::Modifier(_)
         | Type::ModifierStack(_)
         | Type::Awaitable(_)
@@ -306,6 +388,7 @@ pub(super) fn ensure_equality_comparable_inner(
         Type::Param(_, constraint) if type_param_constraint_declares_comparable(constraint) => {
             Ok(())
         }
+        Type::ClassifiableSubsetKey(_) => Ok(()),
         Type::Param(_, _) => Err(VerseError::check_at(
             format!("equality operand type `{value_type}` is not comparable"),
             span,
@@ -370,6 +453,7 @@ pub(super) fn ensure_equality_comparable_inner(
         Type::Int
         | Type::IntRange(_)
         | Type::Float
+        | Type::FloatRange(_)
         | Type::Rational
         | Type::Number
         | Type::Bool
@@ -433,6 +517,8 @@ pub(super) fn ensure_comparable_key_inner(
         | Type::Range
         | Type::Never
         | Type::TypeValue
+        | Type::TypeValueOf(_)
+        | Type::TypeValueBounds { .. }
         | Type::EnumType(_)
         | Type::StructType(_)
         | Type::ClassType(_)
@@ -441,13 +527,19 @@ pub(super) fn ensure_comparable_key_inner(
         | Type::Module(_)
         | Type::ParametricType { .. }
         | Type::Result(_, _)
+        | Type::SuccessResult(_)
+        | Type::ErrorResult(_)
         | Type::Event(_)
+        | Type::SubscribableEvent(_)
+        | Type::SubscribableEventIntrnl(_)
+        | Type::StickyEvent(_)
         | Type::Task(_)
         | Type::Generator(_)
         | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)
+        | Type::ClassifiableSubsetVar(_)
         | Type::Modifier(_)
         | Type::ModifierStack(_)
         | Type::Awaitable(_)
@@ -460,6 +552,7 @@ pub(super) fn ensure_comparable_key_inner(
         Type::Param(_, constraint) if type_param_constraint_declares_comparable(constraint) => {
             Ok(())
         }
+        Type::ClassifiableSubsetKey(_) => Ok(()),
         Type::Param(_, _) => Err(VerseError::check_at(
             format!("map key type `{value_type}` is not comparable"),
             span,
@@ -535,6 +628,7 @@ pub(super) fn ensure_comparable_key_inner(
         Type::Int
         | Type::IntRange(_)
         | Type::Float
+        | Type::FloatRange(_)
         | Type::Rational
         | Type::Number
         | Type::Bool
@@ -605,6 +699,9 @@ pub(super) fn check_add(
         (left, Type::String) if is_diagnostic_type(left) => Ok(diagnostic_type()),
         (Type::String, right) if is_diagnostic_type(right) => Ok(diagnostic_type()),
         (Type::ClassifiableSubset(left), Type::ClassifiableSubset(right)) => Ok(
+            Type::ClassifiableSubset(Box::new(unify_types(left, right, left_span)?)),
+        ),
+        (Type::ClassifiableSubsetVar(left), Type::ClassifiableSubsetVar(right)) => Ok(
             Type::ClassifiableSubset(Box::new(unify_types(left, right, left_span)?)),
         ),
         (Type::Subtype(left), Type::Subtype(right)) => Ok(Type::Subtype(Box::new(unify_types(
@@ -714,13 +811,20 @@ pub(super) fn is_color_type(value_type: &Type) -> bool {
 pub(super) fn is_numeric_type(value_type: &Type) -> bool {
     matches!(
         value_type,
-        Type::Int | Type::IntRange(_) | Type::Float | Type::Rational | Type::Number
+        Type::Int
+            | Type::IntRange(_)
+            | Type::Float
+            | Type::Rational
+            | Type::Number
+            | Type::FloatRange(_)
     )
 }
 
 pub(super) fn unify_numeric_types(left: &Type, right: &Type) -> Type {
     match (left, right) {
-        (Type::Float, _) | (_, Type::Float) => Type::Float,
+        (Type::Float | Type::FloatRange(_), _) | (_, Type::Float | Type::FloatRange(_)) => {
+            Type::Float
+        }
         (Type::Rational, _) | (_, Type::Rational) => Type::Rational,
         (Type::Int | Type::IntRange(_), Type::Int | Type::IntRange(_)) => Type::Int,
         _ => Type::Number,
@@ -729,7 +833,9 @@ pub(super) fn unify_numeric_types(left: &Type, right: &Type) -> Type {
 
 pub(super) fn divide_numeric_type(left: &Type, right: &Type) -> Type {
     match (left, right) {
-        (Type::Float, _) | (_, Type::Float) => Type::Float,
+        (Type::Float | Type::FloatRange(_), _) | (_, Type::Float | Type::FloatRange(_)) => {
+            Type::Float
+        }
         (
             Type::Int | Type::IntRange(_) | Type::Rational,
             Type::Int | Type::IntRange(_) | Type::Rational,

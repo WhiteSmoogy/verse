@@ -70,6 +70,7 @@ pub(super) fn value_copy(value: &Value) -> Value {
             abstract_class,
             epic_internal_class,
             final_class,
+            final_super,
             concrete,
             castable,
             fields,
@@ -83,6 +84,7 @@ pub(super) fn value_copy(value: &Value) -> Value {
             abstract_class: *abstract_class,
             epic_internal_class: *epic_internal_class,
             final_class: *final_class,
+            final_super: *final_super,
             concrete: *concrete,
             castable: *castable,
             fields: fields
@@ -146,6 +148,37 @@ pub(super) fn value_copy(value: &Value) -> Value {
             payload: payload.clone(),
             waiters: waiters.clone(),
         },
+        Value::SubscribableEventIntrnl {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => Value::SubscribableEventIntrnl {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            subscribers: subscribers.clone(),
+            next_subscriber_id: next_subscriber_id.clone(),
+        },
+        Value::SubscribableEvent {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => Value::SubscribableEvent {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            subscribers: subscribers.clone(),
+            next_subscriber_id: next_subscriber_id.clone(),
+        },
+        Value::StickyEvent {
+            payload,
+            waiters,
+            signal,
+        } => Value::StickyEvent {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            signal: signal.clone(),
+        },
         Value::Awaitable { payload } => Value::Awaitable {
             payload: payload.clone(),
         },
@@ -207,6 +240,14 @@ pub(super) fn value_copy(value: &Value) -> Value {
         Value::ClassifiableSubset(items) => Value::ClassifiableSubset(Rc::new(RefCell::new(
             items.borrow().iter().map(value_copy).collect(),
         ))),
+        Value::ClassifiableSubsetKey { entries, entry_id } => Value::ClassifiableSubsetKey {
+            entries: entries.clone(),
+            entry_id: *entry_id,
+        },
+        Value::ClassifiableSubsetVar { entries, next_key } => Value::ClassifiableSubsetVar {
+            entries: entries.clone(),
+            next_key: next_key.clone(),
+        },
         Value::ParametricType {
             name,
             params,

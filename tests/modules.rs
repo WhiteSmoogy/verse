@@ -393,6 +393,50 @@ DataTypes<public> := module:
 }
 
 #[test]
+fn rejects_public_parametric_type_alias_target_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    secret_list<public>(t:type) := []secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "definition `DataTypes.secret_list` is public but depends on `DataTypes.secret`, which is internal"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_parametric_type_alias_constraint_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    secret_list<public>(t:subtype(secret)) := []t
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "definition `DataTypes.secret_list` is public but depends on `DataTypes.secret`, which is internal"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_public_function_subtype_constraint_exposing_internal_module_type() {
     let error = check_source(
         r#"
@@ -410,6 +454,51 @@ DataTypes<public> := module:
         error
             .to_string()
             .contains("definition `DataTypes.Reveal` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_type_function_target_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Pick<public>():type = secret
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Pick` is public but depends on `DataTypes.secret`, which is internal"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_public_type_function_chained_target_exposing_internal_module_type() {
+    let error = check_source(
+        r#"
+DataTypes<public> := module:
+    secret := class:
+        Value:int = 0
+    Hidden():type = secret
+    Pick<public>():type = Hidden()
+
+0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("definition `DataTypes.Pick` is public but depends on `DataTypes.secret`, which is internal"),
         "{error}"
     );
 }
@@ -984,6 +1073,28 @@ Read(Child) + Child.Extra
 }
 
 #[test]
+fn evaluates_module_qualified_parametric_interface_runtime_surface() {
+    let source = r#"
+Contracts<public> := module:
+    reader<public>(t:type) := interface:
+        Value<public>:t
+        Read<public>():t = Value
+
+box := class(Contracts.reader(int)):
+    Value<override><public>:int = 42
+
+Value:Contracts.reader(int) = box{}
+Value.Read() + Value.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(84));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_path_qualified_module_type_annotation_and_archetype() {
     let source = r#"
 DataTypes<public> := module:
@@ -1009,6 +1120,134 @@ DataTypes<public> := module:
         Value<public>:t
 
 Item:(DataTypes:)box(int) = (DataTypes:)box(int){Value := 42}
+Item.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_type_function_as_type_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    Pick<public>():type = int
+
+Value:DataTypes.Pick() = 42
+Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_type_function_with_type_parameter_as_type_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    Identity<public>(Kind:type):type = Kind
+
+Value:DataTypes.Identity(int) = 42
+Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_type_function_parametric_alias_result_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    list<public>(t:type) := []t
+    ListOf<public>(Kind:type):type = list(Kind)
+
+Values:DataTypes.ListOf(int) = array{40, 2}
+if (Value := Values[1]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(2));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_public_module_type_function_call_result_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    list<public>(t:type) := []t
+    ListOf<public>(Kind:type):type = Inner(Kind)
+    Inner<public>(Kind:type):type = list(Kind)
+
+Values:DataTypes.ListOf(int) = array{40, 2}
+if (Value := Values[1]). Value else. 0
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_overloaded_type_function_as_type_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    Pick<public>():type = int
+    Pick<public>(Kind:type):type = Kind
+
+Value:DataTypes.Pick() = 42
+Text:DataTypes.Pick(string) = "ready"
+Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_internal_module_type_function_as_type_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    Pick():type = int
+
+Value:DataTypes.Pick() = 42
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Pick` is internal to module `DataTypes`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluates_path_qualified_parametric_interface_annotation() {
+    let source = r#"
+Contracts<public> := module:
+    reader<public>(t:type) := interface:
+        Value<public>:t
+
+box := class((Contracts:)reader(int)):
+    Value<override><public>:int = 42
+
+Item:(Contracts:)reader(int) = box{}
 Item.Value
 "#;
 
@@ -3164,6 +3403,57 @@ Api.Answer
 }
 
 #[test]
+fn generates_external_digest_for_public_parametric_aggregate_members() {
+    let implementation = r#"
+Api<public> := module:
+    pair<public>(t:type) := struct:
+        Left<public>:t
+
+    holder<public>(t:type) := class:
+        Value<public>:t
+        Get<public>():t = Value
+
+    reader<public>(t:type) := interface:
+        Current<public>:t
+        Read<public>():t = Current
+"#;
+
+    let digest = generate_digest(implementation).expect("digest should generate");
+    assert!(digest.contains("pair<public>(t:type) := struct:"));
+    assert!(digest.contains("Left<public>:t = external {}"));
+    assert!(digest.contains("holder<public>(t:type) := class:"));
+    assert!(digest.contains("Value<public>:t = external {}"));
+    assert!(digest.contains("Get<public>():t = external {}"));
+    assert!(digest.contains("reader<public>(t:type) := interface:"));
+    assert!(digest.contains("Current<public>:t"));
+    assert!(digest.contains("Read<public>():t = external {}"));
+    check_source(&digest).expect("digest should be valid source");
+
+    let root = temp_project_dir("external_digest_parametric_aggregate_consumer");
+    write_project_file(&root, "Api.verse", &digest);
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Api }
+
+box := class(reader(int)):
+    Current<override><public>:int = 42
+
+Pair:pair(int) = external {}
+Stored:holder(int) = external {}
+Item:reader(int) = box{}
+Pair.Left + Stored.Get() + Stored.Value + Item.Read() + Item.Current
+"#,
+    );
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("digest-backed project should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_cross_file_folder_module_import_for_types_and_values() {
     let root = temp_project_dir("folder_module");
     write_project_file(
@@ -4024,6 +4314,110 @@ Item.Value
 }
 
 #[test]
+fn evaluates_cross_file_using_public_parametric_interface_outside_module() {
+    let root = temp_project_dir("cross_file_using_public_parametric_interface");
+    write_project_file(
+        &root,
+        "Contracts.verse",
+        r#"
+Contracts<public> := module:
+    reader<public>(t:type) := interface:
+        Value<public>:t
+        Read<public>():t = Value
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { Contracts }
+
+box := class(reader(int)):
+    Value<override><public>:int = 42
+
+Item:reader(int) = box{}
+Item.Read() + Item.Value
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(84)
+    );
+}
+
+#[test]
+fn evaluates_cross_file_using_public_parametric_type_alias_outside_module() {
+    let root = temp_project_dir("cross_file_using_public_parametric_type_alias");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    list<public>(t:type) := []t
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+Values:list(int) = array{40, 2}
+if (Value := Values[1]). Value else. 0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn evaluates_cross_file_using_public_type_function_value_call_outside_module() {
+    let root = temp_project_dir("cross_file_using_public_type_function_value_call");
+    write_project_file(
+        &root,
+        "DataTypes.verse",
+        r#"
+DataTypes<public> := module:
+    list<public>(t:type) := []t
+    ListOf<public>(Kind:type):type = list(Kind)
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+using { DataTypes }
+Pick(Kind:type, Items:Kind):Kind = Items
+Picked := Pick(ListOf(int), array{40, 2})
+if (Value := Picked[1]). Value else. 0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(2)
+    );
+}
+
+#[test]
 fn rejects_cross_file_using_internal_parametric_type_outside_module() {
     let root = temp_project_dir("cross_file_using_internal_parametric_type");
     write_project_file(
@@ -4301,6 +4695,26 @@ point{X := 40}.(DataTypes:)Sum()
 "#;
 
     assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_module_type_function_call_in_extension_receiver_annotation() {
+    let source = r#"
+DataTypes<public> := module:
+    ListOf<public>(Kind:type):type = []Kind
+
+    (Items:ListOf(int)).Second<public>():int =
+        if (Value := Items[1]). Value else. 0
+
+using { DataTypes }
+array{40, 2}.(DataTypes:)Second()
+"#;
+
+    assert_eq!(eval(source), Value::Int(2));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

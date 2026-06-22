@@ -474,6 +474,638 @@ pub(super) fn infer_function_type_params(
     Some(inferred)
 }
 
+impl Checker {
+    pub(super) fn infer_function_type_params(
+        &self,
+        param_types: Option<&[Type]>,
+        return_type: Option<&Type>,
+        arg_types: &[Type],
+    ) -> Option<HashMap<String, Type>> {
+        let mut inferred = infer_function_type_params(param_types, arg_types)?;
+        let param_types = param_types?;
+        if param_types.len() != arg_types.len() {
+            return Some(inferred);
+        }
+        for (param_type, arg_type) in param_types.iter().zip(arg_types) {
+            self.infer_parametric_instance_type_params(param_type, arg_type, &mut inferred)?;
+        }
+        for (param_type, arg_type) in param_types.iter().zip(arg_types) {
+            self.infer_type_params_from_constraints(param_type, arg_type, &mut inferred)?;
+        }
+        let constraints = collect_type_param_constraints(param_types, return_type);
+        self.infer_type_params_from_known_constraints(&constraints, &mut inferred)?;
+        Some(inferred)
+    }
+
+    fn infer_type_params_from_known_constraints(
+        &self,
+        constraints: &HashMap<String, TypeParamConstraint>,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        loop {
+            let previous_len = inferred.len();
+            for name in inferred.keys().cloned().collect::<Vec<_>>() {
+                let Some(constraint) = constraints.get(&name) else {
+                    continue;
+                };
+                let actual = inferred.get(&name).cloned()?;
+                self.infer_type_params_from_constraint(constraint, &actual, inferred)?;
+            }
+            if inferred.len() == previous_len {
+                return Some(());
+            }
+        }
+    }
+
+    fn infer_type_params_from_constraints(
+        &self,
+        pattern: &Type,
+        actual: &Type,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        match (pattern, actual) {
+            (Type::Param(_, constraint), actual) => {
+                self.infer_type_params_from_constraint(constraint, actual, inferred)
+            }
+            (Type::Array(pattern), Type::Array(actual))
+            | (Type::Option(pattern), Type::Option(actual))
+            | (Type::Task(pattern), Type::Task(actual))
+            | (Type::Subtype(pattern), Type::Subtype(actual))
+            | (Type::CastableSubtype(pattern), Type::CastableSubtype(actual))
+            | (Type::ConcreteSubtype(pattern), Type::ConcreteSubtype(actual))
+            | (Type::ClassifiableSubset(pattern), Type::ClassifiableSubset(actual))
+            | (Type::ClassifiableSubsetKey(pattern), Type::ClassifiableSubsetKey(actual))
+            | (Type::ClassifiableSubsetVar(pattern), Type::ClassifiableSubsetVar(actual))
+            | (Type::Modifier(pattern), Type::Modifier(actual))
+            | (Type::ModifierStack(pattern), Type::ModifierStack(actual))
+            | (Type::Signalable(pattern), Type::Signalable(actual)) => {
+                self.infer_type_params_from_constraints(pattern, actual, inferred)
+            }
+            (Type::Map(pattern_key, pattern_value), Type::Map(actual_key, actual_value))
+            | (
+                Type::WeakMap(pattern_key, pattern_value),
+                Type::WeakMap(actual_key, actual_value),
+            )
+            | (Type::Result(pattern_key, pattern_value), Type::Result(actual_key, actual_value)) => {
+                self.infer_type_params_from_constraints(pattern_key, actual_key, inferred)?;
+                self.infer_type_params_from_constraints(pattern_value, actual_value, inferred)
+            }
+            (Type::SuccessResult(pattern), Type::SuccessResult(actual))
+            | (Type::ErrorResult(pattern), Type::ErrorResult(actual)) => {
+                self.infer_type_params_from_constraints(pattern, actual, inferred)
+            }
+            (Type::SuccessResult(pattern), Type::Result(actual_success, actual_error))
+                if matches!(actual_error.as_ref(), Type::Never) =>
+            {
+                self.infer_type_params_from_constraints(pattern, actual_success, inferred)
+            }
+            (Type::ErrorResult(pattern), Type::Result(actual_success, actual_error))
+                if matches!(actual_success.as_ref(), Type::Never) =>
+            {
+                self.infer_type_params_from_constraints(pattern, actual_error, inferred)
+            }
+            (Type::Tuple(pattern_items), Type::Tuple(actual_items))
+                if pattern_items.len() == actual_items.len() =>
+            {
+                for (pattern, actual) in pattern_items.iter().zip(actual_items) {
+                    self.infer_type_params_from_constraints(pattern, actual, inferred)?;
+                }
+                Some(())
+            }
+            (Type::Event(pattern), Type::Event(actual))
+            | (Type::Generator(pattern), Type::Generator(actual))
+            | (Type::Awaitable(pattern), Type::Awaitable(actual))
+            | (Type::Subscribable(pattern), Type::Subscribable(actual))
+            | (Type::Listenable(pattern), Type::Listenable(actual)) => match (pattern, actual) {
+                (Some(pattern), Some(actual)) => {
+                    self.infer_type_params_from_constraints(pattern, actual, inferred)
+                }
+                _ => Some(()),
+            },
+            (Type::SubscribableEvent(pattern), Type::SubscribableEvent(actual)) => {
+                self.infer_type_params_from_constraints(pattern, actual, inferred)
+            }
+            (
+                Type::Function {
+                    param_types: pattern_params,
+                    return_type: pattern_return,
+                    ..
+                },
+                Type::Function {
+                    param_types: actual_params,
+                    return_type: actual_return,
+                    ..
+                },
+            ) => {
+                if let (Some(pattern_params), Some(actual_params)) = (pattern_params, actual_params)
+                {
+                    if pattern_params.len() != actual_params.len() {
+                        return None;
+                    }
+                    for (pattern, actual) in pattern_params.iter().zip(actual_params) {
+                        self.infer_type_params_from_constraints(pattern, actual, inferred)?;
+                    }
+                }
+                self.infer_type_params_from_constraints(pattern_return, actual_return, inferred)
+            }
+            _ => Some(()),
+        }
+    }
+
+    pub(super) fn infer_type_params_from_constraint(
+        &self,
+        constraint: &TypeParamConstraint,
+        actual: &Type,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        let parent = match constraint {
+            TypeParamConstraint::Subtype(parent) => parent,
+            TypeParamConstraint::TypeBounds { upper, .. } => upper,
+            TypeParamConstraint::Type => return Some(()),
+        };
+        let pattern = self.type_name_to_inference_pattern(parent, inferred)?;
+        infer_type_params_from_type(&pattern, actual, inferred)?;
+        self.infer_parametric_instance_type_params(&pattern, actual, inferred)
+    }
+
+    fn type_name_to_inference_pattern(
+        &self,
+        name: &TypeName,
+        inferred: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        match name {
+            TypeName::Int => Some(Type::Int),
+            TypeName::Float => Some(Type::Float),
+            TypeName::FloatRange(range) => Some(Type::FloatRange(*range)),
+            TypeName::Rational => Some(Type::Rational),
+            TypeName::Number => Some(Type::Number),
+            TypeName::Bool => Some(Type::Bool),
+            TypeName::String => Some(Type::String),
+            TypeName::Message => Some(Type::Message),
+            TypeName::Char => Some(Type::Char),
+            TypeName::Char8 => Some(Type::Char8),
+            TypeName::Char32 => Some(Type::Char32),
+            TypeName::None => Some(Type::None),
+            TypeName::Any => Some(Type::Any),
+            TypeName::Comparable => Some(Type::Comparable),
+            TypeName::Type => Some(Type::TypeValue),
+            TypeName::TypeBounds { lower, upper } => Some(Type::TypeValueBounds {
+                lower: Box::new(self.type_name_to_inference_pattern(lower, inferred)?),
+                upper: Box::new(self.type_name_to_inference_pattern(upper, inferred)?),
+            }),
+            TypeName::IntRange { min, max } => Some(Type::IntRange(IntRange::new(*min, *max))),
+            TypeName::Array(item) => Some(Type::Array(Box::new(match item.as_deref() {
+                Some(item) => self.type_name_to_inference_pattern(item, inferred)?,
+                None => Type::Unknown,
+            }))),
+            TypeName::Map(key, value) => Some(Type::Map(
+                Box::new(self.type_name_to_inference_pattern(key, inferred)?),
+                Box::new(self.type_name_to_inference_pattern(value, inferred)?),
+            )),
+            TypeName::WeakMap(key, value) => Some(Type::WeakMap(
+                Box::new(self.type_name_to_inference_pattern(key, inferred)?),
+                Box::new(self.type_name_to_inference_pattern(value, inferred)?),
+            )),
+            TypeName::Tuple(items) => Some(Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.type_name_to_inference_pattern(item, inferred))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            TypeName::Option(item) => Some(Type::Option(Box::new(
+                self.type_name_to_inference_pattern(item, inferred)?,
+            ))),
+            TypeName::Function => Some(Type::Function {
+                arity: None,
+                arity_range: None,
+                effects: Vec::new(),
+                param_types: None,
+                param_specs: None,
+                return_type: Box::new(Type::Unknown),
+            }),
+            TypeName::FunctionSignature {
+                params,
+                effects,
+                return_type,
+            } => Some(Type::Function {
+                arity: Some(params.len()),
+                arity_range: None,
+                effects: effects.clone(),
+                param_types: Some(
+                    params
+                        .iter()
+                        .map(|param| self.type_name_to_inference_pattern(param, inferred))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                param_specs: None,
+                return_type: Box::new(self.type_name_to_inference_pattern(return_type, inferred)?),
+            }),
+            TypeName::Applied { name, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.type_name_to_inference_pattern(arg, inferred))
+                    .collect::<Option<Vec<_>>>()?;
+                if is_official_parametric_type_name(name) {
+                    official_parametric_type(name, &args, Span::new(0, 0, 0, 0)).ok()
+                } else {
+                    let qualified = self.resolve_parametric_type_reference(name)?;
+                    let info = self.parametric_types.get(&qualified)?;
+                    if info.params.len() != args.len() {
+                        return None;
+                    }
+                    let instance_name = render_parametric_instance_type_name(&qualified, &args);
+                    Some(match info.kind {
+                        ParametricTypeKind::Struct => Type::Struct(instance_name),
+                        ParametricTypeKind::Class => Type::Class(instance_name),
+                        ParametricTypeKind::Interface => Type::Interface(instance_name),
+                        ParametricTypeKind::Alias => return None,
+                    })
+                }
+            }
+            TypeName::Named(name) => {
+                if let Some(value_type) = inferred.get(name) {
+                    Some(value_type.clone())
+                } else if let Some(value_type) = self.resolve_type_param(name) {
+                    Some(value_type)
+                } else if let Some(value_type) = self.type_aliases.get(name) {
+                    Some(value_type.clone())
+                } else if !name.contains('.')
+                    && let Some(qualified) = self.resolve_contextual_type_name(name)
+                    && let Some(value_type) = self.type_aliases.get(&qualified)
+                {
+                    Some(value_type.clone())
+                } else {
+                    self.named_type_to_type(name, Span::new(0, 0, 0, 0))
+                        .ok()
+                        .or_else(|| Some(Type::Param(name.clone(), TypeParamConstraint::Type)))
+                }
+            }
+        }
+    }
+
+    fn infer_parametric_instance_type_params(
+        &self,
+        pattern: &Type,
+        actual: &Type,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        match (pattern, actual) {
+            (Type::Struct(pattern_name), Type::Struct(actual_name)) => {
+                self.infer_parametric_instance_name_params(pattern_name, actual_name, inferred)
+            }
+            (Type::Class(pattern_name), Type::Class(actual_name)) => {
+                self.infer_parametric_class_params_from_class(pattern_name, actual_name, inferred)
+            }
+            (Type::Interface(pattern_name), Type::Interface(actual_name)) => self
+                .infer_parametric_interface_params_from_interface(
+                    pattern_name,
+                    actual_name,
+                    inferred,
+                ),
+            (Type::Interface(pattern_name), Type::Class(actual_name)) => self
+                .infer_parametric_interface_params_from_class(pattern_name, actual_name, inferred),
+            (Type::Subtype(pattern), Type::Class(actual_name) | Type::ClassType(actual_name))
+            | (
+                Type::CastableSubtype(pattern),
+                Type::Class(actual_name) | Type::ClassType(actual_name),
+            )
+            | (
+                Type::ConcreteSubtype(pattern),
+                Type::Class(actual_name) | Type::ClassType(actual_name),
+            ) => self.infer_parametric_class_type_value_params(pattern, actual_name, inferred),
+            (Type::TypeValueOf(pattern), actual) => {
+                let actual = type_value_instance_type(actual)?;
+                self.infer_parametric_instance_type_params(pattern, &actual, inferred)
+            }
+            (Type::Array(pattern), Type::Array(actual))
+            | (Type::Option(pattern), Type::Option(actual))
+            | (Type::Task(pattern), Type::Task(actual))
+            | (Type::Subtype(pattern), Type::Subtype(actual))
+            | (Type::CastableSubtype(pattern), Type::CastableSubtype(actual))
+            | (Type::ConcreteSubtype(pattern), Type::ConcreteSubtype(actual))
+            | (Type::ClassifiableSubset(pattern), Type::ClassifiableSubset(actual))
+            | (Type::ClassifiableSubsetKey(pattern), Type::ClassifiableSubsetKey(actual))
+            | (Type::ClassifiableSubsetVar(pattern), Type::ClassifiableSubsetVar(actual))
+            | (Type::Modifier(pattern), Type::Modifier(actual))
+            | (Type::ModifierStack(pattern), Type::ModifierStack(actual))
+            | (Type::Signalable(pattern), Type::Signalable(actual)) => {
+                self.infer_parametric_instance_type_params(pattern, actual, inferred)
+            }
+            (Type::Map(pattern_key, pattern_value), Type::Map(actual_key, actual_value))
+            | (
+                Type::WeakMap(pattern_key, pattern_value),
+                Type::WeakMap(actual_key, actual_value),
+            )
+            | (Type::Result(pattern_key, pattern_value), Type::Result(actual_key, actual_value)) => {
+                self.infer_parametric_instance_type_params(pattern_key, actual_key, inferred)?;
+                self.infer_parametric_instance_type_params(pattern_value, actual_value, inferred)
+            }
+            (Type::SuccessResult(pattern), Type::SuccessResult(actual))
+            | (Type::ErrorResult(pattern), Type::ErrorResult(actual)) => {
+                self.infer_parametric_instance_type_params(pattern, actual, inferred)
+            }
+            (Type::SuccessResult(pattern), Type::Result(actual_success, actual_error))
+                if matches!(actual_error.as_ref(), Type::Never) =>
+            {
+                self.infer_parametric_instance_type_params(pattern, actual_success, inferred)
+            }
+            (Type::ErrorResult(pattern), Type::Result(actual_success, actual_error))
+                if matches!(actual_success.as_ref(), Type::Never) =>
+            {
+                self.infer_parametric_instance_type_params(pattern, actual_error, inferred)
+            }
+            (Type::Tuple(pattern_items), Type::Tuple(actual_items))
+                if pattern_items.len() == actual_items.len() =>
+            {
+                for (pattern, actual) in pattern_items.iter().zip(actual_items) {
+                    self.infer_parametric_instance_type_params(pattern, actual, inferred)?;
+                }
+                Some(())
+            }
+            (Type::Event(pattern), Type::Event(actual))
+            | (Type::Generator(pattern), Type::Generator(actual))
+            | (Type::Awaitable(pattern), Type::Awaitable(actual))
+            | (Type::Subscribable(pattern), Type::Subscribable(actual))
+            | (Type::Listenable(pattern), Type::Listenable(actual)) => match (pattern, actual) {
+                (Some(pattern), Some(actual)) => {
+                    self.infer_parametric_instance_type_params(pattern, actual, inferred)
+                }
+                _ => Some(()),
+            },
+            (Type::SubscribableEvent(pattern), Type::SubscribableEvent(actual)) => {
+                self.infer_parametric_instance_type_params(pattern, actual, inferred)
+            }
+            (
+                Type::Function {
+                    param_types: pattern_params,
+                    return_type: pattern_return,
+                    ..
+                },
+                Type::Function {
+                    param_types: actual_params,
+                    return_type: actual_return,
+                    ..
+                },
+            ) => {
+                if let (Some(pattern_params), Some(actual_params)) = (pattern_params, actual_params)
+                {
+                    if pattern_params.len() != actual_params.len() {
+                        return None;
+                    }
+                    for (pattern, actual) in pattern_params.iter().zip(actual_params) {
+                        self.infer_parametric_instance_type_params(pattern, actual, inferred)?;
+                    }
+                }
+                self.infer_parametric_instance_type_params(pattern_return, actual_return, inferred)
+            }
+            _ => Some(()),
+        }
+    }
+
+    fn infer_parametric_class_type_value_params(
+        &self,
+        pattern: &Type,
+        actual_name: &str,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        match pattern {
+            Type::Subtype(pattern)
+            | Type::CastableSubtype(pattern)
+            | Type::ConcreteSubtype(pattern) => {
+                self.infer_parametric_class_type_value_params(pattern, actual_name, inferred)
+            }
+            pattern => {
+                let actual = Type::Class(actual_name.to_string());
+                infer_type_params_from_type(pattern, &actual, inferred)?;
+                self.infer_parametric_instance_type_params(pattern, &actual, inferred)
+            }
+        }
+    }
+
+    fn infer_parametric_class_params_from_class(
+        &self,
+        pattern_name: &str,
+        actual_name: &str,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        let mut current = Some(actual_name);
+        while let Some(name) = current {
+            self.infer_parametric_instance_name_params(pattern_name, name, inferred)?;
+            current = self
+                .struct_types
+                .get(name)
+                .and_then(|info| info.base.as_deref());
+        }
+        Some(())
+    }
+
+    fn infer_parametric_interface_params_from_class(
+        &self,
+        pattern_name: &str,
+        actual_name: &str,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        let mut current = Some(actual_name);
+        while let Some(name) = current {
+            let Some(info) = self.struct_types.get(name) else {
+                return Some(());
+            };
+            for interface in &info.interfaces {
+                self.infer_parametric_interface_params_from_interface(
+                    pattern_name,
+                    interface,
+                    inferred,
+                )?;
+            }
+            current = info.base.as_deref();
+        }
+        Some(())
+    }
+
+    fn infer_parametric_interface_params_from_interface(
+        &self,
+        pattern_name: &str,
+        actual_name: &str,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        self.infer_parametric_instance_name_params(pattern_name, actual_name, inferred)?;
+        let Some(info) = self.interface_types.get(actual_name) else {
+            return Some(());
+        };
+        for parent in &info.parents {
+            self.infer_parametric_interface_params_from_interface(pattern_name, parent, inferred)?;
+        }
+        Some(())
+    }
+
+    fn infer_parametric_instance_name_params(
+        &self,
+        pattern_name: &str,
+        actual_name: &str,
+        inferred: &mut HashMap<String, Type>,
+    ) -> Option<()> {
+        let Some(pattern_head) = parametric_instance_head(pattern_name) else {
+            return Some(());
+        };
+        let Some(actual_head) = parametric_instance_head(actual_name) else {
+            return Some(());
+        };
+        if pattern_head != actual_head {
+            return Some(());
+        }
+        let Some(pattern_args) = self.parametric_type_instances.get(pattern_name) else {
+            return Some(());
+        };
+        let Some(actual_args) = self.parametric_type_instances.get(actual_name) else {
+            return Some(());
+        };
+        if pattern_args.len() != actual_args.len() {
+            return Some(());
+        }
+        for (pattern, actual) in pattern_args.iter().zip(actual_args) {
+            infer_type_params_from_type(pattern, actual, inferred)?;
+            self.infer_parametric_instance_type_params(pattern, actual, inferred)?;
+        }
+        Some(())
+    }
+}
+
+fn parametric_instance_head(name: &str) -> Option<&str> {
+    let open = name.find('(')?;
+    name.ends_with(')').then_some(&name[..open])
+}
+
+fn collect_type_param_constraints(
+    param_types: &[Type],
+    return_type: Option<&Type>,
+) -> HashMap<String, TypeParamConstraint> {
+    let mut constraints = HashMap::new();
+    for param_type in param_types {
+        collect_type_param_constraints_inner(param_type, &mut constraints);
+    }
+    if let Some(return_type) = return_type {
+        collect_type_param_constraints_inner(return_type, &mut constraints);
+    }
+    constraints
+}
+
+fn collect_type_param_constraints_inner(
+    value_type: &Type,
+    constraints: &mut HashMap<String, TypeParamConstraint>,
+) {
+    match value_type {
+        Type::Param(name, constraint) => {
+            constraints
+                .entry(name.clone())
+                .or_insert_with(|| constraint.clone());
+        }
+        Type::Array(item)
+        | Type::Option(item)
+        | Type::Task(item)
+        | Type::TypeValueOf(item)
+        | Type::Subtype(item)
+        | Type::CastableSubtype(item)
+        | Type::ConcreteSubtype(item)
+        | Type::ClassifiableSubset(item)
+        | Type::ClassifiableSubsetKey(item)
+        | Type::ClassifiableSubsetVar(item)
+        | Type::Modifier(item)
+        | Type::ModifierStack(item)
+        | Type::Signalable(item) => {
+            collect_type_param_constraints_inner(item, constraints);
+        }
+        Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
+            collect_type_param_constraints_inner(key, constraints);
+            collect_type_param_constraints_inner(value, constraints);
+        }
+        Type::SuccessResult(item) | Type::ErrorResult(item) => {
+            collect_type_param_constraints_inner(item, constraints);
+        }
+        Type::TypeValueBounds { lower, upper } => {
+            collect_type_param_constraints_inner(lower, constraints);
+            collect_type_param_constraints_inner(upper, constraints);
+        }
+        Type::Tuple(items) | Type::Overload(items) => {
+            for item in items {
+                collect_type_param_constraints_inner(item, constraints);
+            }
+        }
+        Type::Event(payload)
+        | Type::SubscribableEventIntrnl(payload)
+        | Type::StickyEvent(payload)
+        | Type::Generator(payload)
+        | Type::Awaitable(payload)
+        | Type::Subscribable(payload)
+        | Type::Listenable(payload) => {
+            if let Some(payload) = payload {
+                collect_type_param_constraints_inner(payload, constraints);
+            }
+        }
+        Type::SubscribableEvent(payload) => {
+            collect_type_param_constraints_inner(payload, constraints);
+        }
+        Type::Function {
+            param_types,
+            param_specs,
+            return_type,
+            ..
+        } => {
+            if let Some(param_types) = param_types {
+                for param_type in param_types {
+                    collect_type_param_constraints_inner(param_type, constraints);
+                }
+            }
+            if let Some(param_specs) = param_specs {
+                for spec in param_specs {
+                    collect_param_spec_type_param_constraints(spec, constraints);
+                }
+            }
+            collect_type_param_constraints_inner(return_type, constraints);
+        }
+        Type::Int
+        | Type::IntRange(_)
+        | Type::Float
+        | Type::FloatRange(_)
+        | Type::Rational
+        | Type::Number
+        | Type::Bool
+        | Type::String
+        | Type::Message
+        | Type::Char
+        | Type::Char8
+        | Type::Char32
+        | Type::None
+        | Type::Any
+        | Type::Comparable
+        | Type::TypeValue
+        | Type::Unknown
+        | Type::Never
+        | Type::Range
+        | Type::Enum(_)
+        | Type::EnumType(_)
+        | Type::Struct(_)
+        | Type::StructType(_)
+        | Type::Class(_)
+        | Type::ClassType(_)
+        | Type::Interface(_)
+        | Type::InterfaceType(_)
+        | Type::Module(_)
+        | Type::ParametricType { .. } => {}
+    }
+}
+
+fn collect_param_spec_type_param_constraints(
+    spec: &ParamSpec,
+    constraints: &mut HashMap<String, TypeParamConstraint>,
+) {
+    collect_type_param_constraints_inner(&spec.value_type, constraints);
+    if let Some(items) = &spec.tuple_items {
+        for item in items {
+            collect_param_spec_type_param_constraints(item, constraints);
+        }
+    }
+}
+
 pub(super) fn infer_type_params_from_type(
     pattern: &Type,
     actual: &Type,
@@ -487,6 +1119,10 @@ pub(super) fn infer_type_params_from_type(
                 inferred.insert(name.clone(), actual.clone());
                 Some(())
             }
+        }
+        (Type::TypeValueOf(pattern), actual) => {
+            let actual = type_value_instance_type(actual)?;
+            infer_type_params_from_type(pattern, &actual, inferred)
         }
         (Type::Array(pattern), Type::Array(actual)) => {
             infer_type_params_from_type(pattern, actual, inferred)
@@ -510,10 +1146,17 @@ pub(super) fn infer_type_params_from_type(
         | (Type::CastableSubtype(pattern), Type::CastableSubtype(actual))
         | (Type::ConcreteSubtype(pattern), Type::ConcreteSubtype(actual))
         | (Type::ClassifiableSubset(pattern), Type::ClassifiableSubset(actual))
+        | (Type::ClassifiableSubsetKey(pattern), Type::ClassifiableSubsetKey(actual))
+        | (Type::ClassifiableSubsetVar(pattern), Type::ClassifiableSubsetVar(actual))
         | (Type::Modifier(pattern), Type::Modifier(actual))
         | (Type::ModifierStack(pattern), Type::ModifierStack(actual))
         | (Type::Signalable(pattern), Type::Signalable(actual)) => {
             infer_type_params_from_type(pattern, actual, inferred)
+        }
+        (Type::Subtype(pattern), Type::ClassType(actual_name))
+        | (Type::CastableSubtype(pattern), Type::ClassType(actual_name))
+        | (Type::ConcreteSubtype(pattern), Type::ClassType(actual_name)) => {
+            infer_type_params_from_type(pattern, &Type::Class(actual_name.clone()), inferred)
         }
         (
             Type::Result(pattern_success, pattern_error),
@@ -521,6 +1164,20 @@ pub(super) fn infer_type_params_from_type(
         ) => {
             infer_type_params_from_type(pattern_success, actual_success, inferred)?;
             infer_type_params_from_type(pattern_error, actual_error, inferred)
+        }
+        (Type::SuccessResult(pattern), Type::SuccessResult(actual))
+        | (Type::ErrorResult(pattern), Type::ErrorResult(actual)) => {
+            infer_type_params_from_type(pattern, actual, inferred)
+        }
+        (Type::SuccessResult(pattern), Type::Result(actual_success, actual_error))
+            if matches!(actual_error.as_ref(), Type::Never) =>
+        {
+            infer_type_params_from_type(pattern, actual_success, inferred)
+        }
+        (Type::ErrorResult(pattern), Type::Result(actual_success, actual_error))
+            if matches!(actual_success.as_ref(), Type::Never) =>
+        {
+            infer_type_params_from_type(pattern, actual_error, inferred)
         }
         (Type::Event(pattern), Type::Event(actual))
         | (Type::Generator(pattern), Type::Generator(actual))
@@ -530,6 +1187,9 @@ pub(super) fn infer_type_params_from_type(
             (Some(pattern), Some(actual)) => infer_type_params_from_type(pattern, actual, inferred),
             _ => Some(()),
         },
+        (Type::SubscribableEvent(pattern), Type::SubscribableEvent(actual)) => {
+            infer_type_params_from_type(pattern, actual, inferred)
+        }
         (
             Type::Function {
                 param_types: pattern_params,
@@ -582,12 +1242,38 @@ pub(super) fn substitute_type_params(value_type: &Type, inferred: &HashMap<Strin
             Box::new(substitute_type_params(success, inferred)),
             Box::new(substitute_type_params(error, inferred)),
         ),
+        Type::SuccessResult(item) => {
+            Type::SuccessResult(Box::new(substitute_type_params(item, inferred)))
+        }
+        Type::ErrorResult(item) => {
+            Type::ErrorResult(Box::new(substitute_type_params(item, inferred)))
+        }
         Type::Event(payload) => Type::Event(
             payload
                 .as_deref()
                 .map(|payload| Box::new(substitute_type_params(payload, inferred))),
         ),
+        Type::SubscribableEvent(payload) => {
+            Type::SubscribableEvent(Box::new(substitute_type_params(payload, inferred)))
+        }
+        Type::SubscribableEventIntrnl(payload) => Type::SubscribableEventIntrnl(
+            payload
+                .as_deref()
+                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
+        ),
+        Type::StickyEvent(payload) => Type::StickyEvent(
+            payload
+                .as_deref()
+                .map(|payload| Box::new(substitute_type_params(payload, inferred))),
+        ),
         Type::Task(payload) => Type::Task(Box::new(substitute_type_params(payload, inferred))),
+        Type::TypeValueOf(item) => {
+            Type::TypeValueOf(Box::new(substitute_type_params(item, inferred)))
+        }
+        Type::TypeValueBounds { lower, upper } => Type::TypeValueBounds {
+            lower: Box::new(substitute_type_params(lower, inferred)),
+            upper: Box::new(substitute_type_params(upper, inferred)),
+        },
         Type::Generator(payload) => Type::Generator(
             payload
                 .as_deref()
@@ -602,6 +1288,12 @@ pub(super) fn substitute_type_params(value_type: &Type, inferred: &HashMap<Strin
         }
         Type::ClassifiableSubset(item) => {
             Type::ClassifiableSubset(Box::new(substitute_type_params(item, inferred)))
+        }
+        Type::ClassifiableSubsetKey(item) => {
+            Type::ClassifiableSubsetKey(Box::new(substitute_type_params(item, inferred)))
+        }
+        Type::ClassifiableSubsetVar(item) => {
+            Type::ClassifiableSubsetVar(Box::new(substitute_type_params(item, inferred)))
         }
         Type::Modifier(item) => Type::Modifier(Box::new(substitute_type_params(item, inferred))),
         Type::ModifierStack(item) => {
@@ -666,22 +1358,32 @@ pub(super) fn type_contains_type_param(value_type: &Type) -> bool {
         Type::Array(item)
         | Type::Option(item)
         | Type::Task(item)
+        | Type::TypeValueOf(item)
         | Type::Subtype(item)
         | Type::CastableSubtype(item)
         | Type::ConcreteSubtype(item)
         | Type::ClassifiableSubset(item)
+        | Type::ClassifiableSubsetKey(item)
+        | Type::ClassifiableSubsetVar(item)
         | Type::Modifier(item)
         | Type::ModifierStack(item)
         | Type::Signalable(item) => type_contains_type_param(item),
+        Type::TypeValueBounds { lower, upper } => {
+            type_contains_type_param(lower) || type_contains_type_param(upper)
+        }
         Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
             type_contains_type_param(key) || type_contains_type_param(value)
         }
+        Type::SuccessResult(item) | Type::ErrorResult(item) => type_contains_type_param(item),
         Type::Tuple(items) | Type::Overload(items) => items.iter().any(type_contains_type_param),
         Type::Event(payload)
+        | Type::SubscribableEventIntrnl(payload)
+        | Type::StickyEvent(payload)
         | Type::Generator(payload)
         | Type::Awaitable(payload)
         | Type::Subscribable(payload)
         | Type::Listenable(payload) => payload.as_deref().is_some_and(type_contains_type_param),
+        Type::SubscribableEvent(payload) => type_contains_type_param(payload),
         Type::Function {
             param_types,
             param_specs,
@@ -699,6 +1401,7 @@ pub(super) fn type_contains_type_param(value_type: &Type) -> bool {
         Type::Int
         | Type::IntRange(_)
         | Type::Float
+        | Type::FloatRange(_)
         | Type::Rational
         | Type::Number
         | Type::Bool
@@ -759,6 +1462,26 @@ pub(super) fn collect_function_type_params(params: &[Param]) -> Result<Vec<TypeP
     Ok(collected)
 }
 
+pub(super) fn merge_type_param_lists(
+    first: &[TypeParam],
+    second: &[TypeParam],
+) -> Result<Vec<TypeParam>, VerseError> {
+    let mut merged = first.to_vec();
+    for param in second {
+        if let Some(existing) = merged.iter().find(|existing| existing.name == param.name) {
+            if existing.constraint == param.constraint {
+                continue;
+            }
+            return Err(VerseError::check_at(
+                format!("duplicate type parameter `{}`", param.name),
+                param.span,
+            ));
+        }
+        merged.push(param.clone());
+    }
+    Ok(merged)
+}
+
 pub(super) fn collect_function_type_params_inner(
     params: &[Param],
     collected: &mut Vec<TypeParam>,
@@ -783,7 +1506,219 @@ pub(super) fn collect_function_type_params_inner(
     Ok(())
 }
 
+fn type_value_type_to_type_param_constraint(value_type: &Type) -> Option<TypeParamConstraint> {
+    match value_type {
+        Type::TypeValue => Some(TypeParamConstraint::Type),
+        Type::TypeValueBounds { lower, upper } => Some(TypeParamConstraint::TypeBounds {
+            lower: type_to_constraint_type_name(lower)?,
+            upper: type_to_constraint_type_name(upper)?,
+        }),
+        Type::Subtype(parent) => Some(TypeParamConstraint::Subtype(type_to_constraint_type_name(
+            parent,
+        )?)),
+        Type::CastableSubtype(parent) => Some(TypeParamConstraint::Subtype(TypeName::Applied {
+            name: "castable_subtype".to_string(),
+            args: vec![type_to_constraint_type_name(parent)?],
+        })),
+        Type::ConcreteSubtype(parent) => Some(TypeParamConstraint::Subtype(TypeName::Applied {
+            name: "concrete_subtype".to_string(),
+            args: vec![type_to_constraint_type_name(parent)?],
+        })),
+        _ => None,
+    }
+}
+
+fn type_function_target_to_type_param_constraint(target: &TypeName) -> Option<TypeParamConstraint> {
+    match target {
+        TypeName::Type => Some(TypeParamConstraint::Type),
+        TypeName::TypeBounds { lower, upper } => Some(TypeParamConstraint::TypeBounds {
+            lower: lower.as_ref().clone(),
+            upper: upper.as_ref().clone(),
+        }),
+        TypeName::Applied { name, args }
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1 =>
+        {
+            let parent = if name == "subtype" {
+                args[0].clone()
+            } else {
+                TypeName::Applied {
+                    name: name.clone(),
+                    args: args.clone(),
+                }
+            };
+            Some(TypeParamConstraint::Subtype(parent))
+        }
+        _ => None,
+    }
+}
+
+enum TypeFunctionParamMatch {
+    Match(Vec<TypeParam>, Vec<TypeParam>),
+    NotTypeFunction,
+    Pending,
+}
+
+enum TypeFunctionParamConstraintMatch {
+    Match(TypeParamConstraint),
+    NotTypeFunction,
+    Pending,
+}
+
 impl Checker {
+    pub(super) fn type_function_params(
+        &mut self,
+        params: &[Param],
+    ) -> Result<Option<(Vec<TypeParam>, Vec<TypeParam>)>, VerseError> {
+        match self.match_type_function_params(params)? {
+            TypeFunctionParamMatch::Match(type_params, inferred_type_params) => {
+                Ok(Some((type_params, inferred_type_params)))
+            }
+            TypeFunctionParamMatch::NotTypeFunction | TypeFunctionParamMatch::Pending => Ok(None),
+        }
+    }
+
+    fn match_type_function_params(
+        &mut self,
+        params: &[Param],
+    ) -> Result<TypeFunctionParamMatch, VerseError> {
+        let mut type_params = Vec::new();
+        let mut inferred_type_params = Vec::new();
+        for param in params {
+            if param.named
+                || param.default.is_some()
+                || param.name.is_empty()
+                || !matches!(param.pattern, ParamPattern::Binding)
+            {
+                return Ok(TypeFunctionParamMatch::NotTypeFunction);
+            }
+            inferred_type_params.extend(param.type_params.iter().cloned());
+            let Some(annotation) = param.annotation.as_ref() else {
+                return Ok(TypeFunctionParamMatch::NotTypeFunction);
+            };
+            let param_scope = inferred_type_params
+                .iter()
+                .chain(&type_params)
+                .map(|param| {
+                    (
+                        param.name.clone(),
+                        Type::Param(param.name.clone(), param.constraint.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.push_type_param_scope(param_scope);
+            let constraint_match =
+                self.type_function_param_constraint(&annotation.name, annotation.span);
+            self.pop_type_param_scope();
+            let constraint = match constraint_match? {
+                TypeFunctionParamConstraintMatch::Match(constraint) => constraint,
+                TypeFunctionParamConstraintMatch::NotTypeFunction => {
+                    return Ok(TypeFunctionParamMatch::NotTypeFunction);
+                }
+                TypeFunctionParamConstraintMatch::Pending => {
+                    return Ok(TypeFunctionParamMatch::Pending);
+                }
+            };
+            if type_params
+                .iter()
+                .any(|existing: &TypeParam| existing.name == param.name)
+            {
+                return Ok(TypeFunctionParamMatch::NotTypeFunction);
+            }
+            type_params.push(TypeParam {
+                name: param.name.clone(),
+                constraint,
+                span: param.span,
+            });
+        }
+        Ok(TypeFunctionParamMatch::Match(
+            type_params,
+            inferred_type_params,
+        ))
+    }
+
+    fn type_function_param_constraint(
+        &mut self,
+        annotation: &TypeName,
+        span: Span,
+    ) -> Result<TypeFunctionParamConstraintMatch, VerseError> {
+        match annotation {
+            TypeName::Type => Ok(TypeFunctionParamConstraintMatch::Match(
+                TypeParamConstraint::Type,
+            )),
+            TypeName::TypeBounds { lower, upper } => Ok(TypeFunctionParamConstraintMatch::Match(
+                TypeParamConstraint::TypeBounds {
+                    lower: lower.as_ref().clone(),
+                    upper: upper.as_ref().clone(),
+                },
+            )),
+            TypeName::Applied { name, args }
+                if matches!(
+                    name.as_str(),
+                    "subtype"
+                        | "castable_subtype"
+                        | "concrete_subtype"
+                        | "castable_concrete_subtype"
+                ) && args.len() == 1 =>
+            {
+                let parent = if name == "subtype" {
+                    args[0].clone()
+                } else {
+                    TypeName::Applied {
+                        name: name.clone(),
+                        args: args.clone(),
+                    }
+                };
+                Ok(TypeFunctionParamConstraintMatch::Match(
+                    TypeParamConstraint::Subtype(parent),
+                ))
+            }
+            TypeName::Applied { name, .. } if is_official_parametric_type_name(name) => {
+                Ok(TypeFunctionParamConstraintMatch::NotTypeFunction)
+            }
+            TypeName::Applied { name, args } => {
+                let Some(qualified) = self.resolve_type_function_reference(name) else {
+                    return Ok(if name.contains('.') {
+                        TypeFunctionParamConstraintMatch::NotTypeFunction
+                    } else {
+                        TypeFunctionParamConstraintMatch::Pending
+                    });
+                };
+                let args = match args
+                    .iter()
+                    .map(|arg| self.type_name_to_type_name(arg, span))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(args) => args,
+                    Err(_) => return Ok(TypeFunctionParamConstraintMatch::Pending),
+                };
+                let target = match self
+                    .instantiate_type_function_target_name(name, &qualified, &args, span)
+                {
+                    Ok(target) => target,
+                    Err(_) => return Ok(TypeFunctionParamConstraintMatch::Pending),
+                };
+                if let Some(constraint) = target
+                    .as_ref()
+                    .and_then(type_function_target_to_type_param_constraint)
+                {
+                    return Ok(TypeFunctionParamConstraintMatch::Match(constraint));
+                }
+                let value_type = match self.instantiate_type_function(name, &qualified, &args, span)
+                {
+                    Ok(value_type) => value_type,
+                    Err(_) => return Ok(TypeFunctionParamConstraintMatch::Pending),
+                };
+                Ok(type_value_type_to_type_param_constraint(&value_type)
+                    .map(TypeFunctionParamConstraintMatch::Match)
+                    .unwrap_or(TypeFunctionParamConstraintMatch::NotTypeFunction))
+            }
+            _ => Ok(TypeFunctionParamConstraintMatch::NotTypeFunction),
+        }
+    }
+
     pub(super) fn predeclare_top_level_functions(
         &mut self,
         program: &Program,
@@ -824,18 +1759,137 @@ impl Checker {
                 )
             }));
             let function_type = (|| {
+                let (param_types, param_specs, _) =
+                    self.dependent_type_value_param_signature(params, return_type.as_ref())?;
                 Ok(Type::Function {
                     arity: Some(params.len()),
                     arity_range: None,
                     effects: effects.clone(),
-                    param_types: Some(self.param_types(params)?),
-                    param_specs: Some(self.param_specs(params)?),
+                    param_types: Some(param_types),
+                    param_specs: Some(param_specs),
                     return_type: Box::new(self.annotation_to_type(return_type.as_ref())?),
                 })
             })();
             self.pop_type_param_scope();
             let function_type = function_type?;
             self.define_predeclared_function(name, function_type, statement.span)?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn predeclare_top_level_type_functions(
+        &mut self,
+        program: &Program,
+    ) -> Result<(), VerseError> {
+        self.predeclare_type_functions_in_current_scope(&program.statements)
+    }
+
+    pub(super) fn predeclare_type_functions_in_current_scope(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        let mut pending = vec![true; statements.len()];
+
+        loop {
+            let mut progressed = false;
+
+            for (index, statement) in statements.iter().enumerate() {
+                if !pending[index] {
+                    continue;
+                }
+
+                let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                    pending[index] = false;
+                    continue;
+                };
+                let ExprKind::Function {
+                    params,
+                    effects,
+                    return_type,
+                    body,
+                } = &expr.kind
+                else {
+                    pending[index] = false;
+                    continue;
+                };
+
+                let (type_params, inferred_type_params) =
+                    match self.match_type_function_params(params)? {
+                        TypeFunctionParamMatch::Match(type_params, inferred_type_params) => {
+                            (type_params, inferred_type_params)
+                        }
+                        TypeFunctionParamMatch::NotTypeFunction => {
+                            pending[index] = false;
+                            continue;
+                        }
+                        TypeFunctionParamMatch::Pending => continue,
+                    };
+                let all_type_params = merge_type_param_lists(&inferred_type_params, &type_params)?;
+                self.validate_type_parameter_constraints(&all_type_params, statement.span)?;
+                let Some(return_type) = return_type.as_ref() else {
+                    pending[index] = false;
+                    continue;
+                };
+                self.push_type_param_scope(all_type_params.iter().map(|param| {
+                    (
+                        param.name.clone(),
+                        Type::Param(param.name.clone(), param.constraint.clone()),
+                    )
+                }));
+                let signature_parts = (|| {
+                    let param_types = params
+                        .iter()
+                        .map(|param| self.annotation_to_type(param.annotation.as_ref()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let param_specs = params
+                        .iter()
+                        .zip(&param_types)
+                        .map(|(param, value_type)| ParamSpec {
+                            name: param.name.clone(),
+                            value_type: value_type.clone(),
+                            named: param.named,
+                            has_default: param.default.is_some(),
+                            tuple_items: None,
+                        })
+                        .collect::<Vec<_>>();
+                    let return_value_type = self.annotation_to_type(Some(return_type))?;
+                    Ok((param_types, param_specs, return_value_type))
+                })();
+                self.pop_type_param_scope();
+                let (param_types, param_specs, return_value_type) = signature_parts?;
+                if !type_can_be_used_as_type_value(&return_value_type) {
+                    pending[index] = false;
+                    continue;
+                }
+                let Ok(type_name) = self.expr_to_type_name(body) else {
+                    continue;
+                };
+                let qualified = self.current_qualified_name(name);
+                self.type_functions
+                    .entry(qualified)
+                    .or_default()
+                    .push(TypeFunctionInfo {
+                        params: type_params,
+                        inferred_params: inferred_type_params,
+                        target: type_name,
+                        module_path: self.module_path.clone(),
+                        signature: Type::Function {
+                            arity: Some(params.len()),
+                            arity_range: None,
+                            effects: effects.clone(),
+                            param_types: Some(param_types),
+                            param_specs: Some(param_specs),
+                            return_type: Box::new(return_value_type),
+                        },
+                    });
+                pending[index] = false;
+                progressed = true;
+            }
+
+            if !progressed {
+                break;
+            }
         }
 
         Ok(())
@@ -917,7 +1971,7 @@ impl Checker {
         extension: &ExtensionMethod,
     ) -> Result<(), VerseError> {
         let receiver_type = self.extension_receiver_type(extension)?;
-        let method_type = self.extension_method_declared_type(&extension.method)?;
+        let method_type = self.extension_declared_method_type(extension)?;
         if self.current_definition_level() {
             ensure_private_protected_access_only_in_classes(
                 &extension.method.effects,
@@ -999,7 +2053,7 @@ impl Checker {
                     extension.span,
                 ));
             }
-            let method_type = self.extension_method_declared_type(&extension.method)?;
+            let method_type = self.extension_declared_method_type(extension)?;
             let access = access_level_from_specifiers(
                 &extension.method.effects,
                 "extension method",

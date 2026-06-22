@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use verse_rs::{
-    DiagnosticCode, DiagnosticSeverity, Effect, EffectSet, IntRange, SourceProject, Type,
-    TypeVariable, Value, check_project_file, check_source, check_source_with_diagnostics,
+    DiagnosticCode, DiagnosticSeverity, Effect, EffectSet, FloatRange, IntRange, SourceProject,
+    Type, TypeVariable, Value, check_project_file, check_source, check_source_with_diagnostics,
     check_source_with_recovery, generate_digest, generate_project_digest, parse_source,
     run_project_file, run_source,
 };

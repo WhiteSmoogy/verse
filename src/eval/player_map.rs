@@ -60,6 +60,9 @@ fn player_map_value_size_inner(value: &Value, depth: usize) -> Option<usize> {
         Value::Option(None) => Some(1),
         Value::Result { .. }
         | Value::Event { .. }
+        | Value::SubscribableEventIntrnl { .. }
+        | Value::SubscribableEvent { .. }
+        | Value::StickyEvent { .. }
         | Value::Awaitable { .. }
         | Value::Signalable { .. }
         | Value::Subscribable { .. }
@@ -75,6 +78,8 @@ fn player_map_value_size_inner(value: &Value, depth: usize) -> Option<usize> {
         | Value::ConcreteSubtype(_)
         | Value::Type(_)
         | Value::ClassifiableSubset(_)
+        | Value::ClassifiableSubsetKey { .. }
+        | Value::ClassifiableSubsetVar { .. }
         | Value::Diagnostic(_)
         | Value::External
         | Value::Session

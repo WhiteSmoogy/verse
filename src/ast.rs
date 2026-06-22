@@ -1,5 +1,72 @@
 use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatBound {
+    bits: u64,
+}
+
+impl FloatBound {
+    pub fn new(value: f64) -> Option<Self> {
+        if value.is_nan() {
+            None
+        } else {
+            Some(Self {
+                bits: normalized_float_bits(value),
+            })
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.bits)
+    }
+
+    pub fn render(self) -> String {
+        render_float_bound(self.get())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatRange {
+    pub min: FloatBound,
+    pub max: FloatBound,
+}
+
+impl FloatRange {
+    pub fn new(min: f64, max: f64) -> Option<Self> {
+        let min = FloatBound::new(min)?;
+        let max = FloatBound::new(max)?;
+        (min.get() <= max.get()).then_some(Self { min, max })
+    }
+
+    pub fn contains(self, value: f64) -> bool {
+        !value.is_nan() && self.min.get() <= value && value <= self.max.get()
+    }
+
+    pub fn contains_range(self, other: Self) -> bool {
+        self.min.get() <= other.min.get() && other.max.get() <= self.max.get()
+    }
+}
+
+fn normalized_float_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn render_float_bound(value: f64) -> String {
+    if value == f64::INFINITY {
+        "Inf".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Inf".to_string()
+    } else if value.fract() == 0.0 {
+        format!("{value:.1}")
+    } else {
+        value.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Stmt>,
@@ -33,6 +100,12 @@ pub enum StmtKind {
         specifiers: Vec<String>,
         params: Vec<TypeParam>,
         expr: Expr,
+    },
+    ParametricTypeAlias {
+        name: String,
+        specifiers: Vec<String>,
+        params: Vec<TypeParam>,
+        target: TypeAnnotation,
     },
     TypeAlias {
         name: String,
@@ -118,6 +191,9 @@ pub enum ExprKind {
     },
     TypeLiteral {
         expr: Box<Expr>,
+    },
+    TypeAnnotationLiteral {
+        annotation: TypeAnnotation,
     },
     External,
     Loop {
@@ -255,6 +331,7 @@ pub struct TypeParam {
 pub enum TypeParamConstraint {
     Type,
     Subtype(TypeName),
+    TypeBounds { lower: TypeName, upper: TypeName },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -398,10 +475,15 @@ pub enum TypeName {
     Any,
     Comparable,
     Type,
+    TypeBounds {
+        lower: Box<TypeName>,
+        upper: Box<TypeName>,
+    },
     IntRange {
         min: i64,
         max: i64,
     },
+    FloatRange(FloatRange),
     Array(Option<Box<TypeName>>),
     Map(Box<TypeName>, Box<TypeName>),
     WeakMap(Box<TypeName>, Box<TypeName>),

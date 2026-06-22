@@ -163,10 +163,6 @@ impl Lexer {
         self.chars.get(self.index + 1).copied()
     }
 
-    fn peek_offset(&self, offset: usize) -> Option<char> {
-        self.chars.get(self.index + offset).copied()
-    }
-
     fn advance(&mut self) -> char {
         let ch = self.chars[self.index];
         self.index += 1;
@@ -551,14 +547,33 @@ impl Lexer {
             }
         }
 
-        if kind == NumberKind::Float
-            && self.peek() == Some('f')
-            && self.peek_offset(1) == Some('6')
-            && self.peek_offset(2) == Some('4')
-        {
+        if self.peek() == Some('f') {
             self.advance();
-            self.advance();
-            self.advance();
+
+            if !self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                return Err(VerseError::lex(
+                    "float suffix must specify a bit width; only `f64` is supported",
+                    self.span_from(start),
+                ));
+            }
+
+            let mut bit_width = String::new();
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_digit() {
+                    bit_width.push(self.advance());
+                } else {
+                    break;
+                }
+            }
+
+            if bit_width != "64" {
+                return Err(VerseError::lex(
+                    "unsupported float format; only `f64` is supported",
+                    self.span_from(start),
+                ));
+            }
+
+            kind = NumberKind::Float;
         }
 
         let value = match kind {

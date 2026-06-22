@@ -4,6 +4,7 @@ use crate::ast::{Expr, TypeAnnotation, TypeParam};
 use crate::colors::NAMED_COLORS;
 use crate::token::Span;
 
+use super::semantic_function::merge_type_param_lists;
 use super::*;
 
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub(super) struct TypeAliasInfo {
 pub(super) struct ParametricTypeInfo {
     pub(super) params: Vec<TypeParam>,
     pub(super) expr: Expr,
+    pub(super) target: Option<TypeAnnotation>,
     pub(super) kind: ParametricTypeKind,
     pub(super) access: AccessLevel,
     pub(super) native: bool,
@@ -32,6 +34,23 @@ pub(super) struct ModuleInfo {
     pub(super) access: AccessLevel,
     pub(super) scopes: Vec<String>,
     pub(super) imports: Vec<String>,
+}
+
+fn get_castable_final_super_class_type(from_type: bool) -> Type {
+    let base_type = Type::Param("base_type".to_string(), TypeParamConstraint::Type);
+    let second_param = if from_type {
+        ("sub_type", Type::Subtype(Box::new(base_type.clone())))
+    } else {
+        ("Instance", base_type.clone())
+    };
+    native_function_type(
+        &["reads", "decides"],
+        vec![
+            ("base_type", Type::TypeValueOf(Box::new(base_type.clone()))),
+            second_param,
+        ],
+        Type::CastableSubtype(Box::new(base_type)),
+    )
 }
 
 impl Checker {
@@ -312,6 +331,25 @@ impl Checker {
                 param_specs: None,
                 return_type: Box::new(Type::ClassifiableSubset(Box::new(Type::Unknown))),
             }),
+        );
+        globals.insert(
+            "MakeClassifiableSubsetVar".to_string(),
+            Symbol::immutable(Type::Function {
+                arity: Some(1),
+                arity_range: None,
+                effects: vec!["reads".to_string()],
+                param_types: Some(vec![Type::Array(Box::new(Type::Unknown))]),
+                param_specs: None,
+                return_type: Box::new(Type::ClassifiableSubsetVar(Box::new(Type::Unknown))),
+            }),
+        );
+        globals.insert(
+            "GetCastableFinalSuperClass".to_string(),
+            Symbol::immutable(get_castable_final_super_class_type(false)),
+        );
+        globals.insert(
+            "GetCastableFinalSuperClassFromType".to_string(),
+            Symbol::immutable(get_castable_final_super_class_type(true)),
         );
         globals.insert(
             "GetSession".to_string(),
@@ -612,9 +650,11 @@ impl Checker {
             module_types,
             extension_methods: HashMap::new(),
             parametric_types: HashMap::new(),
+            parametric_type_instances: HashMap::new(),
             predeclared_aggregate_values: HashSet::new(),
             type_alias_defs: HashMap::new(),
             type_aliases: HashMap::new(),
+            type_functions: HashMap::new(),
             type_param_scopes: Vec::new(),
             player_weak_maps: Vec::new(),
             module_path: Vec::new(),
@@ -642,6 +682,261 @@ impl Checker {
     pub fn with_package(mut self, package_name: Option<String>) -> Self {
         self.package_name = package_name;
         self
+    }
+}
+
+pub(super) fn type_to_constraint_type_name(value_type: &Type) -> Option<TypeName> {
+    match value_type {
+        Type::Int => Some(TypeName::Int),
+        Type::IntRange { .. } => None,
+        Type::Float => Some(TypeName::Float),
+        Type::FloatRange(range) => Some(TypeName::FloatRange(*range)),
+        Type::Rational => Some(TypeName::Rational),
+        Type::Number => Some(TypeName::Number),
+        Type::Bool => Some(TypeName::Bool),
+        Type::String => Some(TypeName::String),
+        Type::Message => Some(TypeName::Message),
+        Type::Char => Some(TypeName::Char),
+        Type::Char8 => Some(TypeName::Char8),
+        Type::Char32 => Some(TypeName::Char32),
+        Type::None => Some(TypeName::None),
+        Type::Any => Some(TypeName::Any),
+        Type::Comparable => Some(TypeName::Comparable),
+        Type::TypeValue => Some(TypeName::Type),
+        Type::TypeValueOf(_) => Some(TypeName::Type),
+        Type::TypeValueBounds { lower, upper } => Some(TypeName::TypeBounds {
+            lower: Box::new(type_to_constraint_type_name(lower)?),
+            upper: Box::new(type_to_constraint_type_name(upper)?),
+        }),
+        Type::Enum(name)
+        | Type::Struct(name)
+        | Type::Class(name)
+        | Type::Interface(name)
+        | Type::Module(name) => Some(TypeName::Named(name.clone())),
+        Type::Param(name, _) => Some(TypeName::Named(name.clone())),
+        Type::Array(item) => Some(TypeName::Array(Some(Box::new(
+            type_to_constraint_type_name(item)?,
+        )))),
+        Type::Map(key, value) => Some(TypeName::Map(
+            Box::new(type_to_constraint_type_name(key)?),
+            Box::new(type_to_constraint_type_name(value)?),
+        )),
+        Type::WeakMap(key, value) => Some(TypeName::WeakMap(
+            Box::new(type_to_constraint_type_name(key)?),
+            Box::new(type_to_constraint_type_name(value)?),
+        )),
+        Type::Tuple(items) => Some(TypeName::Tuple(
+            items
+                .iter()
+                .map(type_to_constraint_type_name)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Type::Option(item) => Some(TypeName::Option(Box::new(type_to_constraint_type_name(
+            item,
+        )?))),
+        Type::Function {
+            param_types,
+            return_type,
+            effects,
+            ..
+        } => {
+            let params = param_types
+                .as_ref()?
+                .iter()
+                .map(type_to_constraint_type_name)
+                .collect::<Option<Vec<_>>>()?;
+            Some(TypeName::FunctionSignature {
+                params,
+                effects: effects.clone(),
+                return_type: Box::new(type_to_constraint_type_name(return_type)?),
+            })
+        }
+        Type::Subtype(item) => Some(TypeName::Applied {
+            name: "subtype".to_string(),
+            args: vec![type_to_constraint_type_name(item)?],
+        }),
+        Type::CastableSubtype(item) => Some(TypeName::Applied {
+            name: "castable_subtype".to_string(),
+            args: vec![type_to_constraint_type_name(item)?],
+        }),
+        Type::ConcreteSubtype(item) => Some(TypeName::Applied {
+            name: "concrete_subtype".to_string(),
+            args: vec![type_to_constraint_type_name(item)?],
+        }),
+        Type::Unknown
+        | Type::Never
+        | Type::Range
+        | Type::EnumType(_)
+        | Type::StructType(_)
+        | Type::ClassType(_)
+        | Type::InterfaceType(_)
+        | Type::ParametricType { .. }
+        | Type::Result(_, _)
+        | Type::SuccessResult(_)
+        | Type::ErrorResult(_)
+        | Type::Event(_)
+        | Type::SubscribableEvent(_)
+        | Type::SubscribableEventIntrnl(_)
+        | Type::StickyEvent(_)
+        | Type::Task(_)
+        | Type::Generator(_)
+        | Type::ClassifiableSubset(_)
+        | Type::ClassifiableSubsetKey(_)
+        | Type::ClassifiableSubsetVar(_)
+        | Type::Modifier(_)
+        | Type::ModifierStack(_)
+        | Type::Awaitable(_)
+        | Type::Signalable(_)
+        | Type::Subscribable(_)
+        | Type::Listenable(_)
+        | Type::Overload(_) => None,
+    }
+}
+
+fn substitute_type_name_params(
+    type_name: &TypeName,
+    inferred: &HashMap<String, Type>,
+) -> Option<TypeName> {
+    match type_name {
+        TypeName::Int => Some(TypeName::Int),
+        TypeName::Float => Some(TypeName::Float),
+        TypeName::Rational => Some(TypeName::Rational),
+        TypeName::Number => Some(TypeName::Number),
+        TypeName::Bool => Some(TypeName::Bool),
+        TypeName::String => Some(TypeName::String),
+        TypeName::Message => Some(TypeName::Message),
+        TypeName::Char => Some(TypeName::Char),
+        TypeName::Char8 => Some(TypeName::Char8),
+        TypeName::Char32 => Some(TypeName::Char32),
+        TypeName::None => Some(TypeName::None),
+        TypeName::Any => Some(TypeName::Any),
+        TypeName::Comparable => Some(TypeName::Comparable),
+        TypeName::Type => Some(TypeName::Type),
+        TypeName::TypeBounds { lower, upper } => Some(TypeName::TypeBounds {
+            lower: Box::new(substitute_type_name_params(lower, inferred)?),
+            upper: Box::new(substitute_type_name_params(upper, inferred)?),
+        }),
+        TypeName::IntRange { min, max } => Some(TypeName::IntRange {
+            min: *min,
+            max: *max,
+        }),
+        TypeName::FloatRange(range) => Some(TypeName::FloatRange(*range)),
+        TypeName::Array(item) => Some(TypeName::Array(match item.as_ref() {
+            Some(item) => Some(Box::new(substitute_type_name_params(item, inferred)?)),
+            None => None,
+        })),
+        TypeName::Map(key, value) => Some(TypeName::Map(
+            Box::new(substitute_type_name_params(key, inferred)?),
+            Box::new(substitute_type_name_params(value, inferred)?),
+        )),
+        TypeName::WeakMap(key, value) => Some(TypeName::WeakMap(
+            Box::new(substitute_type_name_params(key, inferred)?),
+            Box::new(substitute_type_name_params(value, inferred)?),
+        )),
+        TypeName::Tuple(items) => Some(TypeName::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_type_name_params(item, inferred))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        TypeName::Option(item) => Some(TypeName::Option(Box::new(substitute_type_name_params(
+            item, inferred,
+        )?))),
+        TypeName::Function => Some(TypeName::Function),
+        TypeName::FunctionSignature {
+            params,
+            effects,
+            return_type,
+        } => Some(TypeName::FunctionSignature {
+            params: params
+                .iter()
+                .map(|param| substitute_type_name_params(param, inferred))
+                .collect::<Option<Vec<_>>>()?,
+            effects: effects.clone(),
+            return_type: Box::new(substitute_type_name_params(return_type, inferred)?),
+        }),
+        TypeName::Applied { name, args } => Some(TypeName::Applied {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_type_name_params(arg, inferred))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        TypeName::Named(name) => inferred
+            .get(name)
+            .map(type_to_constraint_type_name)
+            .unwrap_or_else(|| Some(TypeName::Named(name.clone()))),
+    }
+}
+
+fn type_param_constraint_instance_supertype(value_type: Type) -> Type {
+    match value_type {
+        Type::Subtype(item) | Type::CastableSubtype(item) | Type::ConcreteSubtype(item) => {
+            type_param_constraint_instance_supertype(*item)
+        }
+        other => other,
+    }
+}
+
+fn type_value_param_used_as_type(
+    name: &str,
+    later_params: &[Param],
+    return_type: Option<&TypeName>,
+) -> bool {
+    later_params.iter().any(|param| {
+        param
+            .annotation
+            .as_ref()
+            .is_some_and(|annotation| type_name_contains_name(&annotation.name, name))
+            || match &param.pattern {
+                ParamPattern::Tuple(items) => type_value_param_used_as_type(name, items, None),
+                ParamPattern::Binding | ParamPattern::Anonymous => false,
+            }
+    }) || return_type.is_some_and(|return_type| type_name_contains_name(return_type, name))
+}
+
+fn type_name_contains_name(type_name: &TypeName, name: &str) -> bool {
+    match type_name {
+        TypeName::Named(candidate) => candidate == name,
+        TypeName::Array(item) => item
+            .as_deref()
+            .is_some_and(|item| type_name_contains_name(item, name)),
+        TypeName::Map(key, value) | TypeName::WeakMap(key, value) => {
+            type_name_contains_name(key, name) || type_name_contains_name(value, name)
+        }
+        TypeName::Tuple(items) => items.iter().any(|item| type_name_contains_name(item, name)),
+        TypeName::Option(item) => type_name_contains_name(item, name),
+        TypeName::FunctionSignature {
+            params,
+            return_type,
+            ..
+        } => {
+            params
+                .iter()
+                .any(|param| type_name_contains_name(param, name))
+                || type_name_contains_name(return_type, name)
+        }
+        TypeName::TypeBounds { lower, upper } => {
+            type_name_contains_name(lower, name) || type_name_contains_name(upper, name)
+        }
+        TypeName::Applied { args, .. } => args.iter().any(|arg| type_name_contains_name(arg, name)),
+        TypeName::Int
+        | TypeName::Float
+        | TypeName::Rational
+        | TypeName::Number
+        | TypeName::Bool
+        | TypeName::String
+        | TypeName::Message
+        | TypeName::Char
+        | TypeName::Char8
+        | TypeName::Char32
+        | TypeName::None
+        | TypeName::Any
+        | TypeName::Comparable
+        | TypeName::Type
+        | TypeName::IntRange { .. }
+        | TypeName::FloatRange(_)
+        | TypeName::Function => false,
     }
 }
 
@@ -690,6 +985,11 @@ impl Checker {
                     name, specifiers, ..
                 } => self.record_current_module_member_access(name, specifiers, statement.span)?,
                 StmtKind::TypeAlias {
+                    name, specifiers, ..
+                } => {
+                    self.record_current_module_member_access(name, specifiers, statement.span)?;
+                }
+                StmtKind::ParametricTypeAlias {
                     name, specifiers, ..
                 } => {
                     self.record_current_module_member_access(name, specifiers, statement.span)?;
@@ -973,7 +1273,55 @@ impl Checker {
                         ParametricTypeInfo {
                             params: params.clone(),
                             expr: expr.clone(),
+                            target: None,
                             kind,
+                            access,
+                            native: field_has_specifier(specifiers, "native"),
+                            module_path: self.module_path.clone(),
+                            span: statement.span,
+                        },
+                    );
+                }
+                StmtKind::ParametricTypeAlias {
+                    name,
+                    specifiers,
+                    params,
+                    target,
+                } => {
+                    self.validate_data_specifiers(name, specifiers, None, false, statement.span)?;
+                    let access = access_level_from_specifiers(
+                        specifiers,
+                        "parametric type",
+                        statement.span,
+                    )?;
+                    ensure_private_protected_access_only_in_classes(specifiers, statement.span)?;
+                    let qualified = self.current_qualified_name(name);
+                    self.validate_type_parameter_names(params, statement.span)?;
+                    if self.parametric_types.contains_key(&qualified) {
+                        return Err(VerseError::check_at(
+                            format!("duplicate parametric type `{name}`"),
+                            statement.span,
+                        ));
+                    }
+                    if self.enum_types.contains_key(&qualified)
+                        || self.struct_types.contains_key(&qualified)
+                        || self.interface_types.contains_key(&qualified)
+                        || self.type_alias_defs.contains_key(&qualified)
+                    {
+                        return Err(VerseError::check_at(
+                            format!(
+                                "parametric type `{name}` conflicts with existing type `{name}`"
+                            ),
+                            statement.span,
+                        ));
+                    }
+                    self.parametric_types.insert(
+                        qualified,
+                        ParametricTypeInfo {
+                            params: params.clone(),
+                            expr: Expr::new(ExprKind::External, target.span),
+                            target: Some(target.clone()),
+                            kind: ParametricTypeKind::Alias,
                             access,
                             native: field_has_specifier(specifiers, "native"),
                             module_path: self.module_path.clone(),
@@ -991,8 +1339,10 @@ impl Checker {
         &mut self,
         program: &Program,
     ) -> Result<(), VerseError> {
-        self.predeclare_type_aliases(&program.statements)?;
+        self.predeclare_type_aliases(&program.statements)
+    }
 
+    pub(super) fn resolve_predeclared_type_aliases(&mut self) -> Result<(), VerseError> {
         let names = self.type_alias_defs.keys().cloned().collect::<Vec<_>>();
         for name in names {
             self.resolve_type_alias(&name, &mut Vec::new())?;
@@ -1143,7 +1493,12 @@ impl Checker {
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
             TypeName::Type => Type::TypeValue,
+            TypeName::TypeBounds { lower, upper } => Type::TypeValueBounds {
+                lower: Box::new(self.resolve_type_alias_target(lower, span, visiting)?),
+                upper: Box::new(self.resolve_type_alias_target(upper, span, visiting)?),
+            },
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
+            TypeName::FloatRange(range) => Type::FloatRange(*range),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.resolve_type_alias_target(item, span, visiting)?,
                 None => Type::Unknown,
@@ -1211,12 +1566,16 @@ impl Checker {
                     .collect::<Result<Vec<_>, _>>()?;
                 if is_official_parametric_type_name(name) {
                     official_parametric_type(name, &args, span)?
+                } else if let Some(target) = self.resolve_type_function_reference(name) {
+                    self.instantiate_type_function(name, &target, &args, span)?
                 } else {
                     self.instantiate_parametric_type(name, &args, span)?
                 }
             }
             TypeName::Named(name) => {
-                if let Some(value_type) = self.resolve_type_param(name) {
+                if let Some(value_type) = builtin_numeric_alias_type(name) {
+                    value_type
+                } else if let Some(value_type) = self.resolve_type_param(name) {
                     value_type
                 } else if let Some(alias_name) = self.resolve_type_alias_reference(name, span)? {
                     self.resolve_type_alias(&alias_name, visiting)?
@@ -1402,6 +1761,40 @@ impl Checker {
                     self.pop_type_param_scope();
                     result?;
                 }
+                StmtKind::ParametricTypeAlias {
+                    name,
+                    specifiers,
+                    params,
+                    target,
+                } => {
+                    let access = access_level_from_specifiers(
+                        specifiers,
+                        "parametric type",
+                        statement.span,
+                    )?;
+                    let dependee = self.current_qualified_name(name);
+                    let result = (|| {
+                        self.push_type_param_scope(params.iter().map(|param| {
+                            (
+                                param.name.clone(),
+                                Type::Param(param.name.clone(), param.constraint.clone()),
+                            )
+                        }));
+                        for param in params {
+                            self.ensure_type_param_constraint_dependencies_accessible(
+                                &dependee,
+                                access,
+                                &param.constraint,
+                                param.span,
+                            )?;
+                        }
+                        self.ensure_type_annotation_dependencies_accessible(
+                            &dependee, access, target,
+                        )
+                    })();
+                    self.pop_type_param_scope();
+                    result?;
+                }
                 StmtKind::ExtensionMethod(extension) => {
                     let access = access_level_from_specifiers(
                         &extension.method.effects,
@@ -1439,14 +1832,24 @@ impl Checker {
             ExprKind::Function {
                 params,
                 return_type,
+                body,
                 ..
-            } => self.ensure_function_signature_dependencies_accessible(
-                dependee,
-                access,
-                params,
-                return_type.as_ref(),
-                expr.span,
-            ),
+            } => {
+                self.ensure_function_signature_dependencies_accessible(
+                    dependee,
+                    access,
+                    params,
+                    return_type.as_ref(),
+                    expr.span,
+                )?;
+                self.ensure_type_function_target_dependencies_accessible(
+                    dependee,
+                    access,
+                    params,
+                    return_type.as_ref(),
+                    body,
+                )
+            }
             ExprKind::StructDefinition { fields, .. } => {
                 if !access_requires_dependency_validation(access) {
                     return Ok(());
@@ -1579,6 +1982,47 @@ impl Checker {
         }
     }
 
+    fn ensure_type_function_target_dependencies_accessible(
+        &mut self,
+        dependee: &str,
+        access: AccessLevel,
+        params: &[Param],
+        return_type: Option<&TypeAnnotation>,
+        body: &Expr,
+    ) -> Result<(), VerseError> {
+        if !access_requires_dependency_validation(access) {
+            return Ok(());
+        }
+        let Some((type_params, inferred_type_params)) = self.type_function_params(params)? else {
+            return Ok(());
+        };
+        let Some(return_type) = return_type else {
+            return Ok(());
+        };
+
+        let all_type_params = merge_type_param_lists(&inferred_type_params, &type_params)?;
+        self.push_type_param_scope(all_type_params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = (|| {
+            let return_value_type = self.annotation_to_type(Some(return_type))?;
+            if !type_can_be_used_as_type_value(&return_value_type) {
+                return Ok(());
+            }
+            let Ok(target) = self.expr_to_type_name(body) else {
+                return Ok(());
+            };
+            self.ensure_type_name_dependencies_accessible(dependee, access, &target, body.span)?;
+            let target_type = self.type_name_to_type_name(&target, body.span)?;
+            self.ensure_type_dependencies_accessible(dependee, access, &target_type, body.span)
+        })();
+        self.pop_type_param_scope();
+        result
+    }
+
     fn ensure_class_parent_dependencies_accessible(
         &mut self,
         dependee: &str,
@@ -1667,10 +2111,16 @@ impl Checker {
         constraint: &TypeParamConstraint,
         span: Span,
     ) -> Result<(), VerseError> {
-        let TypeParamConstraint::Subtype(parent) = constraint else {
-            return Ok(());
-        };
-        self.ensure_type_name_dependencies_accessible(dependee, access, parent, span)
+        match constraint {
+            TypeParamConstraint::Type => Ok(()),
+            TypeParamConstraint::Subtype(parent) => {
+                self.ensure_type_name_dependencies_accessible(dependee, access, parent, span)
+            }
+            TypeParamConstraint::TypeBounds { lower, upper } => {
+                self.ensure_type_name_dependencies_accessible(dependee, access, lower, span)?;
+                self.ensure_type_name_dependencies_accessible(dependee, access, upper, span)
+            }
+        }
     }
 
     fn ensure_type_annotation_dependencies_accessible(
@@ -1727,6 +2177,10 @@ impl Checker {
                 }
                 self.ensure_type_name_dependencies_accessible(dependee, access, return_type, span)?;
             }
+            TypeName::TypeBounds { lower, upper } => {
+                self.ensure_type_name_dependencies_accessible(dependee, access, lower, span)?;
+                self.ensure_type_name_dependencies_accessible(dependee, access, upper, span)?;
+            }
             TypeName::Applied { name, args } => {
                 if !is_official_parametric_type_name(name)
                     && let Some(qualified) = self.resolve_parametric_type_reference(name)
@@ -1763,6 +2217,7 @@ impl Checker {
             | TypeName::Comparable
             | TypeName::Type
             | TypeName::IntRange { .. }
+            | TypeName::FloatRange(_)
             | TypeName::Function => {}
         }
         Ok(())
@@ -1794,15 +2249,29 @@ impl Checker {
                     self.ensure_type_dependencies_accessible(dependee, access, &parent_type, span)?;
                 }
             }
+            Type::Param(_, TypeParamConstraint::TypeBounds { lower, upper }) => {
+                if let Some(lower_type) = self.type_name_to_type_name_for_assignability(lower) {
+                    self.ensure_type_dependencies_accessible(dependee, access, &lower_type, span)?;
+                }
+                if let Some(upper_type) = self.type_name_to_type_name_for_assignability(upper) {
+                    self.ensure_type_dependencies_accessible(dependee, access, &upper_type, span)?;
+                }
+            }
             Type::Array(item)
             | Type::Option(item)
             | Type::Event(Some(item))
+            | Type::SubscribableEvent(item)
+            | Type::SubscribableEventIntrnl(Some(item))
+            | Type::StickyEvent(Some(item))
             | Type::Task(item)
             | Type::Generator(Some(item))
+            | Type::TypeValueOf(item)
             | Type::Subtype(item)
             | Type::CastableSubtype(item)
             | Type::ConcreteSubtype(item)
             | Type::ClassifiableSubset(item)
+            | Type::ClassifiableSubsetKey(item)
+            | Type::ClassifiableSubsetVar(item)
             | Type::Modifier(item)
             | Type::ModifierStack(item)
             | Type::Awaitable(Some(item))
@@ -1811,9 +2280,16 @@ impl Checker {
             | Type::Listenable(Some(item)) => {
                 self.ensure_type_dependencies_accessible(dependee, access, item, span)?;
             }
+            Type::TypeValueBounds { lower, upper } => {
+                self.ensure_type_dependencies_accessible(dependee, access, lower, span)?;
+                self.ensure_type_dependencies_accessible(dependee, access, upper, span)?;
+            }
             Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
                 self.ensure_type_dependencies_accessible(dependee, access, key, span)?;
                 self.ensure_type_dependencies_accessible(dependee, access, value, span)?;
+            }
+            Type::SuccessResult(item) | Type::ErrorResult(item) => {
+                self.ensure_type_dependencies_accessible(dependee, access, item, span)?;
             }
             Type::Tuple(items) => {
                 for item in items {
@@ -1851,6 +2327,7 @@ impl Checker {
             | Type::Int
             | Type::IntRange(_)
             | Type::Float
+            | Type::FloatRange(_)
             | Type::Rational
             | Type::Number
             | Type::Bool
@@ -1868,6 +2345,8 @@ impl Checker {
             | Type::Range
             | Type::Module(_)
             | Type::Event(None)
+            | Type::SubscribableEventIntrnl(None)
+            | Type::StickyEvent(None)
             | Type::Generator(None)
             | Type::Awaitable(None)
             | Type::Subscribable(None)
@@ -2217,6 +2696,465 @@ impl Checker {
         }
     }
 
+    pub(super) fn resolve_type_function_reference(&self, name: &str) -> Option<String> {
+        if self.type_functions.contains_key(name) {
+            return Some(name.to_string());
+        }
+        if name.contains('.') {
+            return None;
+        }
+
+        if !self.module_path.is_empty() {
+            let qualified = self.current_qualified_name(name);
+            if self.type_functions.contains_key(&qualified) {
+                return Some(qualified);
+            }
+        }
+
+        if let Some(module_name) = self.current_module_name()
+            && let Some(module_info) = self.module_types.get(&module_name)
+            && let Some(qualified) = module_info.imports.iter().find_map(|module_name| {
+                let qualified = format!("{module_name}.{name}");
+                self.type_functions
+                    .contains_key(&qualified)
+                    .then_some(qualified)
+            })
+        {
+            return Some(qualified);
+        }
+
+        self.scope_imports.iter().rev().find_map(|imports| {
+            imports.iter().find_map(|module_name| {
+                let qualified = format!("{module_name}.{name}");
+                self.type_functions
+                    .contains_key(&qualified)
+                    .then_some(qualified)
+            })
+        })
+    }
+
+    fn ensure_type_function_reference_accessible(
+        &self,
+        qualified: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Some((module_name, member_name)) = qualified.rsplit_once('.') else {
+            return Ok(());
+        };
+        let Some(module_info) = self.module_types.get(module_name) else {
+            return Ok(());
+        };
+        let access = module_info
+            .member_access
+            .get(member_name)
+            .copied()
+            .unwrap_or(AccessLevel::Internal);
+        self.ensure_module_member_accessible(module_name, access, member_name, span)
+    }
+
+    pub(super) fn instantiate_type_function(
+        &mut self,
+        display_name: &str,
+        qualified: &str,
+        args: &[Type],
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        self.ensure_type_function_reference_accessible(qualified, span)?;
+        let Some(infos) = self.type_functions.get(qualified).cloned() else {
+            return Err(VerseError::check_at(
+                format!("unknown type function `{display_name}`"),
+                span,
+            ));
+        };
+        let (info, inferred) =
+            self.select_type_function_candidate(display_name, &infos, args, span)?;
+        self.push_type_param_scope(inferred);
+        let previous_module_path = std::mem::replace(&mut self.module_path, info.module_path);
+        let result = self.type_name_to_type_name(&info.target, span);
+        self.module_path = previous_module_path;
+        self.pop_type_param_scope();
+        result
+    }
+
+    pub(super) fn instantiate_type_function_target_name(
+        &mut self,
+        display_name: &str,
+        qualified: &str,
+        args: &[Type],
+        span: Span,
+    ) -> Result<Option<TypeName>, VerseError> {
+        self.ensure_type_function_reference_accessible(qualified, span)?;
+        let Some(infos) = self.type_functions.get(qualified).cloned() else {
+            return Err(VerseError::check_at(
+                format!("unknown type function `{display_name}`"),
+                span,
+            ));
+        };
+        let (info, inferred) =
+            self.select_type_function_candidate(display_name, &infos, args, span)?;
+        Ok(substitute_type_name_params(&info.target, &inferred))
+    }
+
+    pub(super) fn select_type_function_candidate(
+        &mut self,
+        display_name: &str,
+        infos: &[TypeFunctionInfo],
+        args: &[Type],
+        span: Span,
+    ) -> Result<(TypeFunctionInfo, HashMap<String, Type>), VerseError> {
+        if let [info] = infos {
+            let info = info.clone();
+            if info.params.len() != args.len() {
+                return Err(VerseError::check_at(
+                    format!(
+                        "type function `{display_name}` expected {} type arguments, got {}",
+                        info.params.len(),
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let inferred = self.infer_type_function_type_params(display_name, &info, args, span)?;
+            return Ok((info, inferred));
+        }
+
+        let mut matches = Vec::new();
+        for info in infos.iter().filter(|info| info.params.len() == args.len()) {
+            let mut checker = self.clone();
+            if let Ok(inferred) =
+                checker.infer_type_function_type_params(display_name, info, args, span)
+            {
+                let score =
+                    checker.type_function_candidate_match_score(info, args, &inferred, span)?;
+                matches.push((score, info.clone()));
+            }
+        }
+
+        let info = match matches.as_slice() {
+            [] => {
+                return Err(VerseError::check_at(
+                    format!(
+                        "no overload of type function `{display_name}` matches type arguments ({})",
+                        render_type_list(args)
+                    ),
+                    span,
+                ));
+            }
+            matches => {
+                let best_score = matches
+                    .iter()
+                    .map(|(score, _)| *score)
+                    .min()
+                    .expect("non-empty matches");
+                let mut best = matches
+                    .iter()
+                    .filter(|(score, _)| *score == best_score)
+                    .map(|(_, info)| info.clone())
+                    .collect::<Vec<_>>();
+                if best.len() == 1 {
+                    best.pop().expect("one best match")
+                } else {
+                    return Err(VerseError::check_at(
+                        format!(
+                            "type function `{display_name}` overload is ambiguous for type arguments ({})",
+                            render_type_list(args)
+                        ),
+                        span,
+                    ));
+                }
+            }
+        };
+
+        let inferred = self.infer_type_function_type_params(display_name, &info, args, span)?;
+        Ok((info, inferred))
+    }
+
+    fn type_function_candidate_match_score(
+        &mut self,
+        info: &TypeFunctionInfo,
+        args: &[Type],
+        inferred: &HashMap<String, Type>,
+        span: Span,
+    ) -> Result<usize, VerseError> {
+        let mut score = 0usize;
+        for (param, actual) in info.params.iter().zip(args) {
+            score += self.type_function_constraint_match_score(
+                &param.constraint,
+                actual,
+                Some(inferred),
+                span,
+            )?;
+        }
+        for param in &info.inferred_params {
+            let Some(actual) = inferred.get(&param.name) else {
+                continue;
+            };
+            score += self.type_function_constraint_match_score(
+                &param.constraint,
+                actual,
+                Some(inferred),
+                span,
+            )?;
+        }
+        Ok(score)
+    }
+
+    fn type_function_constraint_match_score(
+        &mut self,
+        constraint: &TypeParamConstraint,
+        actual: &Type,
+        inferred: Option<&HashMap<String, Type>>,
+        span: Span,
+    ) -> Result<usize, VerseError> {
+        match constraint {
+            TypeParamConstraint::Type => Ok(1_000),
+            TypeParamConstraint::Subtype(expected_name) => {
+                let expected =
+                    self.type_name_to_type_name_for_constraint(expected_name, inferred, span)?;
+                Ok(self
+                    .type_function_type_argument_match_score(&expected, actual)
+                    .unwrap_or(500))
+            }
+            TypeParamConstraint::TypeBounds { lower, upper } => {
+                let upper = self.type_name_to_type_name_for_constraint(upper, inferred, span)?;
+                let lower = self.type_name_to_type_name_for_constraint(lower, inferred, span)?;
+                let upper_score = self
+                    .type_function_type_argument_match_score(&upper, actual)
+                    .unwrap_or(500);
+                let lower_score = self
+                    .type_function_type_argument_match_score(actual, &lower)
+                    .unwrap_or(500);
+                Ok(upper_score + lower_score + 10)
+            }
+        }
+    }
+
+    fn type_function_type_argument_match_score(
+        &self,
+        expected: &Type,
+        actual: &Type,
+    ) -> Option<usize> {
+        if expected == actual {
+            return Some(0);
+        }
+
+        match (expected, actual) {
+            (Type::Class(expected), Type::Class(actual)) => {
+                self.class_subtype_distance(actual, expected)
+            }
+            (Type::Interface(expected), Type::Interface(actual)) => {
+                self.interface_subtype_distance(actual, expected)
+            }
+            (Type::Interface(expected), Type::Class(actual)) => {
+                self.class_interface_distance(actual, expected)
+            }
+            (Type::CastableSubtype(expected), Type::Class(actual))
+                if self.class_type_value_is_castable_subtype(actual, expected) =>
+            {
+                let actual = Type::Class(actual.clone());
+                self.type_function_type_argument_match_score(expected, &actual)
+                    .map(|score| score + 1)
+                    .or(Some(100))
+            }
+            (Type::ConcreteSubtype(expected), Type::Class(actual))
+                if self.class_type_value_is_concrete_subtype(actual, expected) =>
+            {
+                let actual = Type::Class(actual.clone());
+                self.type_function_type_argument_match_score(expected, &actual)
+                    .map(|score| score + 1)
+                    .or(Some(100))
+            }
+            _ if self.type_argument_satisfies_constraint(expected, actual) => Some(100),
+            _ => None,
+        }
+    }
+
+    fn class_subtype_distance(&self, actual: &str, expected: &str) -> Option<usize> {
+        if actual == expected {
+            return Some(0);
+        }
+
+        let builtin_distance = match (actual, expected) {
+            ("player", "agent") | ("agent", "entity") => Some(1),
+            ("player", "entity") => Some(2),
+            _ => None,
+        };
+        if builtin_distance.is_some() {
+            return builtin_distance;
+        }
+
+        let mut distance = 0usize;
+        let mut current = Some(actual);
+        while let Some(name) = current {
+            if name == expected {
+                return Some(distance);
+            }
+            distance += 1;
+            current = self
+                .struct_types
+                .get(name)
+                .and_then(|info| info.base.as_deref());
+        }
+        None
+    }
+
+    fn interface_subtype_distance(&self, actual: &str, expected: &str) -> Option<usize> {
+        if actual == expected {
+            return Some(0);
+        }
+
+        let info = self.interface_types.get(actual)?;
+        info.parents
+            .iter()
+            .filter_map(|parent| {
+                self.interface_subtype_distance(parent, expected)
+                    .map(|distance| distance + 1)
+            })
+            .min()
+    }
+
+    fn class_interface_distance(&self, actual: &str, expected: &str) -> Option<usize> {
+        let mut best = None;
+        let mut class_distance = 0usize;
+        let mut current = Some(actual);
+
+        while let Some(name) = current {
+            let info = self.struct_types.get(name)?;
+            for interface in &info.interfaces {
+                if let Some(interface_distance) =
+                    self.interface_subtype_distance(interface, expected)
+                {
+                    let distance = class_distance + interface_distance;
+                    best = Some(best.map_or(distance, |best: usize| best.min(distance)));
+                }
+            }
+            class_distance += 1;
+            current = info.base.as_deref();
+        }
+
+        best
+    }
+
+    fn infer_type_function_type_params(
+        &mut self,
+        display_name: &str,
+        info: &TypeFunctionInfo,
+        args: &[Type],
+        span: Span,
+    ) -> Result<HashMap<String, Type>, VerseError> {
+        let mut inferred = info
+            .params
+            .iter()
+            .zip(args.iter())
+            .map(|(param, arg)| (param.name.clone(), arg.clone()))
+            .collect::<HashMap<_, _>>();
+        for (param, arg) in info.params.iter().zip(args) {
+            self.infer_type_params_from_constraint(&param.constraint, arg, &mut inferred)
+                .ok_or_else(|| {
+                    VerseError::check_at(
+                        format!(
+                            "could not infer type parameters for type function `{display_name}`"
+                        ),
+                        span,
+                    )
+                })?;
+        }
+        for param in &info.inferred_params {
+            if !inferred.contains_key(&param.name) {
+                return Err(VerseError::check_at(
+                    format!(
+                        "could not infer type parameter `{}` for type function `{display_name}`",
+                        param.name
+                    ),
+                    span,
+                ));
+            }
+        }
+        for param in info.inferred_params.iter().chain(&info.params) {
+            let Some(actual) = inferred.get(&param.name).cloned() else {
+                return Err(VerseError::check_at(
+                    format!(
+                        "could not infer type parameter `{}` for type function `{display_name}`",
+                        param.name
+                    ),
+                    span,
+                ));
+            };
+            self.ensure_type_arg_satisfies_constraint_with_inferred(
+                &param.name,
+                &param.constraint,
+                &actual,
+                Some(&inferred),
+                span,
+            )?;
+        }
+        Ok(inferred)
+    }
+
+    fn instantiate_type_function_for_assignability(
+        &self,
+        qualified: &str,
+        args: &[Type],
+    ) -> Option<Type> {
+        let infos = self.type_functions.get(qualified)?;
+        let (info, inferred) =
+            self.select_type_function_candidate_for_assignability(infos, args)?;
+        let mut checker = self.clone();
+        checker.push_type_param_scope(inferred);
+        let previous_module_path =
+            std::mem::replace(&mut checker.module_path, info.module_path.clone());
+        let result = checker.type_name_to_type_name_for_assignability(&info.target);
+        checker.module_path = previous_module_path;
+        checker.pop_type_param_scope();
+        result
+    }
+
+    fn select_type_function_candidate_for_assignability(
+        &self,
+        infos: &[TypeFunctionInfo],
+        args: &[Type],
+    ) -> Option<(TypeFunctionInfo, HashMap<String, Type>)> {
+        if let [info] = infos {
+            if info.params.len() != args.len() {
+                return None;
+            }
+            let mut checker = self.clone();
+            let inferred = checker
+                .infer_type_function_type_params("", info, args, Span::new(0, 0, 0, 0))
+                .ok()?;
+            return Some((info.clone(), inferred));
+        }
+
+        let span = Span::new(0, 0, 0, 0);
+        let matches = infos
+            .iter()
+            .filter(|info| info.params.len() == args.len())
+            .filter_map(|info| {
+                let mut checker = self.clone();
+                let inferred = checker
+                    .infer_type_function_type_params("", info, args, span)
+                    .ok()?;
+                let score = checker
+                    .type_function_candidate_match_score(info, args, &inferred, span)
+                    .ok()?;
+                Some((score, info.clone(), inferred))
+            })
+            .collect::<Vec<_>>();
+
+        match matches.as_slice() {
+            [] => None,
+            matches => {
+                let best_score = matches.iter().map(|(score, _, _)| *score).min()?;
+                let mut best = matches
+                    .iter()
+                    .filter(|(score, _, _)| *score == best_score)
+                    .map(|(_, info, inferred)| (info.clone(), inferred.clone()))
+                    .collect::<Vec<_>>();
+                if best.len() == 1 { best.pop() } else { None }
+            }
+        }
+    }
+
     pub(super) fn resolve_type_param(&self, name: &str) -> Option<Type> {
         if name.contains('.') {
             return None;
@@ -2225,6 +3163,28 @@ impl Checker {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    pub(super) fn define_type_param(
+        &mut self,
+        name: &str,
+        value_type: Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if name.contains('.') {
+            return Ok(());
+        }
+        let Some(scope) = self.type_param_scopes.last_mut() else {
+            return Ok(());
+        };
+        if scope.contains_key(name) {
+            return Err(VerseError::check_at(
+                format!("duplicate type parameter `{name}`"),
+                span,
+            ));
+        }
+        scope.insert(name.to_string(), value_type);
+        Ok(())
     }
 
     pub(super) fn push_type_param_scope(
@@ -2388,7 +3348,12 @@ impl Checker {
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
             TypeName::Type => Type::TypeValue,
+            TypeName::TypeBounds { lower, upper } => Type::TypeValueBounds {
+                lower: Box::new(self.type_name_to_type_name(lower, span)?),
+                upper: Box::new(self.type_name_to_type_name(upper, span)?),
+            },
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
+            TypeName::FloatRange(range) => Type::FloatRange(*range),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name(item, span)?,
                 None => Type::Unknown,
@@ -2452,12 +3417,16 @@ impl Checker {
                     .collect::<Result<Vec<_>, _>>()?;
                 if is_official_parametric_type_name(name) {
                     official_parametric_type(name, &args, span)?
+                } else if let Some(target) = self.resolve_type_function_reference(name) {
+                    self.instantiate_type_function(name, &target, &args, span)?
                 } else {
                     self.instantiate_parametric_type(name, &args, span)?
                 }
             }
             TypeName::Named(name) => {
-                if let Some(value_type) = self.resolve_type_param(name) {
+                if let Some(value_type) = builtin_numeric_alias_type(name) {
+                    value_type
+                } else if let Some(value_type) = self.resolve_type_param(name) {
                     value_type
                 } else if let Some(value_type) = self.type_aliases.get(name).cloned() {
                     self.ensure_qualified_type_alias_accessible(name, span)?;
@@ -2468,12 +3437,74 @@ impl Checker {
                 {
                     self.ensure_qualified_type_alias_accessible(&qualified, span)?;
                     value_type
+                } else if let Some(alias_name) = self.resolve_type_alias_reference(name, span)? {
+                    self.resolve_type_alias(&alias_name, &mut Vec::new())?
+                } else if let Some(value_type) =
+                    self.type_value_binding_annotation_type(name, span)?
+                {
+                    value_type
                 } else {
                     self.named_type_to_type(name, span)?
                 }
             }
         };
         Ok(value_type)
+    }
+
+    fn type_value_binding_annotation_type(
+        &self,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        let Some((value_type, mutable)) = self.type_value_binding_type(name, span)? else {
+            return Ok(None);
+        };
+
+        if mutable && type_can_be_used_as_type_value(&value_type) {
+            return Err(VerseError::check_at(
+                format!("mutable type value `{name}` cannot be used as a type annotation"),
+                span,
+            ));
+        }
+
+        if let Some(instance_type) = type_value_instance_type(&value_type) {
+            return Ok(Some(instance_type));
+        }
+
+        if type_can_be_used_as_type_value(&value_type) {
+            return Err(VerseError::check_at(
+                format!("type value `{name}` is not precise enough for a type annotation"),
+                span,
+            ));
+        }
+
+        Ok(None)
+    }
+
+    fn type_value_binding_type(
+        &self,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(Type, bool)>, VerseError> {
+        if let Some((module_name, member_name)) = name.rsplit_once('.') {
+            let Some(module_info) = self.module_types.get(module_name) else {
+                return Ok(None);
+            };
+            let Some(value_type) = module_info.members.get(member_name) else {
+                return Ok(None);
+            };
+            let access = module_info
+                .member_access
+                .get(member_name)
+                .copied()
+                .unwrap_or(AccessLevel::Internal);
+            self.ensure_module_member_accessible(module_name, access, member_name, span)?;
+            return Ok(Some((value_type.clone(), false)));
+        }
+
+        Ok(self
+            .lookup_accessible(name, span)?
+            .map(|symbol| (symbol.value_type, symbol.mutable)))
     }
 
     pub(super) fn type_name_to_type_name_for_assignability(&self, name: &TypeName) -> Option<Type> {
@@ -2492,7 +3523,12 @@ impl Checker {
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
             TypeName::Type => Type::TypeValue,
+            TypeName::TypeBounds { lower, upper } => Type::TypeValueBounds {
+                lower: Box::new(self.type_name_to_type_name_for_assignability(lower)?),
+                upper: Box::new(self.type_name_to_type_name_for_assignability(upper)?),
+            },
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
+            TypeName::FloatRange(range) => Type::FloatRange(*range),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name_for_assignability(item)?,
                 None => Type::Unknown,
@@ -2546,6 +3582,8 @@ impl Checker {
                     .collect::<Option<Vec<_>>>()?;
                 if is_official_parametric_type_name(name) {
                     official_parametric_type(name, &args, Span::new(0, 0, 0, 0)).ok()?
+                } else if let Some(target) = self.resolve_type_function_reference(name) {
+                    self.instantiate_type_function_for_assignability(&target, &args)?
                 } else {
                     let qualified = self.resolve_parametric_type_reference(name)?;
                     let info = self.parametric_types.get(&qualified)?;
@@ -2571,7 +3609,9 @@ impl Checker {
                 }
             }
             TypeName::Named(name) => {
-                if let Some(value_type) = self.resolve_type_param(name) {
+                if let Some(value_type) = builtin_numeric_alias_type(name) {
+                    value_type
+                } else if let Some(value_type) = self.resolve_type_param(name) {
                     value_type
                 } else if let Some(value_type) = self.type_aliases.get(name).cloned() {
                     value_type
@@ -2593,10 +3633,13 @@ impl Checker {
         value_type: &Type,
         span: Span,
     ) -> Result<Option<Type>, VerseError> {
-        let Type::Param(_, TypeParamConstraint::Subtype(parent)) = value_type else {
-            return Ok(None);
+        let parent = match value_type {
+            Type::Param(_, TypeParamConstraint::Subtype(parent)) => parent,
+            Type::Param(_, TypeParamConstraint::TypeBounds { upper, .. }) => upper,
+            _ => return Ok(None),
         };
         let supertype = self.type_name_to_type_name(parent, span)?;
+        let supertype = type_param_constraint_instance_supertype(supertype);
         Ok((!matches!(supertype, Type::Param(_, _))).then_some(supertype))
     }
 
@@ -2604,10 +3647,13 @@ impl Checker {
         &self,
         value_type: &Type,
     ) -> Option<Type> {
-        let Type::Param(_, TypeParamConstraint::Subtype(parent)) = value_type else {
-            return None;
+        let parent = match value_type {
+            Type::Param(_, TypeParamConstraint::Subtype(parent)) => parent,
+            Type::Param(_, TypeParamConstraint::TypeBounds { upper, .. }) => upper,
+            _ => return None,
         };
         let supertype = self.type_name_to_type_name_for_assignability(parent)?;
+        let supertype = type_param_constraint_instance_supertype(supertype);
         (!matches!(supertype, Type::Param(_, _))).then_some(supertype)
     }
 
@@ -2633,6 +3679,102 @@ impl Checker {
                 ParamPattern::Binding | ParamPattern::Anonymous => None,
             },
         })
+    }
+
+    pub(super) fn dependent_type_value_param_signature(
+        &mut self,
+        params: &[Param],
+        return_type: Option<&TypeAnnotation>,
+    ) -> Result<(Vec<Type>, Vec<ParamSpec>, Vec<Type>), VerseError> {
+        let mut signature_types = Vec::with_capacity(params.len());
+        let mut specs = Vec::with_capacity(params.len());
+        let mut body_types = Vec::with_capacity(params.len());
+
+        for (index, param) in params.iter().enumerate() {
+            let body_type = self.annotation_to_type(param.annotation.as_ref())?;
+            let used_as_type = type_value_param_used_as_type(
+                &param.name,
+                &params[index + 1..],
+                return_type.map(|annotation| &annotation.name),
+            );
+            let signature_type = if used_as_type {
+                self.register_dependent_type_value_param(param, &body_type)?
+            } else {
+                body_type.clone()
+            };
+            let tuple_items = match &param.pattern {
+                ParamPattern::Tuple(items) => {
+                    Some(self.dependent_type_value_param_signature(items, None)?.1)
+                }
+                ParamPattern::Binding | ParamPattern::Anonymous => None,
+            };
+            specs.push(ParamSpec {
+                name: param.name.clone(),
+                value_type: signature_type.clone(),
+                named: param.named,
+                has_default: param.default.is_some(),
+                tuple_items,
+            });
+            signature_types.push(signature_type);
+            body_types.push(body_type);
+        }
+
+        Ok((signature_types, specs, body_types))
+    }
+
+    fn register_dependent_type_value_param(
+        &mut self,
+        param: &Param,
+        value_type: &Type,
+    ) -> Result<Type, VerseError> {
+        let ParamPattern::Binding = &param.pattern else {
+            return Ok(value_type.clone());
+        };
+        let Some((type_param, signature_type)) =
+            Self::dependent_type_value_param_pattern(&param.name, value_type)
+        else {
+            return Ok(value_type.clone());
+        };
+        if let Some(existing) = self.resolve_type_param(&param.name) {
+            if existing == type_param {
+                return Ok(signature_type);
+            }
+        }
+        self.define_type_param(&param.name, type_param, param.span)?;
+        Ok(signature_type)
+    }
+
+    fn dependent_type_value_param_pattern(name: &str, value_type: &Type) -> Option<(Type, Type)> {
+        let (constraint_name, parent) = match value_type {
+            Type::Subtype(parent) => ("subtype", parent.as_ref()),
+            Type::CastableSubtype(parent) => ("castable_subtype", parent.as_ref()),
+            Type::ConcreteSubtype(parent) => ("concrete_subtype", parent.as_ref()),
+            Type::TypeValue => {
+                let type_param = Type::Param(name.to_string(), TypeParamConstraint::Type);
+                return Some((type_param.clone(), Type::TypeValueOf(Box::new(type_param))));
+            }
+            _ => return None,
+        };
+        let parent_name = type_to_constraint_type_name(parent)?;
+        let constraint_parent = if constraint_name == "subtype" {
+            parent_name
+        } else {
+            TypeName::Applied {
+                name: constraint_name.to_string(),
+                args: vec![parent_name],
+            }
+        };
+        let type_param = Type::Param(
+            name.to_string(),
+            TypeParamConstraint::Subtype(constraint_parent),
+        );
+        let signature_type = match value_type {
+            Type::Subtype(_) => Type::Subtype(Box::new(type_param.clone())),
+            Type::CastableSubtype(_) => Type::CastableSubtype(Box::new(type_param.clone())),
+            Type::ConcreteSubtype(_) => Type::ConcreteSubtype(Box::new(type_param.clone())),
+            _ => return None,
+        };
+        Some((type_param, signature_type))
     }
 
     pub(super) fn instantiate_parametric_type(
@@ -2666,7 +3808,30 @@ impl Checker {
         }
         self.ensure_type_arguments_satisfy_constraints(&info.params, args, span)?;
 
+        if info.kind == ParametricTypeKind::Alias {
+            let Some(target) = info.target.as_ref() else {
+                return Err(VerseError::check_at(
+                    format!("unknown parametric type `{name}`"),
+                    span,
+                ));
+            };
+            let previous_module_path = std::mem::replace(&mut self.module_path, info.module_path);
+            self.push_type_param_scope(
+                info.params
+                    .iter()
+                    .zip(args)
+                    .map(|(param, arg)| (param.name.clone(), arg.clone())),
+            );
+            let result = self.type_name_to_type(target);
+            self.pop_type_param_scope();
+            self.module_path = previous_module_path;
+            return result;
+        }
+
         let instance_name = render_parametric_instance_type_name(&qualified, args);
+        self.parametric_type_instances
+            .entry(instance_name.clone())
+            .or_insert_with(|| args.to_vec());
         match info.kind {
             ParametricTypeKind::Struct if self.struct_types.contains_key(&instance_name) => {
                 return Ok(Type::Struct(instance_name));
@@ -2945,7 +4110,7 @@ impl Checker {
             TypeParamConstraint::Subtype(expected_name) => {
                 let expected =
                     self.type_name_to_type_name_for_constraint(expected_name, inferred, span)?;
-                if self.is_assignable(&expected, actual) {
+                if self.type_argument_satisfies_constraint(&expected, actual) {
                     Ok(())
                 } else {
                     Err(VerseError::check_at(
@@ -2956,6 +4121,44 @@ impl Checker {
                     ))
                 }
             }
+            TypeParamConstraint::TypeBounds { lower, upper } => {
+                let upper = self.type_name_to_type_name_for_constraint(upper, inferred, span)?;
+                if !self.type_argument_satisfies_constraint(&upper, actual) {
+                    return Err(VerseError::check_at(
+                        format!(
+                            "type argument `{actual}` for `{param_name}` must be a subtype of `{upper}`"
+                        ),
+                        span,
+                    ));
+                }
+
+                let lower = self.type_name_to_type_name_for_constraint(lower, inferred, span)?;
+                if self.type_argument_satisfies_constraint(actual, &lower) {
+                    Ok(())
+                } else {
+                    Err(VerseError::check_at(
+                        format!(
+                            "type argument `{actual}` for `{param_name}` must be a supertype of `{lower}`"
+                        ),
+                        span,
+                    ))
+                }
+            }
+        }
+    }
+
+    fn type_argument_satisfies_constraint(&self, expected: &Type, actual: &Type) -> bool {
+        match (expected, actual) {
+            (Type::Subtype(expected), Type::Class(actual)) => {
+                self.class_type_value_satisfies_subtype(actual, expected)
+            }
+            (Type::CastableSubtype(expected), Type::Class(actual)) => {
+                self.class_type_value_is_castable_subtype(actual, expected)
+            }
+            (Type::ConcreteSubtype(expected), Type::Class(actual)) => {
+                self.class_type_value_is_concrete_subtype(actual, expected)
+            }
+            _ => self.is_assignable(expected, actual),
         }
     }
 
@@ -2981,16 +4184,24 @@ impl Checker {
     pub(super) fn ensure_inferred_type_param_constraints(
         &mut self,
         param_types: Option<&[Type]>,
+        return_type: Option<&Type>,
         inferred: &HashMap<String, Type>,
         span: Span,
     ) -> Result<(), VerseError> {
-        let Some(param_types) = param_types else {
-            return Ok(());
-        };
         let mut checked = Vec::new();
-        for param_type in param_types {
+        if let Some(param_types) = param_types {
+            for param_type in param_types {
+                self.ensure_inferred_type_param_constraints_inner(
+                    param_type,
+                    inferred,
+                    span,
+                    &mut checked,
+                )?;
+            }
+        }
+        if let Some(return_type) = return_type {
             self.ensure_inferred_type_param_constraints_inner(
-                param_type,
+                return_type,
                 inferred,
                 span,
                 &mut checked,
@@ -3025,18 +4236,28 @@ impl Checker {
             Type::Array(item)
             | Type::Option(item)
             | Type::Task(item)
+            | Type::TypeValueOf(item)
             | Type::Subtype(item)
             | Type::CastableSubtype(item)
             | Type::ConcreteSubtype(item)
             | Type::ClassifiableSubset(item)
+            | Type::ClassifiableSubsetKey(item)
+            | Type::ClassifiableSubsetVar(item)
             | Type::Modifier(item)
             | Type::ModifierStack(item)
             | Type::Signalable(item) => {
                 self.ensure_inferred_type_param_constraints_inner(item, inferred, span, checked)
             }
+            Type::TypeValueBounds { lower, upper } => {
+                self.ensure_inferred_type_param_constraints_inner(lower, inferred, span, checked)?;
+                self.ensure_inferred_type_param_constraints_inner(upper, inferred, span, checked)
+            }
             Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => {
                 self.ensure_inferred_type_param_constraints_inner(key, inferred, span, checked)?;
                 self.ensure_inferred_type_param_constraints_inner(value, inferred, span, checked)
+            }
+            Type::SuccessResult(item) | Type::ErrorResult(item) => {
+                self.ensure_inferred_type_param_constraints_inner(item, inferred, span, checked)
             }
             Type::Tuple(items) => {
                 for item in items {
@@ -3047,6 +4268,8 @@ impl Checker {
                 Ok(())
             }
             Type::Event(payload)
+            | Type::SubscribableEventIntrnl(payload)
+            | Type::StickyEvent(payload)
             | Type::Generator(payload)
             | Type::Awaitable(payload)
             | Type::Subscribable(payload)
@@ -3057,6 +4280,9 @@ impl Checker {
                     )?;
                 }
                 Ok(())
+            }
+            Type::SubscribableEvent(payload) => {
+                self.ensure_inferred_type_param_constraints_inner(payload, inferred, span, checked)
             }
             Type::Function {
                 param_types,
@@ -3107,13 +4333,33 @@ impl Checker {
         span: Span,
     ) -> Result<Type, VerseError> {
         let substituted = substitute_type_params(value_type, inferred);
-        match substituted {
+        self.substitute_parametric_instance_names_runtime(substituted, inferred, span)
+    }
+
+    fn substitute_parametric_instance_names_runtime(
+        &mut self,
+        value_type: Type,
+        inferred: &HashMap<String, Type>,
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        match value_type {
             Type::Struct(name) => Ok(Type::Struct(
                 self.substitute_parametric_instance_name(&name, inferred, span)?,
             )),
             Type::StructType(name) => Ok(Type::StructType(
                 self.substitute_parametric_instance_name(&name, inferred, span)?,
             )),
+            Type::TypeValueOf(item) => Ok(Type::TypeValueOf(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::TypeValueBounds { lower, upper } => Ok(Type::TypeValueBounds {
+                lower: Box::new(
+                    self.substitute_parametric_instance_names_runtime(*lower, inferred, span)?,
+                ),
+                upper: Box::new(
+                    self.substitute_parametric_instance_names_runtime(*upper, inferred, span)?,
+                ),
+            }),
             Type::Class(name) => Ok(Type::Class(
                 self.substitute_parametric_instance_name(&name, inferred, span)?,
             )),
@@ -3126,8 +4372,206 @@ impl Checker {
             Type::InterfaceType(name) => Ok(Type::InterfaceType(
                 self.substitute_parametric_instance_name(&name, inferred, span)?,
             )),
+            Type::Array(item) => Ok(Type::Array(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::Map(key, value) => Ok(Type::Map(
+                Box::new(self.substitute_parametric_instance_names_runtime(*key, inferred, span)?),
+                Box::new(
+                    self.substitute_parametric_instance_names_runtime(*value, inferred, span)?,
+                ),
+            )),
+            Type::WeakMap(key, value) => Ok(Type::WeakMap(
+                Box::new(self.substitute_parametric_instance_names_runtime(*key, inferred, span)?),
+                Box::new(
+                    self.substitute_parametric_instance_names_runtime(*value, inferred, span)?,
+                ),
+            )),
+            Type::Tuple(items) => Ok(Type::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        self.substitute_parametric_instance_names_runtime(item, inferred, span)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Type::Option(item) => Ok(Type::Option(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::Result(success, error) => Ok(Type::Result(
+                Box::new(
+                    self.substitute_parametric_instance_names_runtime(*success, inferred, span)?,
+                ),
+                Box::new(
+                    self.substitute_parametric_instance_names_runtime(*error, inferred, span)?,
+                ),
+            )),
+            Type::SuccessResult(item) => Ok(Type::SuccessResult(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ErrorResult(item) => Ok(Type::ErrorResult(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::Event(payload) => Ok(Type::Event(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::SubscribableEvent(payload) => Ok(Type::SubscribableEvent(Box::new(
+                self.substitute_parametric_instance_names_runtime(*payload, inferred, span)?,
+            ))),
+            Type::SubscribableEventIntrnl(payload) => Ok(Type::SubscribableEventIntrnl(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::StickyEvent(payload) => Ok(Type::StickyEvent(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::Task(payload) => Ok(Type::Task(Box::new(
+                self.substitute_parametric_instance_names_runtime(*payload, inferred, span)?,
+            ))),
+            Type::Generator(payload) => Ok(Type::Generator(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::Subtype(item) => Ok(Type::Subtype(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::CastableSubtype(item) => Ok(Type::CastableSubtype(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ConcreteSubtype(item) => Ok(Type::ConcreteSubtype(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ClassifiableSubset(item) => Ok(Type::ClassifiableSubset(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ClassifiableSubsetKey(item) => Ok(Type::ClassifiableSubsetKey(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ClassifiableSubsetVar(item) => Ok(Type::ClassifiableSubsetVar(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::Modifier(item) => Ok(Type::Modifier(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::ModifierStack(item) => Ok(Type::ModifierStack(Box::new(
+                self.substitute_parametric_instance_names_runtime(*item, inferred, span)?,
+            ))),
+            Type::Awaitable(payload) => Ok(Type::Awaitable(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::Signalable(payload) => Ok(Type::Signalable(Box::new(
+                self.substitute_parametric_instance_names_runtime(*payload, inferred, span)?,
+            ))),
+            Type::Subscribable(payload) => Ok(Type::Subscribable(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::Listenable(payload) => Ok(Type::Listenable(
+                payload
+                    .map(|payload| {
+                        self.substitute_parametric_instance_names_runtime(*payload, inferred, span)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            )),
+            Type::Function {
+                arity,
+                arity_range,
+                effects,
+                param_types,
+                param_specs,
+                return_type,
+            } => Ok(Type::Function {
+                arity,
+                arity_range,
+                effects,
+                param_types: param_types
+                    .map(|params| {
+                        params
+                            .into_iter()
+                            .map(|param| {
+                                self.substitute_parametric_instance_names_runtime(
+                                    param, inferred, span,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?,
+                param_specs: param_specs
+                    .map(|specs| {
+                        specs
+                            .iter()
+                            .map(|spec| self.substitute_param_spec_runtime(spec, inferred, span))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?,
+                return_type: Box::new(self.substitute_parametric_instance_names_runtime(
+                    *return_type,
+                    inferred,
+                    span,
+                )?),
+            }),
+            Type::Overload(overloads) => Ok(Type::Overload(
+                overloads
+                    .into_iter()
+                    .map(|overload| {
+                        self.substitute_parametric_instance_names_runtime(overload, inferred, span)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
             other => Ok(other),
         }
+    }
+
+    pub(super) fn substitute_param_spec_runtime(
+        &mut self,
+        spec: &ParamSpec,
+        inferred: &HashMap<String, Type>,
+        span: Span,
+    ) -> Result<ParamSpec, VerseError> {
+        Ok(ParamSpec {
+            name: spec.name.clone(),
+            value_type: self.substitute_type_params_runtime(&spec.value_type, inferred, span)?,
+            named: spec.named,
+            has_default: spec.has_default,
+            tuple_items: spec
+                .tuple_items
+                .as_ref()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| self.substitute_param_spec_runtime(item, inferred, span))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?,
+        })
     }
 
     pub(super) fn substitute_parametric_instance_name(

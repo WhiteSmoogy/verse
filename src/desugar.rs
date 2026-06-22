@@ -48,6 +48,17 @@ fn desugar_stmt(statement: &Stmt) -> Stmt {
             params: params.clone(),
             expr: desugar_expr(expr),
         },
+        StmtKind::ParametricTypeAlias {
+            name,
+            specifiers,
+            params,
+            target,
+        } => StmtKind::ParametricTypeAlias {
+            name: name.clone(),
+            specifiers: specifiers.clone(),
+            params: params.clone(),
+            target: target.clone(),
+        },
         StmtKind::TypeAlias {
             name,
             specifiers,
@@ -174,6 +185,9 @@ fn desugar_expr_inner(expr: &Expr, preserve_colon_block: bool) -> Expr {
         },
         ExprKind::TypeLiteral { expr } => ExprKind::TypeLiteral {
             expr: Box::new(desugar_expr(expr)),
+        },
+        ExprKind::TypeAnnotationLiteral { annotation } => ExprKind::TypeAnnotationLiteral {
+            annotation: annotation.clone(),
         },
         ExprKind::External => ExprKind::External,
         ExprKind::Loop { body } => ExprKind::Loop {

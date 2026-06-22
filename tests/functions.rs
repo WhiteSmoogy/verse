@@ -1683,6 +1683,547 @@ if (Value := Updated.First[]). Value else. 0
 }
 
 #[test]
+fn evaluates_type_parameter_inference_from_parametric_class_argument() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Read(Box:box(t) where t:type):t =
+    Box.Value
+
+Read(box(int){Value := 42})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_parametric_class_base_argument() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+
+child_box(t:type) := class(base_box(t)):
+    Extra:int = 2
+
+Read(Box:base_box(t) where t:type):t =
+    Box.Value
+
+Read(child_box(int){Value := 42})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_parametric_interface_argument() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+Use(Item:reader(t) where t:type):t =
+    Item.Read()
+
+Use(box(int){Value := 42})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_type_parameter_inference_from_subtype_parametric_class_type_value() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Pick(Kind:subtype(box(t)) where t:type):t = external {}
+
+Pick(box(int))
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_type_parameter_inference_from_castable_parametric_class_type_value() {
+    let source = r#"
+castable_box(t:type) := class<castable>:
+    Value:t
+
+Pick(Kind:castable_subtype(castable_box(t)) where t:type):t = external {}
+
+Pick(castable_box(int))
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_type_parameter_inference_from_subtype_parametric_interface_type_value() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+Pick(Kind:subtype(reader(t)) where t:type):t = external {}
+
+Pick(box(int))
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_subtype_parametric_class_type_value_inferred_return_mismatch() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Pick(Kind:subtype(box(t)) where t:type):t = external {}
+
+Value:int = Pick(box(string))
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("annotated as `int`"));
+}
+
+#[test]
+fn rejects_subtype_parametric_interface_type_value_inferred_return_mismatch() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+Pick(Kind:subtype(reader(t)) where t:type):t = external {}
+
+Value:int = Pick(box(string))
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("annotated as `int`"));
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_dependent_parametric_subtype_constraint() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Read(Box:t where t:subtype(box(k)), k:type):k =
+    Box.Value
+
+Read(box(int){Value := 42})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_dependent_parametric_subtype_constraint_inferred_return_mismatch() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Read(Box:t where t:subtype(box(k)), k:type):k =
+    Box.Value
+
+Value:string = Read(box(int){Value := 42})
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("annotated as `string`"));
+}
+
+#[test]
+fn evaluates_chained_dependent_parametric_subtype_constraint() {
+    let source = r#"
+cell(t:type) := class:
+    Value:t
+
+box(t:type) := class:
+    Value:t
+
+Read(Box:t where t:subtype(box(k)), k:subtype(cell(u)), u:type):tuple(k, u) = external {}
+
+Read(box(cell(int)){Value := cell(int){Value := 42}})
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Tuple(vec![Type::Class("cell(int)".to_string()), Type::Int])
+    );
+}
+
+#[test]
+fn rejects_chained_dependent_parametric_subtype_constraint_inferred_return_mismatch() {
+    let source = r#"
+cell(t:type) := class:
+    Value:t
+
+box(t:type) := class:
+    Value:t
+
+Read(Box:t where t:subtype(box(k)), k:subtype(cell(u)), u:type):tuple(k, u) = external {}
+
+Value:tuple(cell(int), string) = Read(box(cell(int)){Value := cell(int){Value := 42}})
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("annotated as `tuple(cell(int), string)`")
+    );
+}
+
+#[test]
+fn checks_dependent_castable_type_value_constraint_inferred_return() {
+    let source = r#"
+puzzle_light := class<castable>(tag){}
+
+Pick(Kind:t where t:castable_subtype(k), k:type):k = external {}
+
+Pick(puzzle_light)
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Class("puzzle_light".to_string())
+    );
+}
+
+#[test]
+fn checks_dependent_nested_concrete_type_value_constraint_inferred_return() {
+    let source = r#"
+puzzle_light := class<concrete><castable>(tag){}
+
+Pick(Kind:t where t:concrete_subtype(castable_subtype(k)), k:type):k = external {}
+
+Pick(puzzle_light)
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Class("puzzle_light".to_string())
+    );
+}
+
+#[test]
+fn evaluates_dependent_subtype_value_parameter_annotation() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+Pick(Kind:subtype(base_item), Item:Kind):Kind =
+    Item
+
+Picked := Pick(child_item, child_item{Value := 40, Score := 2})
+Picked.Value + Picked.Score
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_dependent_subtype_type_value_cast() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+Cast(Kind:subtype(base_item), Item:base_item)<decides><transacts>:Kind =
+    Kind[Item]
+
+Base:base_item = child_item{Value := 40, Score := 2}
+if (Picked := Cast[child_item, Base]). Picked.Value + Picked.Score else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_dependent_subtype_type_value_cast_failure() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+other_item := class(base_item):
+    Rank:int = 0
+
+Cast(Kind:subtype(base_item), Item:base_item)<decides><transacts>:Kind =
+    Kind[Item]
+
+Base:base_item = other_item{Value := 40, Rank := 2}
+if (Picked := Cast[child_item, Base]). Picked.Score else. 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_dependent_subtype_type_value_cast_unrelated_argument() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+other_item := class:
+    Rank:int = 0
+
+Cast(Kind:subtype(base_item), Item:other_item)<decides><transacts>:Kind =
+    Kind[Item]
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot cast class `other_item` to unrelated class `base_item`")
+    );
+}
+
+#[test]
+fn evaluates_dependent_castable_subtype_type_value_cast() {
+    let source = r#"
+base_item := class<castable>:
+    Value:int = 0
+
+child_item := class<castable>(base_item):
+    Score:int = 0
+
+Cast(Kind:castable_subtype(base_item), Item:base_item)<decides><transacts>:Kind =
+    Kind[Item]
+
+Base:base_item = child_item{Value := 40, Score := 2}
+if (Picked := Cast[child_item, Base]). Picked.Value + Picked.Score else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_dependent_type_value_parameter_annotation() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+Pick(Kind:type, Item:Kind):Kind =
+    Item
+
+Picked := Pick(child_item, child_item{Value := 40, Score := 2})
+Picked.Value + Picked.Score
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_dependent_type_value_parameter_argument_mismatch() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+other_item := class(base_item):
+    Extra:int = 0
+
+Pick(Kind:type, Item:Kind):Kind =
+    Item
+
+Pick(child_item, other_item{Value := 40, Extra := 2})
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("argument 2 expected `child_item`, got `other_item`")
+    );
+}
+
+#[test]
+fn evaluates_dependent_type_value_parameter_subtype_annotation() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+Accept(Base:type, Kind:subtype(Base)):int =
+    42
+
+Accept(base_item, child_item)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_dependent_type_value_parameter_castable_return() {
+    let source = r#"
+base_item := class<castable>:
+    Value:int = 0
+
+child_item := class<castable>(base_item):
+    Score:int = 0
+
+Pick(Base:type, Item:Base):castable_subtype(Base) = external {}
+
+Pick(base_item, child_item{Value := 40, Score := 2})
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::CastableSubtype(Box::new(Type::Class("base_item".to_string())))
+    );
+}
+
+#[test]
+fn rejects_dependent_type_value_parameter_subtype_mismatch() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+other_base := class:
+    Extra:int = 0
+
+other_child := class(other_base):
+    Score:int = 0
+
+Accept(Base:type, Kind:subtype(Base)):int =
+    42
+
+Accept(base_item, other_child)
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("argument 2 expected"));
+    assert!(error.to_string().contains("subtype(base_item)"));
+}
+
+#[test]
+fn rejects_dependent_subtype_value_parameter_argument_mismatch() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+child_item := class(base_item):
+    Score:int = 0
+
+other_item := class(base_item):
+    Extra:int = 0
+
+Pick(Kind:subtype(base_item), Item:Kind):Kind =
+    Item
+
+Pick(child_item, other_item{Value := 40, Extra := 2})
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("argument 2 expected `child_item`, got `other_item`")
+    );
+}
+
+#[test]
+fn rejects_mismatched_parametric_class_argument_inference() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Choose(Left:box(t), Right:box(t) where t:type):t =
+    Left.Value
+
+Choose(box(int){Value := 42}, box(string){Value := "bad"})
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("argument 2 expected `box(int)`, got `box(string)`")
+    );
+}
+
+#[test]
 fn rejects_user_parametric_type_wrong_arity() {
     let source = r#"
 stack(t:type) := class:
@@ -1846,6 +2387,69 @@ UseCastable(puzzle_light) + UseConcrete(puzzle_light)
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
+    );
+}
+
+#[test]
+fn evaluates_castable_any_type_parameter_constraint() {
+    let source = r#"
+base_item := class<castable>{}
+child_item := class<castable>(base_item){}
+
+Use(TagType:t where t:castable_subtype(any)):int =
+    42
+
+Use(child_item)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_castable_any_extension_receiver_constraint() {
+    let source = r#"
+base_item := class<castable>:
+    Value:int = 0
+
+child_item := class<castable>(base_item):
+    Score:int = 0
+
+(Item:t where t:castable_subtype(any)).AsQueried(Kind:castable_subtype(any))<decides><transacts>:any =
+    Kind[Item]
+
+Item := child_item{Value := 40, Score := 2}
+if (Item.AsQueried[child_item]). 42 else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_castable_any_extension_receiver_constraint_mismatch() {
+    let source = r#"
+plain_item := class:
+    Value:int = 0
+
+(Item:t where t:castable_subtype(any)).AsQueried(Kind:castable_subtype(any))<decides><transacts>:any =
+    Kind[Item]
+
+Item := plain_item{Value := 40}
+Item.AsQueried[plain_item]
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    let error = error.to_string();
+    assert!(
+        error.contains("argument 1 expected `castable_subtype(any)`, got `class<plain_item>`"),
+        "{error}"
     );
 }
 
@@ -2107,6 +2711,53 @@ fn rejects_official_classifiable_subset_parametric_type_wrong_arity() {
         error
             .to_string()
             .contains("parametric type `classifiable_subset` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_classifiable_subset_key_parametric_type_wrong_arity() {
+    let error = check_source("Value:classifiable_subset_key() = external {}")
+        .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `classifiable_subset_key` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_classifiable_subset_var_parametric_type_wrong_arity() {
+    let error = check_source("Value:classifiable_subset_var() = external {}")
+        .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `classifiable_subset_var` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_success_result_parametric_type_wrong_arity() {
+    let error =
+        check_source("Value:success_result() = external {}").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `success_result` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_error_result_parametric_type_wrong_arity() {
+    let error = check_source("Value:error_result() = external {}").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `error_result` expected 1 type arguments")
     );
 }
 

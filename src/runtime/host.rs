@@ -1,11 +1,14 @@
 use std::cmp::Ordering;
+#[cfg(feature = "tokio-host")]
+use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
 #[cfg(feature = "tokio-host")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::eval::Value;
 
@@ -13,16 +16,17 @@ use crate::eval::Value;
 pub(crate) struct PendingToken(pub(crate) u64);
 
 pub(crate) trait Host {
-    fn now(&self) -> f64;
-    fn arm_timer(&mut self, seconds: f64, token: PendingToken);
+    fn now(&self) -> Duration;
+    fn arm_timer(&mut self, delay: Duration, token: PendingToken);
     fn arm_future(&mut self, future: Pin<Box<dyn Future<Output = Value>>>, token: PendingToken);
     fn poll_ready(&mut self) -> Vec<(PendingToken, Value)>;
+    fn cancel(&mut self, token: PendingToken);
     fn has_pending(&self) -> bool;
 }
 
 #[derive(Debug, Clone)]
 struct TimerEntry {
-    deadline: f64,
+    deadline: Duration,
     sequence: u64,
     token: PendingToken,
 }
@@ -56,7 +60,7 @@ impl Future for ScriptedFuture {
 
 impl PartialEq for TimerEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.deadline.to_bits() == other.deadline.to_bits()
+        self.deadline == other.deadline
             && self.sequence == other.sequence
             && self.token == other.token
     }
@@ -74,13 +78,13 @@ impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .deadline
-            .total_cmp(&self.deadline)
+            .cmp(&self.deadline)
             .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
 
 pub(crate) struct MockHost {
-    now: f64,
+    now: Duration,
     next_timer_sequence: u64,
     timers: BinaryHeap<TimerEntry>,
     futures: Vec<(PendingToken, Pin<Box<dyn Future<Output = Value>>>)>,
@@ -91,7 +95,7 @@ pub(crate) struct MockHost {
 impl Default for MockHost {
     fn default() -> Self {
         Self {
-            now: 0.0,
+            now: Duration::ZERO,
             next_timer_sequence: 0,
             timers: BinaryHeap::new(),
             futures: Vec::new(),
@@ -133,15 +137,12 @@ impl MockHost {
 }
 
 impl Host for MockHost {
-    fn now(&self) -> f64 {
+    fn now(&self) -> Duration {
         self.now
     }
 
-    fn arm_timer(&mut self, seconds: f64, token: PendingToken) {
-        if !seconds.is_finite() {
-            return;
-        }
-        let deadline = self.now + seconds.max(0.0);
+    fn arm_timer(&mut self, delay: Duration, token: PendingToken) {
+        let deadline = self.now + delay;
         let sequence = self.next_timer_sequence;
         self.next_timer_sequence += 1;
         self.timers.push(TimerEntry {
@@ -190,6 +191,15 @@ impl Host for MockHost {
         ready
     }
 
+    fn cancel(&mut self, token: PendingToken) {
+        self.futures
+            .retain(|(pending_token, _)| *pending_token != token);
+        self.timers = std::mem::take(&mut self.timers)
+            .into_iter()
+            .filter(|entry| entry.token != token)
+            .collect();
+    }
+
     fn has_pending(&self) -> bool {
         !self.timers.is_empty() || !self.futures.is_empty()
     }
@@ -201,7 +211,7 @@ pub(crate) struct TokioHost {
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
     ready: RcReadyQueue,
-    pending_count: usize,
+    pending: HashMap<PendingToken, tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(feature = "tokio-host")]
@@ -218,7 +228,7 @@ impl TokioHost {
                 .expect("TokioHost runtime should initialize"),
             local: tokio::task::LocalSet::new(),
             ready: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            pending_count: 0,
+            pending: HashMap::new(),
         }
     }
 
@@ -239,15 +249,11 @@ impl Default for TokioHost {
 
 #[cfg(feature = "tokio-host")]
 impl Host for TokioHost {
-    fn now(&self) -> f64 {
-        self.start.elapsed().as_secs_f64()
+    fn now(&self) -> Duration {
+        self.start.elapsed()
     }
 
-    fn arm_timer(&mut self, seconds: f64, token: PendingToken) {
-        if !seconds.is_finite() {
-            return;
-        }
-        let delay = Duration::from_secs_f64(seconds.max(0.0));
+    fn arm_timer(&mut self, delay: Duration, token: PendingToken) {
         self.arm_future(
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
@@ -259,22 +265,33 @@ impl Host for TokioHost {
 
     fn arm_future(&mut self, future: Pin<Box<dyn Future<Output = Value>>>, token: PendingToken) {
         let ready = self.ready.clone();
-        self.pending_count += 1;
-        self.local.spawn_local(async move {
+        let handle = self.local.spawn_local(async move {
             let value = future.await;
             ready.borrow_mut().push((token, value));
         });
+        self.pending.insert(token, handle);
     }
 
     fn poll_ready(&mut self) -> Vec<(PendingToken, Value)> {
         self.drive_once();
         let ready = std::mem::take(&mut *self.ready.borrow_mut());
-        self.pending_count = self.pending_count.saturating_sub(ready.len());
+        for (token, _) in &ready {
+            self.pending.remove(token);
+        }
         ready
     }
 
+    fn cancel(&mut self, token: PendingToken) {
+        if let Some(handle) = self.pending.remove(&token) {
+            handle.abort();
+        }
+        self.ready
+            .borrow_mut()
+            .retain(|(ready_token, _)| *ready_token != token);
+    }
+
     fn has_pending(&self) -> bool {
-        self.pending_count > 0
+        !self.pending.is_empty()
     }
 }
 
@@ -295,14 +312,13 @@ mod tests {
     #[test]
     fn mock_host_advances_virtual_time_to_timer_deadlines() {
         let mut host = MockHost::default();
-        host.arm_timer(2.0, PendingToken(2));
-        host.arm_timer(1.0, PendingToken(1));
-        host.arm_timer(f64::INFINITY, PendingToken(3));
+        host.arm_timer(Duration::from_secs(2), PendingToken(2));
+        host.arm_timer(Duration::from_secs(1), PendingToken(1));
 
         assert_eq!(host.poll_ready(), vec![(PendingToken(1), Value::None)]);
-        assert_eq!(host.now(), 1.0);
+        assert_eq!(host.now(), Duration::from_secs(1));
         assert_eq!(host.poll_ready(), vec![(PendingToken(2), Value::None)]);
-        assert_eq!(host.now(), 2.0);
+        assert_eq!(host.now(), Duration::from_secs(2));
         assert!(!host.has_pending());
     }
 
@@ -315,6 +331,19 @@ mod tests {
         );
 
         assert_eq!(host.poll_ready(), vec![(PendingToken(7), Value::Int(42))]);
+        assert!(!host.has_pending());
+    }
+
+    #[test]
+    fn mock_host_cancels_pending_timers_and_futures() {
+        let mut host = MockHost::default();
+        host.arm_timer(Duration::from_secs(1), PendingToken(1));
+        host.arm_future(Box::pin(std::future::pending::<Value>()), PendingToken(2));
+
+        host.cancel(PendingToken(1));
+        host.cancel(PendingToken(2));
+
+        assert!(host.poll_ready().is_empty());
         assert!(!host.has_pending());
     }
 }

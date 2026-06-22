@@ -1,26 +1,28 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ast::TypeName;
+use crate::ast::{Expr, ExprKind, TypeName, TypeParam, TypeParamConstraint};
 use crate::error::VerseError;
 use crate::eval::{
-    RationalValue, RuntimeClassInstanceField, RuntimeModifierEntry, RuntimeSubscriptionEntry,
-    RuntimeTask, Value, bytecode_call_native_array_method, bytecode_call_native_cancel_method,
-    bytecode_call_native_event_method, bytecode_call_native_function_named,
-    bytecode_call_native_subscribable_method, bytecode_call_native_subscription_cancel_method,
-    bytecode_class_instance_value, bytecode_class_type_value, bytecode_color_add_values,
-    bytecode_color_divide_values, bytecode_color_multiply_or_scale_values,
-    bytecode_color_subtract_values, bytecode_event_signal_payload, bytecode_external_value,
-    bytecode_interface_type_value, bytecode_load_field_value, bytecode_modifier_stack_add,
+    Env, RationalValue, RuntimeClassInstanceField, RuntimeClassTypeInfo, RuntimeModifierEntry,
+    RuntimeSubscriptionEntry, RuntimeTask, Value, bytecode_call_native_array_method,
+    bytecode_call_native_cancel_method, bytecode_call_native_event_method,
+    bytecode_call_native_function_named, bytecode_call_native_subscribable_method,
+    bytecode_call_native_subscription_cancel_method, bytecode_class_instance_value,
+    bytecode_class_type_value, bytecode_color_add_values, bytecode_color_divide_values,
+    bytecode_color_multiply_or_scale_values, bytecode_color_subtract_values,
+    bytecode_event_signal_payload, bytecode_external_value, bytecode_interface_type_value,
+    bytecode_load_field_value, bytecode_modifier_stack_add,
     bytecode_modifier_stack_ordered_modifiers, bytecode_native_array_method_value,
     bytecode_native_function_value, bytecode_native_member_value, bytecode_new_running_task,
-    bytecode_struct_type_value, rational_or_int, replace_string_byte_failable,
+    bytecode_struct_type_value, rational_or_int, register_runtime_class_types,
+    replace_string_byte_failable,
 };
 use crate::ir::bytecode::{
-    BytecodeChunk, BytecodeProgram, ClassMethodDescriptor, Constant, Instruction, ObjectKind,
-    RegisterIndex, ValueOperand,
+    BytecodeChunk, BytecodeProgram, ClassDescriptor, ClassMethodDescriptor, Constant, Instruction,
+    ObjectKind, RegisterIndex, ValueOperand,
 };
 use crate::runtime::host::{Host, MockHost, PendingToken};
 use crate::token::{CharacterKind, Span};
@@ -477,7 +479,9 @@ impl VmTransactionCollector {
             Value::ModifierStack { entries, .. } | Value::ModifierCancelHandle { entries, .. } => {
                 self.collect_modifier_entries(entries);
             }
-            Value::Subscribable { subscribers, .. }
+            Value::SubscribableEventIntrnl { subscribers, .. }
+            | Value::SubscribableEvent { subscribers, .. }
+            | Value::Subscribable { subscribers, .. }
             | Value::Listenable { subscribers, .. }
             | Value::SubscriptionCancelHandle { subscribers, .. } => {
                 self.collect_subscription_entries(subscribers);
@@ -547,10 +551,36 @@ impl<'program> BytecodeExecutor<'program, MockHost> {
     fn host_poll_count(&self) -> usize {
         self.host.poll_count()
     }
+
+    #[cfg(test)]
+    fn host_has_pending(&self) -> bool {
+        self.host.has_pending()
+    }
+}
+
+fn runtime_class_type_info_from_descriptor(class: &ClassDescriptor) -> RuntimeClassTypeInfo {
+    RuntimeClassTypeInfo {
+        name: class.name().to_string(),
+        base: class.base_class().map(str::to_string),
+        interfaces: class.interfaces().to_vec(),
+        unique: class.unique(),
+        abstract_class: class.abstract_class(),
+        epic_internal_class: class.epic_internal_class(),
+        final_class: class.final_class(),
+        final_super: class.final_super(),
+        concrete: class.concrete(),
+        castable: class.castable(),
+    }
 }
 
 impl<'program, H: Host> BytecodeExecutor<'program, H> {
     pub(crate) fn with_host(program: &'program BytecodeProgram, host: H) -> Self {
+        register_runtime_class_types(
+            program
+                .classes()
+                .iter()
+                .map(runtime_class_type_info_from_descriptor),
+        );
         Self {
             program,
             host,
@@ -592,7 +622,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
 
     #[cfg(test)]
     fn host_now(&self) -> f64 {
-        self.host.now()
+        self.host.now().as_secs_f64()
     }
 
     fn run_chunk(
@@ -1029,7 +1059,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 } => {
                     let array = self.get_runtime_operand(&frame, array, span)?;
                     let index = self.get_runtime_operand(&frame, index, span)?;
-                    match index_value_failable(array, index, span)? {
+                    match self.index_value_failable(array, index, span)? {
                         Some(value) => frame.set_register(dest, VmValue::Runtime(value))?,
                         None => {
                             Self::jump_to_failure(&mut frame, on_failure);
@@ -1816,7 +1846,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         if let Some(task) = self.tasks.get_mut(&id) {
             task.pending_token = Some(token);
         }
-        self.host.arm_timer(seconds, token);
+        self.host.arm_timer(duration_from_seconds(seconds), token);
     }
 
     fn arm_task_future(
@@ -1884,6 +1914,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         let key = subscription_key(subscribers);
         if let Some(token) = self.subscription_signal_tokens.remove(&key) {
             self.pending_wakes.remove(&token);
+            self.host.cancel(token);
         }
     }
 
@@ -1935,6 +1966,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             .and_then(|task| task.pending_token.take())
         {
             self.pending_wakes.remove(&token);
+            self.host.cancel(token);
         }
     }
 
@@ -3189,7 +3221,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                             ));
                         }
                         return Ok(CallOutcome::Value(VmValue::Runtime(Value::Float(
-                            self.host.now(),
+                            self.host.now().as_secs_f64(),
                         ))));
                     }
                     if name == "Sleep" {
@@ -3248,6 +3280,8 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     name,
                     payload,
                     waiters,
+                    subscribers,
+                    sticky_signal,
                 } = value
                 {
                     if !named_args.is_empty() {
@@ -3265,33 +3299,35 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                             name,
                             payload,
                             waiters.clone(),
+                            sticky_signal,
                             args,
                             span,
                         )?;
-                        if let Some(waiters) = waiters
-                            && let Some(task) = current_task.clone()
-                        {
-                            waiters.borrow_mut().push(task);
-                            return Ok(CallOutcome::Yield);
-                        }
-                        if matches!(value, Value::Pending)
-                            && let Some(task) = current_task.clone()
-                        {
-                            self.arm_task_future(
-                                task_id(&task),
-                                Box::pin(std::future::pending::<Value>()),
-                            );
-                            return Ok(CallOutcome::Yield);
+                        if matches!(value, Value::Pending) {
+                            if let Some(waiters) = waiters
+                                && let Some(task) = current_task.clone()
+                            {
+                                waiters.borrow_mut().push(task);
+                                return Ok(CallOutcome::Yield);
+                            }
+                            if let Some(task) = current_task.clone() {
+                                self.arm_task_future(
+                                    task_id(&task),
+                                    Box::pin(std::future::pending::<Value>()),
+                                );
+                                return Ok(CallOutcome::Yield);
+                            }
                         }
                         return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                     }
-                    if name == "Signal" {
+                    if matches!(name, "Signal" | "Broadcast") {
                         let signal_value =
                             bytecode_event_signal_payload(payload.as_ref(), args.clone());
                         let value = bytecode_call_native_event_method(
                             name,
                             payload,
                             waiters.clone(),
+                            sticky_signal,
                             args,
                             span,
                         )?;
@@ -3302,6 +3338,13 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                                 self.ready_tasks
                                     .push_back((task_id(&task), copy_runtime_value(&signal_value)));
                             }
+                            if let Some(subscribers) = subscribers.clone() {
+                                self.run_subscription_callbacks(
+                                    subscribers,
+                                    copy_runtime_value(&signal_value),
+                                    span,
+                                )?;
+                            }
                             if resumed_any && let Some(task) = current_task.clone() {
                                 let id = task_id(&task);
                                 self.detach_task_from_parent(id);
@@ -3309,11 +3352,26 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                                 return Ok(CallOutcome::Yield);
                             }
                             self.run_ready_tasks(span)?;
+                        } else if let Some(subscribers) = subscribers {
+                            self.run_subscription_callbacks(subscribers, signal_value, span)?;
                         }
                         return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                     }
-                    return bytecode_call_native_event_method(name, payload, waiters, args, span)
-                        .map(|value| CallOutcome::Value(VmValue::Runtime(value)));
+                    return bytecode_call_native_event_method(
+                        name,
+                        payload,
+                        waiters,
+                        sticky_signal,
+                        args,
+                        span,
+                    )
+                    .map(|value| {
+                        if name == "IsSignaled" && matches!(value, Value::Option(None)) {
+                            CallOutcome::Failure
+                        } else {
+                            CallOutcome::Value(VmValue::Runtime(value))
+                        }
+                    });
                 }
                 if let Value::NativeSubscribableMethod {
                     name,
@@ -3528,7 +3586,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     ));
                 };
                 let index = into_runtime(index.clone(), span)?;
-                index_value_failable(value, index, span).map(|value| {
+                self.index_value_failable(value, index, span).map(|value| {
                     value
                         .map(VmValue::Runtime)
                         .map_or(CallOutcome::Failure, CallOutcome::Value)
@@ -3601,6 +3659,25 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 .and_then(|class| class.base_class());
         }
         false
+    }
+
+    fn index_value_failable(
+        &self,
+        collection: Value,
+        index: Value,
+        span: Span,
+    ) -> Result<Option<Value>, VerseError> {
+        if let Value::ClassType { name, .. } = collection {
+            return Ok(match &index {
+                Value::ClassInstance { class_name, .. }
+                    if self.class_instance_is_a(class_name, &name) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            });
+        }
+        index_value_failable(collection, index, span)
     }
 
     fn evaluate_modifier_stack(
@@ -3885,6 +3962,9 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
     match expected {
         TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
         TypeName::Float => matches!(value, Value::Float(_)),
+        TypeName::FloatRange(range) => {
+            runtime_floatish_value_to_f64(value).is_some_and(|value| range.contains(value))
+        }
         TypeName::Rational => matches!(value, Value::Rational(_)),
         TypeName::Number => matches!(value, Value::Int(_) | Value::Float(_) | Value::Rational(_)),
         TypeName::Bool => matches!(value, Value::Bool(_)),
@@ -3894,7 +3974,7 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
         TypeName::Char32 => matches!(value, Value::Char32(_)),
         TypeName::None => matches!(value, Value::None),
         TypeName::Any | TypeName::Comparable => true,
-        TypeName::Type => matches!(
+        TypeName::Type | TypeName::TypeBounds { .. } => matches!(
             value,
             Value::StructType { .. }
                 | Value::ClassType { .. }
@@ -3910,10 +3990,33 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
             value,
             Value::ClassInstance { class_name, .. } if class_name == name
         ),
-        TypeName::Applied { name, .. } => matches!(
-            value,
-            Value::ClassInstance { class_name, .. } if class_name == name
-        ),
+        TypeName::Applied { name, .. } => match value {
+            Value::SubscribableEventIntrnl { .. } => matches!(
+                name.as_str(),
+                "subscribable_event_intrnl"
+                    | "event"
+                    | "listenable"
+                    | "awaitable"
+                    | "signalable"
+                    | "subscribable"
+            ),
+            Value::SubscribableEvent { .. } => matches!(
+                name.as_str(),
+                "subscribable_event"
+                    | "subscribable_event_intrnl"
+                    | "event"
+                    | "listenable"
+                    | "awaitable"
+                    | "signalable"
+                    | "subscribable"
+            ),
+            Value::StickyEvent { .. } => matches!(
+                name.as_str(),
+                "sticky_event" | "event" | "awaitable" | "signalable"
+            ),
+            Value::ClassInstance { class_name, .. } => class_name == name,
+            _ => false,
+        },
         TypeName::Array(_) => matches!(value, Value::Array(_) | Value::Tuple(_)),
         TypeName::Map(_, _) | TypeName::WeakMap(_, _) => matches!(value, Value::Map(_)),
         TypeName::Tuple(_) => matches!(value, Value::Tuple(_)),
@@ -3921,6 +4024,14 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
         TypeName::Function | TypeName::FunctionSignature { .. } => {
             matches!(value, Value::NativeFunction { .. } | Value::External)
         }
+    }
+}
+
+fn runtime_floatish_value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(value) => Some(*value as f64),
+        Value::Float(value) => Some(*value),
+        _ => None,
     }
 }
 
@@ -4133,11 +4244,47 @@ fn value_from_constant(constant: &Constant) -> VmValue {
         Constant::StructType { name, computes } => {
             VmValue::Runtime(bytecode_struct_type_value(name.clone(), *computes))
         }
-        Constant::ClassType { name, unique } => {
-            VmValue::Runtime(bytecode_class_type_value(name.clone(), *unique))
-        }
+        Constant::ClassType {
+            name,
+            base,
+            interfaces,
+            unique,
+            abstract_class,
+            epic_internal_class,
+            final_class,
+            final_super,
+            concrete,
+            castable,
+        } => VmValue::Runtime(bytecode_class_type_value(RuntimeClassTypeInfo {
+            name: name.clone(),
+            base: base.clone(),
+            interfaces: interfaces.clone(),
+            unique: *unique,
+            abstract_class: *abstract_class,
+            epic_internal_class: *epic_internal_class,
+            final_class: *final_class,
+            final_super: *final_super,
+            concrete: *concrete,
+            castable: *castable,
+        })),
         Constant::InterfaceType { name } => {
             VmValue::Runtime(bytecode_interface_type_value(name.clone()))
+        }
+        Constant::ParametricType { name, params } => {
+            let span = Span::new(0, 0, 1, 1);
+            VmValue::Runtime(Value::ParametricType {
+                name: name.clone(),
+                params: params
+                    .iter()
+                    .map(|name| TypeParam {
+                        name: name.clone(),
+                        constraint: TypeParamConstraint::Type,
+                        span,
+                    })
+                    .collect(),
+                body: Box::new(Expr::new(ExprKind::External, span)),
+                closure: Env::default(),
+            })
         }
         Constant::External(type_name) => VmValue::Runtime(bytecode_external_value(type_name)),
         Constant::GlobalRef(name) => {
@@ -4173,6 +4320,13 @@ fn sleep_seconds(value: Value, span: Span) -> Result<f64, VerseError> {
         ));
     }
     Ok(seconds)
+}
+
+fn duration_from_seconds(seconds: f64) -> Duration {
+    if seconds <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
 }
 
 fn neg_value(value: Value, span: Span) -> Result<Value, VerseError> {
@@ -4549,6 +4703,37 @@ fn copy_runtime_value(value: &Value) -> Value {
             subscribers: subscribers.clone(),
             next_subscriber_id: next_subscriber_id.clone(),
         },
+        Value::SubscribableEventIntrnl {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => Value::SubscribableEventIntrnl {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            subscribers: subscribers.clone(),
+            next_subscriber_id: next_subscriber_id.clone(),
+        },
+        Value::SubscribableEvent {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => Value::SubscribableEvent {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            subscribers: subscribers.clone(),
+            next_subscriber_id: next_subscriber_id.clone(),
+        },
+        Value::StickyEvent {
+            payload,
+            waiters,
+            signal,
+        } => Value::StickyEvent {
+            payload: payload.clone(),
+            waiters: waiters.clone(),
+            signal: signal.clone(),
+        },
         Value::Listenable {
             payload,
             subscribers,
@@ -4561,6 +4746,14 @@ fn copy_runtime_value(value: &Value) -> Value {
         Value::ClassifiableSubset(items) => Value::ClassifiableSubset(Rc::new(RefCell::new(
             items.borrow().iter().map(copy_runtime_value).collect(),
         ))),
+        Value::ClassifiableSubsetKey { entries, entry_id } => Value::ClassifiableSubsetKey {
+            entries: entries.clone(),
+            entry_id: *entry_id,
+        },
+        Value::ClassifiableSubsetVar { entries, next_key } => Value::ClassifiableSubsetVar {
+            entries: entries.clone(),
+            next_key: next_key.clone(),
+        },
         Value::ParametricType { .. }
         | Value::Function { .. }
         | Value::Overload(_)
@@ -4593,6 +4786,20 @@ fn add_values(left: Value, right: Value, span: Span) -> Result<Value, VerseError
             for value in left.iter().chain(right.iter()) {
                 if !values.iter().any(|existing| existing == value) {
                     values.push(copy_runtime_value(value));
+                }
+            }
+            Ok(Value::ClassifiableSubset(Rc::new(RefCell::new(values))))
+        }
+        (
+            Value::ClassifiableSubsetVar { entries: left, .. },
+            Value::ClassifiableSubsetVar { entries: right, .. },
+        ) => {
+            let left = left.borrow();
+            let right = right.borrow();
+            let mut values = Vec::new();
+            for entry in left.iter().chain(right.iter()) {
+                if !values.iter().any(|existing| existing == &entry.value) {
+                    values.push(copy_runtime_value(&entry.value));
                 }
             }
             Ok(Value::ClassifiableSubset(Rc::new(RefCell::new(values))))
@@ -4906,6 +5113,49 @@ Result
 
         assert_eq!(value, Value::Int(1));
         assert_eq!(executor.host_now(), 2.0);
+    }
+
+    #[test]
+    fn canceling_sleeping_task_clears_host_timer() {
+        let source = r#"
+var Result:int = 0
+Worker()<suspends><transacts>:void =
+    Sleep(5.0)
+    set Result = 99
+Run()<suspends><transacts>:void =
+    Task:task(void) = spawn{Worker()}
+    Task.Cancel()
+spawn{Run()}
+Result
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let mut executor = BytecodeExecutor::new(ir.bytecode_program());
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(0));
+        assert_eq!(executor.host_now(), 0.0);
+        assert!(!executor.host_has_pending());
+    }
+
+    #[test]
+    fn canceling_external_awaitable_task_clears_host_future() {
+        let source = r#"
+var Result:int = 0
+Source:awaitable(int) = external {}
+Worker()<suspends><transacts>:void =
+    set Result = Source.Await()
+Run()<suspends><transacts>:void =
+    Task:task(void) = spawn{Worker()}
+    Task.Cancel()
+spawn{Run()}
+Result
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let mut executor = BytecodeExecutor::new(ir.bytecode_program());
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(0));
+        assert!(!executor.host_has_pending());
     }
 
     #[test]

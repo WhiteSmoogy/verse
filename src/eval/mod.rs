@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -49,11 +50,48 @@ type NativeFn = fn(Vec<Value>, Span) -> Result<NativeResult, VerseError>;
 thread_local! {
     static CURRENT_EPOCH_SECONDS: RefCell<Option<f64>> = const { RefCell::new(None) };
     static SIMULATION_START_INSTANT: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    static RUNTIME_CLASS_TYPES: RefCell<HashMap<String, RuntimeClassTypeInfo>> = RefCell::new(HashMap::new());
 }
 
 pub enum NativeResult {
     Value(Value),
     Failure(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeClassTypeInfo {
+    pub(crate) name: String,
+    pub(crate) base: Option<String>,
+    pub(crate) interfaces: Vec<String>,
+    pub(crate) unique: bool,
+    pub(crate) abstract_class: bool,
+    pub(crate) epic_internal_class: bool,
+    pub(crate) final_class: bool,
+    pub(crate) final_super: bool,
+    pub(crate) concrete: bool,
+    pub(crate) castable: bool,
+}
+
+pub(crate) fn register_runtime_class_type(info: RuntimeClassTypeInfo) {
+    RUNTIME_CLASS_TYPES.with(|types| {
+        types.borrow_mut().insert(info.name.clone(), info);
+    });
+}
+
+pub(crate) fn register_runtime_class_types<I>(infos: I)
+where
+    I: IntoIterator<Item = RuntimeClassTypeInfo>,
+{
+    RUNTIME_CLASS_TYPES.with(|types| {
+        let mut types = types.borrow_mut();
+        for info in infos {
+            types.insert(info.name.clone(), info);
+        }
+    });
+}
+
+fn runtime_class_type_info(name: &str) -> Option<RuntimeClassTypeInfo> {
+    RUNTIME_CLASS_TYPES.with(|types| types.borrow().get(name).cloned())
 }
 
 #[derive(Clone, Default)]
@@ -119,6 +157,7 @@ pub enum Value {
         abstract_class: bool,
         epic_internal_class: bool,
         final_class: bool,
+        final_super: bool,
         concrete: bool,
         castable: bool,
         fields: Vec<RuntimeClassField>,
@@ -152,6 +191,23 @@ pub enum Value {
     Event {
         payload: Option<TypeName>,
         waiters: Rc<RefCell<Vec<Rc<RuntimeTask>>>>,
+    },
+    SubscribableEventIntrnl {
+        payload: Option<TypeName>,
+        waiters: Rc<RefCell<Vec<Rc<RuntimeTask>>>>,
+        subscribers: Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+        next_subscriber_id: Rc<RefCell<u64>>,
+    },
+    SubscribableEvent {
+        payload: TypeName,
+        waiters: Rc<RefCell<Vec<Rc<RuntimeTask>>>>,
+        subscribers: Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+        next_subscriber_id: Rc<RefCell<u64>>,
+    },
+    StickyEvent {
+        payload: Option<TypeName>,
+        waiters: Rc<RefCell<Vec<Rc<RuntimeTask>>>>,
+        signal: Rc<RefCell<Option<Value>>>,
     },
     Awaitable {
         payload: Option<TypeName>,
@@ -195,6 +251,14 @@ pub enum Value {
     ConcreteSubtype(TypeName),
     Type(TypeName),
     ClassifiableSubset(Rc<RefCell<Vec<Value>>>),
+    ClassifiableSubsetKey {
+        entries: Rc<RefCell<Vec<RuntimeClassifiableSubsetEntry>>>,
+        entry_id: u64,
+    },
+    ClassifiableSubsetVar {
+        entries: Rc<RefCell<Vec<RuntimeClassifiableSubsetEntry>>>,
+        next_key: Rc<RefCell<u64>>,
+    },
     ParametricType {
         name: String,
         params: Vec<TypeParam>,
@@ -239,6 +303,8 @@ pub enum Value {
         name: &'static str,
         payload: Option<TypeName>,
         waiters: Option<Rc<RefCell<Vec<Rc<RuntimeTask>>>>>,
+        subscribers: Option<Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>>,
+        sticky_signal: Option<Rc<RefCell<Option<Value>>>>,
     },
     NativeSubscribableMethod {
         name: &'static str,
@@ -327,6 +393,12 @@ pub struct RuntimeModifierEntry {
     position: RationalValue,
     order: u64,
     modifier: Value,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct RuntimeClassifiableSubsetEntry {
+    pub(crate) id: u64,
+    pub(crate) value: Value,
 }
 
 #[derive(Clone)]
@@ -444,6 +516,58 @@ impl PartialEq for Value {
                     waiters: right_waiters,
                 },
             ) => left_payload == right_payload && Rc::ptr_eq(left_waiters, right_waiters),
+            (
+                Self::SubscribableEventIntrnl {
+                    payload: left_payload,
+                    waiters: left_waiters,
+                    subscribers: left_subscribers,
+                    ..
+                },
+                Self::SubscribableEventIntrnl {
+                    payload: right_payload,
+                    waiters: right_waiters,
+                    subscribers: right_subscribers,
+                    ..
+                },
+            ) => {
+                left_payload == right_payload
+                    && Rc::ptr_eq(left_waiters, right_waiters)
+                    && Rc::ptr_eq(left_subscribers, right_subscribers)
+            }
+            (
+                Self::SubscribableEvent {
+                    payload: left_payload,
+                    waiters: left_waiters,
+                    subscribers: left_subscribers,
+                    ..
+                },
+                Self::SubscribableEvent {
+                    payload: right_payload,
+                    waiters: right_waiters,
+                    subscribers: right_subscribers,
+                    ..
+                },
+            ) => {
+                left_payload == right_payload
+                    && Rc::ptr_eq(left_waiters, right_waiters)
+                    && Rc::ptr_eq(left_subscribers, right_subscribers)
+            }
+            (
+                Self::StickyEvent {
+                    payload: left_payload,
+                    waiters: left_waiters,
+                    signal: left_signal,
+                },
+                Self::StickyEvent {
+                    payload: right_payload,
+                    waiters: right_waiters,
+                    signal: right_signal,
+                },
+            ) => {
+                left_payload == right_payload
+                    && Rc::ptr_eq(left_waiters, right_waiters)
+                    && Rc::ptr_eq(left_signal, right_signal)
+            }
             (Self::Awaitable { payload: left }, Self::Awaitable { payload: right }) => {
                 left == right
             }
@@ -532,6 +656,20 @@ impl PartialEq for Value {
             (Self::ClassifiableSubset(left), Self::ClassifiableSubset(right)) => {
                 *left.borrow() == *right.borrow()
             }
+            (
+                Self::ClassifiableSubsetKey {
+                    entries: left_entries,
+                    entry_id: left_id,
+                },
+                Self::ClassifiableSubsetKey {
+                    entries: right_entries,
+                    entry_id: right_id,
+                },
+            ) => left_id == right_id && Rc::ptr_eq(left_entries, right_entries),
+            (
+                Self::ClassifiableSubsetVar { entries: left, .. },
+                Self::ClassifiableSubsetVar { entries: right, .. },
+            ) => Rc::ptr_eq(left, right),
             (
                 Self::ParametricType {
                     name: left,
@@ -643,6 +781,35 @@ impl fmt::Display for Value {
                     write!(formatter, "<event()>")
                 }
             }
+            Self::SubscribableEventIntrnl { payload, .. } => {
+                if let Some(payload) = payload {
+                    write!(
+                        formatter,
+                        "<subscribable_event_intrnl({})>",
+                        render_runtime_type_name(payload)
+                    )
+                } else {
+                    write!(formatter, "<subscribable_event_intrnl()>")
+                }
+            }
+            Self::SubscribableEvent { payload, .. } => {
+                write!(
+                    formatter,
+                    "<subscribable_event({})>",
+                    render_runtime_type_name(payload)
+                )
+            }
+            Self::StickyEvent { payload, .. } => {
+                if let Some(payload) = payload {
+                    write!(
+                        formatter,
+                        "<sticky_event({})>",
+                        render_runtime_type_name(payload)
+                    )
+                } else {
+                    write!(formatter, "<sticky_event()>")
+                }
+            }
             Self::Awaitable { payload } => {
                 if let Some(payload) = payload {
                     write!(
@@ -719,6 +886,14 @@ impl fmt::Display for Value {
             Self::Type(item) => write!(formatter, "<type({})>", render_runtime_type_name(item)),
             Self::ClassifiableSubset(items) => {
                 write!(formatter, "<classifiable_subset({})>", items.borrow().len())
+            }
+            Self::ClassifiableSubsetKey { .. } => write!(formatter, "<classifiable_subset_key>"),
+            Self::ClassifiableSubsetVar { entries, .. } => {
+                write!(
+                    formatter,
+                    "<classifiable_subset_var({})>",
+                    entries.borrow().len()
+                )
             }
             Self::ParametricType { name, params, .. } => {
                 write!(formatter, "<parametric_type {name}/{}>", params.len())
@@ -814,7 +989,15 @@ fn render_runtime_type_name(type_name: &TypeName) -> String {
         TypeName::Any => "any".to_string(),
         TypeName::Comparable => "comparable".to_string(),
         TypeName::Type => "type".to_string(),
+        TypeName::TypeBounds { lower, upper } => format!(
+            "type({},{})",
+            render_runtime_type_name(lower),
+            render_runtime_type_name(upper)
+        ),
         TypeName::IntRange { min, max } => format!("int_range({min},{max})"),
+        TypeName::FloatRange(range) => {
+            format!("float_range({},{})", range.min.render(), range.max.render())
+        }
         TypeName::Array(None) => "array".to_string(),
         TypeName::Array(Some(item)) => format!("[]{}", render_runtime_type_name(item)),
         TypeName::Map(key, value) => format!(
@@ -1186,6 +1369,21 @@ pub(crate) fn bytecode_native_array_method_value(receiver: Value, name: &str) ->
                 receiver: Box::new(receiver),
             })
         }
+        Value::ClassifiableSubsetVar { .. } if is_classifiable_subset_var_method_name(name) => {
+            Some(Value::NativeArrayMethod {
+                name: name.to_string(),
+                receiver: Box::new(receiver),
+            })
+        }
+        Value::ClassInstance { ref class_name, .. }
+            if name == "IsOfType"
+                && runtime_class_type_info(class_name).is_some_and(|info| info.castable) =>
+        {
+            Some(Value::NativeArrayMethod {
+                name: name.to_string(),
+                receiver: Box::new(receiver),
+            })
+        }
         _ => None,
     }
 }
@@ -1211,6 +1409,21 @@ pub(crate) fn bytecode_call_native_array_method(
                 NativeResult::Value(value) => Ok(Some(value)),
                 NativeResult::Failure(_) => Ok(None),
             }
+        }
+        Value::ClassifiableSubsetVar { entries, next_key } => {
+            match eval_classifiable_subset_var_method(
+                name,
+                entries.clone(),
+                next_key.clone(),
+                args.as_slice(),
+                span,
+            )? {
+                NativeResult::Value(value) => Ok(Some(value)),
+                NativeResult::Failure(_) => Ok(None),
+            }
+        }
+        Value::ClassInstance { .. } if name == "IsOfType" => {
+            eval_class_instance_is_of_type_method(receiver, args.as_slice(), span)
         }
         other => Err(VerseError::runtime_at(
             format!("value `{other}` has no bracket method `{name}`"),
@@ -1312,6 +1525,13 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
         "Concatenate" => (None, false, native_concatenate),
         "ConcatenateMaps" => (Some(2), false, native_concatenate_maps),
         "MakeClassifiableSubset" => (Some(1), false, native_make_classifiable_subset),
+        "MakeClassifiableSubsetVar" => (Some(1), false, native_make_classifiable_subset_var),
+        "GetCastableFinalSuperClass" => (Some(2), true, native_get_castable_final_super_class),
+        "GetCastableFinalSuperClassFromType" => (
+            Some(2),
+            true,
+            native_get_castable_final_super_class_from_type,
+        ),
         "MakeSuccess" => (Some(1), false, native_make_success),
         "MakeError" => (Some(1), false, native_make_error),
         "Sleep" => (Some(1), false, native_sleep),
@@ -1387,6 +1607,9 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
             "Concatenate" => "Concatenate",
             "ConcatenateMaps" => "ConcatenateMaps",
             "MakeClassifiableSubset" => "MakeClassifiableSubset",
+            "MakeClassifiableSubsetVar" => "MakeClassifiableSubsetVar",
+            "GetCastableFinalSuperClass" => "GetCastableFinalSuperClass",
+            "GetCastableFinalSuperClassFromType" => "GetCastableFinalSuperClassFromType",
             "MakeSuccess" => "MakeSuccess",
             "MakeError" => "MakeError",
             "Sleep" => "Sleep",
@@ -1653,7 +1876,7 @@ fn array_value(items: Vec<Value>) -> Value {
 
 fn modifier_stack_position(stack: &Value, first: bool) -> Value {
     let Value::ModifierStack { entries, .. } = stack else {
-        return Value::Option(None);
+        return Value::Rational(RationalValue::from_int(0));
     };
     let entries = entries.borrow();
     let position = if first {
@@ -1667,7 +1890,7 @@ fn modifier_stack_position(stack: &Value, first: bool) -> Value {
             .map(|entry| entry.position)
             .max_by(|left, right| compare_rational(*left, *right))
     };
-    Value::Option(position.map(|position| Box::new(Value::Rational(position))))
+    Value::Rational(position.unwrap_or_else(|| RationalValue::from_int(0)))
 }
 
 fn compare_rational(left: RationalValue, right: RationalValue) -> std::cmp::Ordering {
@@ -1744,6 +1967,8 @@ fn native_named_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Concatenate" => vec![vec!["Arrays"]],
         "GetRandomFloat" | "GetRandomInt" => vec![vec!["Low"], vec!["High"]],
         "Shuffle" => vec![vec!["Input"]],
+        "GetCastableFinalSuperClass" => vec![vec!["base_type"], vec!["Instance"]],
+        "GetCastableFinalSuperClassFromType" => vec![vec!["base_type"], vec!["sub_type"]],
         "Sleep" => vec![vec!["Seconds"]],
         "Clamp" => vec![vec!["Value"], vec!["A"], vec!["B"]],
         "Lerp" => vec![vec!["From"], vec!["To"], vec!["Parameter"]],
@@ -1917,9 +2142,14 @@ fn event_signal_value(payload: Option<&TypeName>, args: &[CallValue]) -> Value {
 fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
     match payload {
         TypeName::Any | TypeName::Comparable => true,
-        TypeName::Type => runtime_value_is_type_value(value),
+        TypeName::Type | TypeName::TypeBounds { .. } => runtime_value_is_type_value(value),
         TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
         TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
+        TypeName::FloatRange(range) => match value {
+            Value::Int(value) => range.contains(*value as f64),
+            Value::Float(value) => range.contains(*value),
+            _ => false,
+        },
         TypeName::Rational => matches!(value, Value::Int(_) | Value::Rational(_)),
         TypeName::Number => runtime_number(value).is_some(),
         TypeName::Bool => matches!(value, Value::Bool(_)),
@@ -2010,6 +2240,40 @@ fn runtime_named_value_matches(value: &Value, expected: &str) -> bool {
         | Value::ClassType { name, .. }
         | Value::InterfaceType { name, .. }
         | Value::Module { name, .. } => runtime_names_match(name, expected),
+        Value::Result {
+            succeeded: true, ..
+        } => expected == "result" || expected == "success_result",
+        Value::Result {
+            succeeded: false, ..
+        } => expected == "result" || expected == "error_result",
+        Value::SubscribableEventIntrnl { .. } => matches!(
+            expected,
+            "subscribable_event_intrnl"
+                | "event"
+                | "listenable"
+                | "awaitable"
+                | "signalable"
+                | "subscribable"
+        ),
+        Value::SubscribableEvent { .. } => matches!(
+            expected,
+            "subscribable_event"
+                | "subscribable_event_intrnl"
+                | "event"
+                | "listenable"
+                | "awaitable"
+                | "signalable"
+                | "subscribable"
+        ),
+        Value::StickyEvent { .. } => {
+            matches!(
+                expected,
+                "sticky_event" | "event" | "awaitable" | "signalable"
+            )
+        }
+        Value::ClassifiableSubset(_) => expected == "classifiable_subset",
+        Value::ClassifiableSubsetKey { .. } => expected == "classifiable_subset_key",
+        Value::ClassifiableSubsetVar { .. } => expected == "classifiable_subset_var",
         Value::ModifierCancelHandle { .. } | Value::SubscriptionCancelHandle { .. } => {
             expected == "cancelable"
         }
@@ -2462,8 +2726,220 @@ fn native_make_classifiable_subset(
     ))))
 }
 
+fn native_make_classifiable_subset_var(
+    args: Vec<Value>,
+    _span: Span,
+) -> Result<NativeResult, VerseError> {
+    let [elements]: [Value; 1] = args.try_into().expect("arity checked by caller");
+    let Value::Array(elements) = elements else {
+        return Err(VerseError::runtime(
+            "`MakeClassifiableSubsetVar` expected an array argument",
+        ));
+    };
+
+    let entries = elements
+        .borrow()
+        .iter()
+        .enumerate()
+        .map(|(id, value)| RuntimeClassifiableSubsetEntry {
+            id: id as u64,
+            value: value_copy(value),
+        })
+        .collect();
+    Ok(NativeResult::Value(Value::ClassifiableSubsetVar {
+        entries: Rc::new(RefCell::new(entries)),
+        next_key: Rc::new(RefCell::new(elements.borrow().len() as u64)),
+    }))
+}
+
+fn native_get_castable_final_super_class(
+    args: Vec<Value>,
+    _span: Span,
+) -> Result<NativeResult, VerseError> {
+    let [base_type, instance]: [Value; 2] = args.try_into().expect("arity checked by caller");
+    let Some(base_type) = runtime_query_type_ref(&base_type) else {
+        return Ok(NativeResult::Failure(
+            "base_type is not a class or interface type",
+        ));
+    };
+    let Value::ClassInstance { class_name, .. } = instance else {
+        return Ok(NativeResult::Failure("Instance is not a class instance"));
+    };
+    let Some(sub_type) = runtime_class_type_info(&class_name) else {
+        return Ok(NativeResult::Failure("Instance class is unknown"));
+    };
+    get_castable_final_super_class_from_info(&base_type, sub_type)
+}
+
+fn native_get_castable_final_super_class_from_type(
+    args: Vec<Value>,
+    _span: Span,
+) -> Result<NativeResult, VerseError> {
+    let [base_type, sub_type]: [Value; 2] = args.try_into().expect("arity checked by caller");
+    let Some(base_type) = runtime_query_type_ref(&base_type) else {
+        return Ok(NativeResult::Failure(
+            "base_type is not a class or interface type",
+        ));
+    };
+    let Some(sub_type) = runtime_class_info_from_value(&sub_type) else {
+        return Ok(NativeResult::Failure("sub_type is not a class type"));
+    };
+    get_castable_final_super_class_from_info(&base_type, sub_type)
+}
+
+#[derive(Clone)]
+enum RuntimeQueryTypeRef {
+    Class(String),
+    Interface(String),
+}
+
+impl RuntimeQueryTypeRef {
+    fn name(&self) -> &str {
+        match self {
+            Self::Class(name) | Self::Interface(name) => name,
+        }
+    }
+
+    fn is_interface(&self) -> bool {
+        matches!(self, Self::Interface(_))
+    }
+}
+
+fn runtime_query_type_ref(value: &Value) -> Option<RuntimeQueryTypeRef> {
+    match value {
+        Value::ClassType { name, .. } => Some(RuntimeQueryTypeRef::Class(name.clone())),
+        Value::InterfaceType { name, .. } => Some(RuntimeQueryTypeRef::Interface(name.clone())),
+        Value::Type(TypeName::Named(name)) => {
+            runtime_class_type_info(name).map(|_| RuntimeQueryTypeRef::Class(name.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn runtime_class_info_from_value(value: &Value) -> Option<RuntimeClassTypeInfo> {
+    match value {
+        Value::ClassType {
+            name,
+            base,
+            interfaces,
+            unique,
+            abstract_class,
+            epic_internal_class,
+            final_class,
+            final_super,
+            concrete,
+            castable,
+            ..
+        } => Some(RuntimeClassTypeInfo {
+            name: name.clone(),
+            base: base.clone(),
+            interfaces: interfaces.clone(),
+            unique: *unique,
+            abstract_class: *abstract_class,
+            epic_internal_class: *epic_internal_class,
+            final_class: *final_class,
+            final_super: *final_super,
+            concrete: *concrete,
+            castable: *castable,
+        }),
+        Value::Type(TypeName::Named(name)) => runtime_class_type_info(name),
+        _ => None,
+    }
+}
+
+fn get_castable_final_super_class_from_info(
+    base_type: &RuntimeQueryTypeRef,
+    mut current: RuntimeClassTypeInfo,
+) -> Result<NativeResult, VerseError> {
+    let base_name = base_type.name();
+    while current.name != base_name {
+        let parent_matches = current.base.as_deref() == Some(base_name);
+        let interface_matches =
+            base_type.is_interface() && current.interfaces.iter().any(|name| name == base_name);
+        if parent_matches || interface_matches {
+            return if current.final_super && current.castable {
+                Ok(NativeResult::Value(runtime_class_type_value(current)))
+            } else {
+                Ok(NativeResult::Failure(
+                    "direct subclass is not final_super and castable",
+                ))
+            };
+        }
+
+        let Some(parent) = current.base.as_deref().and_then(runtime_class_type_info) else {
+            break;
+        };
+        current = parent;
+    }
+
+    Ok(NativeResult::Failure("no castable final_super subclass"))
+}
+
+fn runtime_class_type_value(info: RuntimeClassTypeInfo) -> Value {
+    register_runtime_class_type(info.clone());
+    Value::ClassType {
+        name: info.name,
+        base: info.base,
+        interfaces: info.interfaces,
+        unique: info.unique,
+        abstract_class: info.abstract_class,
+        epic_internal_class: info.epic_internal_class,
+        final_class: info.final_class,
+        final_super: info.final_super,
+        concrete: info.concrete,
+        castable: info.castable,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        blocks: Vec::new(),
+    }
+}
+
 fn is_classifiable_subset_method_name(name: &str) -> bool {
-    matches!(name, "Contains" | "ContainsAny" | "ContainsAll")
+    matches!(
+        name,
+        "Contains"
+            | "NotContains"
+            | "ContainsAny"
+            | "ContainsAll"
+            | "ContainsNone"
+            | "FilterByType"
+    )
+}
+
+fn is_classifiable_subset_var_method_name(name: &str) -> bool {
+    matches!(name, "Read" | "Write" | "Add" | "Remove") || is_classifiable_subset_method_name(name)
+}
+
+fn eval_class_instance_is_of_type_method(
+    receiver: &Value,
+    args: &[Value],
+    span: Span,
+) -> Result<Option<Value>, VerseError> {
+    if args.len() != 1 {
+        return Err(VerseError::runtime_at(
+            format!("`IsOfType` expected 1 arguments, got {}", args.len()),
+            span,
+        ));
+    }
+
+    let Value::ClassInstance { class_name, .. } = receiver else {
+        return Err(VerseError::runtime_at(
+            "`IsOfType` expected a class instance receiver",
+            span,
+        ));
+    };
+    let Some(query_type) = runtime_query_type_ref(&args[0]) else {
+        return Err(VerseError::runtime_at(
+            format!("`IsOfType` expected a class type argument, got {}", args[0]),
+            span,
+        ));
+    };
+
+    if runtime_class_instance_matches_query_type(class_name, &query_type) {
+        Ok(Some(Value::None))
+    } else {
+        Ok(None)
+    }
 }
 
 fn eval_classifiable_subset_method(
@@ -2481,19 +2957,32 @@ fn eval_classifiable_subset_method(
 
     match name {
         "Contains" => {
-            if items.iter().any(|item| item == &args[0]) {
+            if items
+                .iter()
+                .any(|item| classifiable_subset_item_matches_type(item, &args[0]))
+            {
                 Ok(NativeResult::Value(Value::None))
             } else {
                 Ok(NativeResult::Failure("element is not present"))
             }
         }
+        "NotContains" => {
+            if items
+                .iter()
+                .any(|item| classifiable_subset_item_matches_type(item, &args[0]))
+            {
+                Ok(NativeResult::Failure("element is present"))
+            } else {
+                Ok(NativeResult::Value(Value::None))
+            }
+        }
         "ContainsAny" => {
             let values = expect_classifiable_subset_argument_array(name, &args[0], span)?;
-            if values
-                .borrow()
-                .iter()
-                .any(|candidate| items.iter().any(|item| item == candidate))
-            {
+            if values.borrow().iter().any(|candidate| {
+                items
+                    .iter()
+                    .any(|item| classifiable_subset_item_matches_type(item, candidate))
+            }) {
                 Ok(NativeResult::Value(Value::None))
             } else {
                 Ok(NativeResult::Failure("no elements are present"))
@@ -2501,21 +2990,215 @@ fn eval_classifiable_subset_method(
         }
         "ContainsAll" => {
             let values = expect_classifiable_subset_argument_array(name, &args[0], span)?;
-            if values
-                .borrow()
-                .iter()
-                .all(|candidate| items.iter().any(|item| item == candidate))
-            {
+            if values.borrow().iter().all(|candidate| {
+                items
+                    .iter()
+                    .any(|item| classifiable_subset_item_matches_type(item, candidate))
+            }) {
                 Ok(NativeResult::Value(Value::None))
             } else {
                 Ok(NativeResult::Failure("not all elements are present"))
             }
+        }
+        "ContainsNone" => {
+            let values = expect_classifiable_subset_argument_array(name, &args[0], span)?;
+            if values.borrow().iter().any(|candidate| {
+                items
+                    .iter()
+                    .any(|item| classifiable_subset_item_matches_type(item, candidate))
+            }) {
+                Ok(NativeResult::Failure("an element is present"))
+            } else {
+                Ok(NativeResult::Value(Value::None))
+            }
+        }
+        "FilterByType" => {
+            let values = items
+                .iter()
+                .filter(|item| classifiable_subset_item_matches_type(item, &args[0]))
+                .map(value_copy)
+                .collect();
+            Ok(NativeResult::Value(Value::ClassifiableSubset(Rc::new(
+                RefCell::new(values),
+            ))))
         }
         _ => Err(VerseError::runtime_at(
             format!("unknown classifiable_subset method `{name}`"),
             span,
         )),
     }
+}
+
+fn eval_classifiable_subset_var_method(
+    name: &str,
+    entries: Rc<RefCell<Vec<RuntimeClassifiableSubsetEntry>>>,
+    next_key: Rc<RefCell<u64>>,
+    args: &[Value],
+    span: Span,
+) -> Result<NativeResult, VerseError> {
+    match name {
+        "Read" => {
+            if !args.is_empty() {
+                return Err(VerseError::runtime_at(
+                    format!("`Read` expected 0 arguments, got {}", args.len()),
+                    span,
+                ));
+            }
+            Ok(NativeResult::Value(Value::ClassifiableSubset(Rc::new(
+                RefCell::new(classifiable_subset_var_values(&entries)),
+            ))))
+        }
+        "Write" => {
+            let [set] = args else {
+                return Err(VerseError::runtime_at(
+                    format!("`Write` expected 1 arguments, got {}", args.len()),
+                    span,
+                ));
+            };
+            let Value::ClassifiableSubset(values) = set else {
+                return Err(VerseError::runtime_at(
+                    format!("`Write` expected classifiable_subset argument, got {set}"),
+                    span,
+                ));
+            };
+            let mut next = next_key.borrow_mut();
+            let mut target = entries.borrow_mut();
+            target.clear();
+            for value in values.borrow().iter() {
+                let id = *next;
+                *next = next.saturating_add(1);
+                target.push(RuntimeClassifiableSubsetEntry {
+                    id,
+                    value: value_copy(value),
+                });
+            }
+            Ok(NativeResult::Value(Value::None))
+        }
+        "Add" => {
+            let [value] = args else {
+                return Err(VerseError::runtime_at(
+                    format!("`Add` expected 1 arguments, got {}", args.len()),
+                    span,
+                ));
+            };
+            let id = {
+                let mut next = next_key.borrow_mut();
+                let id = *next;
+                *next = next.saturating_add(1);
+                id
+            };
+            entries.borrow_mut().push(RuntimeClassifiableSubsetEntry {
+                id,
+                value: value_copy(value),
+            });
+            Ok(NativeResult::Value(Value::ClassifiableSubsetKey {
+                entries,
+                entry_id: id,
+            }))
+        }
+        "Remove" => {
+            let [key] = args else {
+                return Err(VerseError::runtime_at(
+                    format!("`Remove` expected 1 arguments, got {}", args.len()),
+                    span,
+                ));
+            };
+            let Value::ClassifiableSubsetKey {
+                entries: key_entries,
+                entry_id,
+            } = key
+            else {
+                return Err(VerseError::runtime_at(
+                    format!("`Remove` expected classifiable_subset_key argument, got {key}"),
+                    span,
+                ));
+            };
+            if !Rc::ptr_eq(&entries, key_entries) {
+                return Ok(NativeResult::Failure("key does not belong to this set"));
+            }
+            let mut values = entries.borrow_mut();
+            let previous_len = values.len();
+            values.retain(|entry| entry.id != *entry_id);
+            if values.len() == previous_len {
+                Ok(NativeResult::Failure("element was not present"))
+            } else {
+                Ok(NativeResult::Value(Value::None))
+            }
+        }
+        _ if is_classifiable_subset_method_name(name) => {
+            let values = classifiable_subset_var_values(&entries);
+            eval_classifiable_subset_method(name, &values, args, span)
+        }
+        _ => Err(VerseError::runtime_at(
+            format!("unknown classifiable_subset_var method `{name}`"),
+            span,
+        )),
+    }
+}
+
+fn classifiable_subset_var_values(
+    entries: &Rc<RefCell<Vec<RuntimeClassifiableSubsetEntry>>>,
+) -> Vec<Value> {
+    entries
+        .borrow()
+        .iter()
+        .map(|entry| value_copy(&entry.value))
+        .collect()
+}
+
+fn classifiable_subset_item_matches_type(item: &Value, element_type: &Value) -> bool {
+    match element_type {
+        Value::ClassType { name, .. } => runtime_named_value_matches(item, name),
+        Value::InterfaceType { name, .. } => runtime_named_value_matches(item, name),
+        Value::Subtype(type_name)
+        | Value::CastableSubtype(type_name)
+        | Value::ConcreteSubtype(type_name)
+        | Value::Type(type_name) => {
+            item == element_type || runtime_event_payload_matches(item, type_name)
+        }
+        _ => item == element_type,
+    }
+}
+
+fn runtime_class_instance_matches_query_type(
+    class_name: &str,
+    query_type: &RuntimeQueryTypeRef,
+) -> bool {
+    match query_type {
+        RuntimeQueryTypeRef::Class(expected) => runtime_class_is_a(class_name, expected),
+        RuntimeQueryTypeRef::Interface(expected) => {
+            runtime_class_implements_interface(class_name, expected)
+        }
+    }
+}
+
+fn runtime_class_is_a(actual: &str, expected: &str) -> bool {
+    let mut current = Some(actual.to_string());
+    while let Some(class_name) = current {
+        if runtime_names_match(&class_name, expected) {
+            return true;
+        }
+        current = runtime_class_type_info(&class_name).and_then(|info| info.base);
+    }
+    false
+}
+
+fn runtime_class_implements_interface(actual: &str, expected: &str) -> bool {
+    let mut current = Some(actual.to_string());
+    while let Some(class_name) = current {
+        let Some(info) = runtime_class_type_info(&class_name) else {
+            return false;
+        };
+        if info
+            .interfaces
+            .iter()
+            .any(|interface| runtime_names_match(interface, expected))
+        {
+            return true;
+        }
+        current = info.base;
+    }
+    false
 }
 
 fn expect_classifiable_subset_argument_array(

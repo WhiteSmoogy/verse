@@ -58,6 +58,72 @@ Value.AddOne()
 }
 
 #[test]
+fn evaluates_type_value_extension_accessor() {
+    let source = r#"
+axis := struct:
+    X:int = 0
+    Y:int = 0
+
+(Kind:type).XAxis<public>()<computes>:axis =
+    axis{X := 40, Y := 2}
+
+Value := axis.XAxis
+Value.X + Value.Y
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_qualified_type_value_extension_accessor() {
+    let source = r#"
+axis := struct:
+    X:int = 0
+    Y:int = 0
+
+Ops<public> := module:
+    (Kind:type).YAxis<public>()<computes>:axis =
+        axis{X := 20, Y := 22}
+
+using { Ops }
+Value := axis.(Ops:)YAxis
+Value.X + Value.Y
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_type_value_extension_accessor_with_parameters() {
+    let error = check_source(
+        r#"
+axis := struct:
+    X:int = 0
+
+(Kind:type).Shift<public>(Offset:int)<computes>:int =
+    Offset
+
+Value := axis.Shift
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("extension method `Shift` must be called")
+    );
+}
+
+#[test]
 fn evaluates_qualified_extension_method_disambiguates_imported_modules() {
     let source = r#"
 First<public> := module:
@@ -1311,6 +1377,171 @@ if (Value := Filled.Peek[]). Value else. 0
 }
 
 #[test]
+fn evaluates_shared_constraint_parametric_class_instance_methods() {
+    let source = r#"
+pair_box(t&u:type) := class:
+    Left:t
+    Right:u
+    ReadLeft():t = Left
+
+Box := pair_box(int, string){Left := 42, Right := "ready"}
+Box.ReadLeft() + Box.Right.Length
+"#;
+
+    assert_eq!(eval(source), Value::Int(47));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_bounds_parametric_class_instance_methods() {
+    let source = r#"
+base_item := class:
+    Value:int = 1
+child_item := class(base_item):
+    ChildValue:int = 0
+
+box(t:type(child_item, base_item)) := class:
+    Item:t
+    Read():int = Item.Value
+
+Box := box(child_item){Item := child_item{}}
+Box.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(1));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_type_bounds_parametric_class_upper_mismatch() {
+    let source = r#"
+base_item := class:
+    Value:int = 1
+child_item := class(base_item):
+    ChildValue:int = 0
+other_item := class:
+    Value:int = 1
+
+box(t:type(child_item, base_item)) := class:
+    Item:t
+
+Bad:box(other_item) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("type argument `other_item` for `t` must be a subtype of `base_item`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_type_bounds_parametric_class_lower_mismatch() {
+    let source = r#"
+base_item := class:
+    Value:int = 1
+child_item := class(base_item):
+    ChildValue:int = 0
+grandchild_item := class(child_item):
+    GrandchildValue:int = 0
+
+box(t:type(child_item, base_item)) := class:
+    Item:t
+
+Bad:box(grandchild_item) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error.to_string().contains(
+            "type argument `grandchild_item` for `t` must be a supertype of `child_item`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluates_castable_concrete_parametric_class_constraints() {
+    let source = r#"
+base_tag := class(tag){}
+child_tag := class<concrete><castable>(base_tag){}
+
+castable_box(t:castable_subtype(base_tag)) := class:
+    Item:t
+    Count():int = 1
+
+prefab_box(t:concrete_subtype(castable_subtype(base_tag))) := class:
+    Item:t
+    Count():int = 2
+
+short_prefab_box(t:castable_concrete_subtype(base_tag)) := class:
+    Item:t
+    Count():int = 3
+
+Castable := castable_box(child_tag){Item := child_tag{}}
+Prefab := prefab_box(child_tag){Item := child_tag{}}
+Short := short_prefab_box(child_tag){Item := child_tag{}}
+Castable.Count() + Prefab.Count() + Short.Count()
+"#;
+
+    assert_eq!(eval(source), Value::Int(6));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_castable_parametric_class_constraint_mismatch() {
+    let source = r#"
+base_tag := class(tag){}
+plain_tag := class<concrete>(base_tag){}
+
+castable_box(t:castable_subtype(base_tag)) := class:
+    Item:t
+
+Bad:castable_box(plain_tag) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be a subtype of `castable_subtype(base_tag)`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_concrete_parametric_class_constraint_mismatch() {
+    let source = r#"
+base_tag := class(tag){}
+castable_tag := class<castable>(base_tag){}
+
+prefab_box(t:concrete_subtype(castable_subtype(base_tag))) := class:
+    Item:t
+
+Bad:prefab_box(castable_tag) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be a subtype of `concrete_subtype(castable_subtype(base_tag))`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn evaluates_user_parametric_class_parent_runtime_surface() {
     let source = r#"
 base_box(t:type) := class:
@@ -1356,6 +1587,157 @@ Value.Elements.Length + Value.Extra
 }
 
 #[test]
+fn evaluates_type_bounds_parametric_interface_runtime_surface() {
+    let source = r#"
+base_item := class:
+    Value:int = 1
+child_item := class(base_item):
+    ChildValue:int = 0
+
+reader(t:type(child_item, base_item)) := interface:
+    Read():t
+
+box := class(reader(child_item)):
+    Read<override>():child_item = child_item{}
+
+Value:reader(child_item) = box{}
+Value.Read().Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(1));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_castable_concrete_parametric_interface_constraints() {
+    let source = r#"
+base_tag := class(tag){}
+child_tag := class<concrete><castable>(base_tag){}
+
+castable_reader(t:castable_subtype(base_tag)) := interface:
+    ReadCastable():t
+
+prefab_reader(t:concrete_subtype(castable_subtype(base_tag))) := interface:
+    ReadPrefab():t
+
+short_prefab_reader(t:castable_concrete_subtype(base_tag)) := interface:
+    ReadShort():t
+
+box := class(castable_reader(child_tag), prefab_reader(child_tag), short_prefab_reader(child_tag)):
+    ReadCastable<override>():child_tag = child_tag{}
+    ReadPrefab<override>():child_tag = child_tag{}
+    ReadShort<override>():child_tag = child_tag{}
+
+Value:castable_reader(child_tag) = box{}
+Other:prefab_reader(child_tag) = box{}
+Short:short_prefab_reader(child_tag) = box{}
+First := Value.ReadCastable()
+Second := Other.ReadPrefab()
+Third := Short.ReadShort()
+if (First = Second, Third = child_tag{}). 42 else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_castable_parametric_interface_constraint_mismatch() {
+    let source = r#"
+base_tag := class(tag){}
+plain_tag := class<concrete>(base_tag){}
+
+castable_reader(t:castable_subtype(base_tag)) := interface:
+    Read():t
+
+Bad:castable_reader(plain_tag) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be a subtype of `castable_subtype(base_tag)`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_concrete_parametric_interface_constraint_mismatch() {
+    let source = r#"
+base_tag := class(tag){}
+castable_tag := class<castable>(base_tag){}
+
+prefab_reader(t:concrete_subtype(castable_subtype(base_tag))) := interface:
+    Read():t
+
+Bad:prefab_reader(castable_tag) = external {}
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be a subtype of `concrete_subtype(castable_subtype(base_tag))`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluates_user_parametric_interface_parent_method_runtime_surface() {
+    let source = r#"
+base_reader(t:type) := interface:
+    Read<public>():t
+
+child_reader(t:type) := interface(base_reader(t)):
+    Extra<public>:int = 2
+
+box := class(child_reader(int)):
+    Value:int
+    Read<override><public>():int = Value
+
+Value:child_reader(int) = box{Value := 40}
+Value.Read() + Value.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_user_parametric_interface_parent_default_method_runtime_surface() {
+    let source = r#"
+base_reader(t:type) := interface:
+    Value<public>:t
+    Read<public>():t = Value
+
+child_reader(t:type) := interface(base_reader(t)):
+    Extra<public>:int = 2
+
+box := class(child_reader(int)):
+    Value<override><public>:int = 40
+
+Value:child_reader(int) = box{}
+Value.Read() + Value.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_user_parametric_interface_method_runtime_surface() {
     let source = r#"
 reader(t:type) := interface:
@@ -1393,6 +1775,106 @@ Value.Use()
         check_source(source).expect("source should check"),
         Type::Int
     );
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_parametric_extension_receiver() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+(Item:box(t) where t:type).Read():t =
+    Item.Value
+
+box(int){Value := 42}.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_parametric_extension_base_receiver() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+
+child_box(t:type) := class(base_box(t)):
+    Extra:int = 2
+
+(Item:base_box(t) where t:type).Read():t =
+    Item.Value
+
+child_box(int){Value := 42}.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_parameter_inference_from_parametric_extension_interface_receiver() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+(Item:reader(t) where t:type).ReadValue():t =
+    Item.Read()
+
+box(int){Value := 42}.ReadValue()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_parametric_extension_receiver_inferred_return_mismatch() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+(Item:box(t) where t:type).Read():t =
+    Item.Value
+
+Value:int = box(string){Value := "bad"}.Read()
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("annotated as `int`"));
+}
+
+#[test]
+fn rejects_parametric_extension_interface_receiver_inferred_return_mismatch() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+(Item:reader(t) where t:type).ReadValue():t =
+    Item.Read()
+
+Value:int = box(string){Value := "bad"}.ReadValue()
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(error.to_string().contains("annotated as `int`"));
 }
 
 #[test]

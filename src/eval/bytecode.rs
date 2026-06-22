@@ -7,8 +7,9 @@ use crate::token::Span;
 
 use super::value_ops::value_copy;
 use super::{
-    CallValue, RuntimeClassInstanceField, RuntimeModifierEntry, RuntimeSubscriptionEntry, Value,
-    compare_rational, event_signal_value, expect_runtime_rational, modifier_stack_position,
+    CallValue, RuntimeClassInstanceField, RuntimeClassTypeInfo, RuntimeClassifiableSubsetEntry,
+    RuntimeModifierEntry, RuntimeSubscriptionEntry, Value, compare_rational, event_signal_value,
+    expect_runtime_rational, modifier_stack_position, register_runtime_class_type,
     validate_event_signal_args,
 };
 
@@ -20,17 +21,19 @@ pub(crate) fn bytecode_struct_type_value(name: String, computes: bool) -> Value 
     }
 }
 
-pub(crate) fn bytecode_class_type_value(name: String, unique: bool) -> Value {
+pub(crate) fn bytecode_class_type_value(info: RuntimeClassTypeInfo) -> Value {
+    register_runtime_class_type(info.clone());
     Value::ClassType {
-        name,
-        base: None,
-        interfaces: Vec::new(),
-        unique,
-        abstract_class: false,
-        epic_internal_class: false,
-        final_class: false,
-        concrete: false,
-        castable: false,
+        name: info.name,
+        base: info.base,
+        interfaces: info.interfaces,
+        unique: info.unique,
+        abstract_class: info.abstract_class,
+        epic_internal_class: info.epic_internal_class,
+        final_class: info.final_class,
+        final_super: info.final_super,
+        concrete: info.concrete,
+        castable: info.castable,
         fields: Vec::new(),
         methods: Vec::new(),
         blocks: Vec::new(),
@@ -74,6 +77,33 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
             Value::Event {
                 payload: args.first().cloned(),
                 waiters: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+        TypeName::Applied { name, args }
+            if name == "subscribable_event_intrnl" && matches!(args.len(), 0 | 1) =>
+        {
+            Value::SubscribableEventIntrnl {
+                payload: args.first().cloned(),
+                waiters: Rc::new(RefCell::new(Vec::new())),
+                subscribers: Rc::new(RefCell::new(Vec::new())),
+                next_subscriber_id: Rc::new(RefCell::new(0)),
+            }
+        }
+        TypeName::Applied { name, args } if name == "subscribable_event" && args.len() == 1 => {
+            Value::SubscribableEvent {
+                payload: args[0].clone(),
+                waiters: Rc::new(RefCell::new(Vec::new())),
+                subscribers: Rc::new(RefCell::new(Vec::new())),
+                next_subscriber_id: Rc::new(RefCell::new(0)),
+            }
+        }
+        TypeName::Applied { name, args }
+            if name == "sticky_event" && matches!(args.len(), 0 | 1) =>
+        {
+            Value::StickyEvent {
+                payload: args.first().cloned(),
+                waiters: Rc::new(RefCell::new(Vec::new())),
+                signal: Rc::new(RefCell::new(None)),
             }
         }
         TypeName::Applied { name, args } if name == "awaitable" && matches!(args.len(), 0 | 1) => {
@@ -124,6 +154,24 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
             let _ = args;
             Value::ClassifiableSubset(Rc::new(RefCell::new(Vec::new())))
         }
+        TypeName::Applied { name, args }
+            if name == "classifiable_subset_key" && args.len() == 1 =>
+        {
+            let _ = args;
+            Value::ClassifiableSubsetKey {
+                entries: Rc::new(RefCell::new(Vec::new())),
+                entry_id: 0,
+            }
+        }
+        TypeName::Applied { name, args }
+            if name == "classifiable_subset_var" && args.len() == 1 =>
+        {
+            let _ = args;
+            Value::ClassifiableSubsetVar {
+                entries: Rc::new(RefCell::new(Vec::<RuntimeClassifiableSubsetEntry>::new())),
+                next_key: Rc::new(RefCell::new(0)),
+            }
+        }
         TypeName::Applied { name, args } if name == "subtype" && args.len() == 1 => {
             Value::Subtype(args[0].clone())
         }
@@ -140,6 +188,20 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
                 name: "castable_subtype".to_string(),
                 args: vec![args[0].clone()],
             })
+        }
+        TypeName::Applied { name, args } if name == "success_result" && args.len() == 1 => {
+            let _ = args;
+            Value::Result {
+                succeeded: true,
+                value: Box::new(Value::External),
+            }
+        }
+        TypeName::Applied { name, args } if name == "error_result" && args.len() == 1 => {
+            let _ = args;
+            Value::Result {
+                succeeded: false,
+                value: Box::new(Value::External),
+            }
         }
         _ => Value::External,
     }
@@ -174,11 +236,113 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
                 name: "Await",
                 payload: payload.clone(),
                 waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: None,
             }),
             "Signal" => Some(Value::NativeEventMethod {
                 name: "Signal",
                 payload: payload.clone(),
                 waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: None,
+            }),
+            _ => None,
+        },
+        Value::SubscribableEventIntrnl {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => match name {
+            "Await" => Some(Value::NativeEventMethod {
+                name: "Await",
+                payload: payload.clone(),
+                waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: None,
+            }),
+            "Signal" => Some(Value::NativeEventMethod {
+                name: "Signal",
+                payload: payload.clone(),
+                waiters: Some(waiters.clone()),
+                subscribers: Some(subscribers.clone()),
+                sticky_signal: None,
+            }),
+            "Subscribe" => Some(Value::NativeSubscribableMethod {
+                name: "Subscribe",
+                payload: payload.clone(),
+                subscribers: subscribers.clone(),
+                next_subscriber_id: next_subscriber_id.clone(),
+            }),
+            _ => None,
+        },
+        Value::SubscribableEvent {
+            payload,
+            waiters,
+            subscribers,
+            next_subscriber_id,
+        } => match name {
+            "Await" => Some(Value::NativeEventMethod {
+                name: "Await",
+                payload: Some(payload.clone()),
+                waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: None,
+            }),
+            "Signal" => Some(Value::NativeEventMethod {
+                name: "Signal",
+                payload: Some(payload.clone()),
+                waiters: Some(waiters.clone()),
+                subscribers: Some(subscribers.clone()),
+                sticky_signal: None,
+            }),
+            "Broadcast" => Some(Value::NativeEventMethod {
+                name: "Broadcast",
+                payload: Some(payload.clone()),
+                waiters: Some(waiters.clone()),
+                subscribers: Some(subscribers.clone()),
+                sticky_signal: None,
+            }),
+            "Subscribe" => Some(Value::NativeSubscribableMethod {
+                name: "Subscribe",
+                payload: Some(payload.clone()),
+                subscribers: subscribers.clone(),
+                next_subscriber_id: next_subscriber_id.clone(),
+            }),
+            _ => None,
+        },
+        Value::StickyEvent {
+            payload,
+            waiters,
+            signal,
+        } => match name {
+            "Await" => Some(Value::NativeEventMethod {
+                name: "Await",
+                payload: payload.clone(),
+                waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: Some(signal.clone()),
+            }),
+            "Signal" => Some(Value::NativeEventMethod {
+                name: "Signal",
+                payload: payload.clone(),
+                waiters: Some(waiters.clone()),
+                subscribers: None,
+                sticky_signal: Some(signal.clone()),
+            }),
+            "IsSignaled" => Some(Value::NativeEventMethod {
+                name: "IsSignaled",
+                payload: None,
+                waiters: None,
+                subscribers: None,
+                sticky_signal: Some(signal.clone()),
+            }),
+            "ClearSignal" => Some(Value::NativeEventMethod {
+                name: "ClearSignal",
+                payload: None,
+                waiters: None,
+                subscribers: None,
+                sticky_signal: Some(signal.clone()),
             }),
             _ => None,
         },
@@ -187,6 +351,8 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
                 name: "Await",
                 payload: payload.clone(),
                 waiters: None,
+                subscribers: None,
+                sticky_signal: None,
             }),
             _ => None,
         },
@@ -195,6 +361,8 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
                 name: "Signal",
                 payload: Some(payload.clone()),
                 waiters: None,
+                subscribers: None,
+                sticky_signal: None,
             }),
             _ => None,
         },
@@ -220,6 +388,8 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
                 name: "Await",
                 payload: payload.clone(),
                 waiters: None,
+                subscribers: None,
+                sticky_signal: None,
             }),
             "Subscribe" => Some(Value::NativeSubscribableMethod {
                 name: "Subscribe",
@@ -260,6 +430,20 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
                 },
                 result: Box::new(value_copy(object)),
             }),
+            "Success" => match object {
+                Value::Result {
+                    succeeded: true,
+                    value,
+                } => Some(value_copy(value)),
+                _ => None,
+            },
+            "Error" => match object {
+                Value::Result {
+                    succeeded: false,
+                    value,
+                } => Some(value_copy(value)),
+                _ => None,
+            },
             _ => None,
         },
         Value::Modifier { .. } | Value::ModifierStack { .. } => match name {
@@ -297,6 +481,7 @@ pub(crate) fn bytecode_call_native_event_method(
     name: &'static str,
     payload: Option<TypeName>,
     _waiters: Option<Rc<RefCell<Vec<Rc<super::RuntimeTask>>>>>,
+    sticky_signal: Option<Rc<RefCell<Option<Value>>>>,
     args: Vec<(Value, Span)>,
     span: Span,
 ) -> Result<Value, VerseError> {
@@ -310,8 +495,18 @@ pub(crate) fn bytecode_call_native_event_method(
         })
         .collect::<Vec<_>>();
     match name {
-        "Signal" => {
+        "Signal" | "Broadcast" => {
             validate_event_signal_args(payload.as_ref(), &args, span)?;
+            if let Some(sticky_signal) = sticky_signal {
+                let mut signal = sticky_signal.borrow_mut();
+                if signal.is_some() {
+                    return Err(VerseError::runtime_at(
+                        "`Signal` called on an already signaled sticky_event",
+                        span,
+                    ));
+                }
+                *signal = Some(event_signal_value(payload.as_ref(), &args));
+            }
             Ok(Value::None)
         }
         "Await" => {
@@ -321,7 +516,40 @@ pub(crate) fn bytecode_call_native_event_method(
                     span,
                 ));
             }
+            if let Some(sticky_signal) = sticky_signal
+                && let Some(value) = sticky_signal.borrow().as_ref()
+            {
+                return Ok(value_copy(value));
+            }
             Ok(Value::Pending)
+        }
+        "IsSignaled" => {
+            if !args.is_empty() {
+                return Err(VerseError::runtime_at(
+                    format!("`IsSignaled` expected 0 arguments, got {}", args.len()),
+                    span,
+                ));
+            }
+            if sticky_signal
+                .as_ref()
+                .is_some_and(|signal| signal.borrow().is_some())
+            {
+                Ok(Value::None)
+            } else {
+                Ok(Value::Option(None))
+            }
+        }
+        "ClearSignal" => {
+            if !args.is_empty() {
+                return Err(VerseError::runtime_at(
+                    format!("`ClearSignal` expected 0 arguments, got {}", args.len()),
+                    span,
+                ));
+            }
+            if let Some(sticky_signal) = sticky_signal {
+                *sticky_signal.borrow_mut() = None;
+            }
+            Ok(Value::None)
         }
         _ => Err(VerseError::runtime_at(
             format!("unknown event method `{name}`"),

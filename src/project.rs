@@ -808,6 +808,7 @@ fn is_module_level_declaration(statement: &Stmt) -> bool {
         StmtKind::Using { .. }
             | StmtKind::Let { .. }
             | StmtKind::ParametricType { .. }
+            | StmtKind::ParametricTypeAlias { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::ExtensionMethod(_)
             | StmtKind::Var { .. }

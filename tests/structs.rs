@@ -91,6 +91,28 @@ Origin.X + PlayerPos.X + PlayerPos.Y
 }
 
 #[test]
+fn evaluates_type_bounds_parametric_struct_annotation() {
+    let source = r#"
+base_item := class:
+    Value:int = 1
+child_item := class(base_item):
+    ChildValue:int = 0
+
+slot(t:type(child_item, base_item)) := struct:
+    Item:t
+
+Slot:slot(child_item) = slot(child_item){Item := child_item{}}
+Slot.Item.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(1));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_struct_field_default_recursively_constructing_same_struct() {
     let error = check_source(
         r#"

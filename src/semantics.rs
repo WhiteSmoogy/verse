@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::Program;
 use crate::checker::Type;
@@ -19,6 +19,7 @@ pub type TypedProgram = SemanticProgram;
 pub struct SemanticFacts {
     binding_types: HashMap<Span, Type>,
     expression_types: HashMap<Span, Type>,
+    static_type_function_calls: HashSet<Span>,
 }
 
 impl SemanticFacts {
@@ -30,11 +31,19 @@ impl SemanticFacts {
         self.expression_types.insert(span, value_type);
     }
 
+    pub fn record_static_type_function_call(&mut self, span: Span) {
+        self.static_type_function_calls.insert(span);
+    }
+
     pub fn binding_type(&self, span: Span) -> Option<&Type> {
         self.binding_types.get(&span)
     }
 
     pub fn expression_type(&self, span: Span) -> Option<&Type> {
         self.expression_types.get(&span)
+    }
+
+    pub fn is_static_type_function_call(&self, span: Span) -> bool {
+        self.static_type_function_calls.contains(&span)
     }
 }

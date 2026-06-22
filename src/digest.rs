@@ -124,36 +124,83 @@ fn render_public_parametric_type(
 ) -> Option<String> {
     let params = render_type_params(params);
     match &expr.kind {
-        ExprKind::StructDefinition { .. } => Some(format!(
-            "{}{}{}{} := struct {{}}",
-            indent_text(indent),
-            name,
-            render_specifiers(specifiers),
-            params
-        )),
+        ExprKind::StructDefinition { fields, .. } => {
+            let body = render_public_fields(fields, indent + 1, false);
+            Some(render_parametric_aggregate_binding(
+                name, specifiers, &params, "struct", "", body, indent,
+            ))
+        }
         ExprKind::ClassDefinition {
             specifiers: class_specifiers,
+            fields,
+            methods,
             ..
-        } => Some(format!(
-            "{}{}{}{} := class{} {{}}",
+        } => {
+            let mut body = render_public_fields(fields, indent + 1, false);
+            body.extend(render_public_methods(methods, indent + 1));
+            Some(render_parametric_aggregate_binding(
+                name,
+                specifiers,
+                &params,
+                "class",
+                &render_specifiers(class_specifiers),
+                body,
+                indent,
+            ))
+        }
+        ExprKind::InterfaceDefinition {
+            parents,
+            fields,
+            methods,
+            ..
+        } => {
+            let mut body = render_public_fields(fields, indent + 1, true);
+            body.extend(render_public_methods(methods, indent + 1));
+            let parents = render_parents(parents);
+            Some(render_parametric_aggregate_binding(
+                name,
+                specifiers,
+                &params,
+                "interface",
+                &parents,
+                body,
+                indent,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn render_parametric_aggregate_binding(
+    name: &str,
+    specifiers: &[String],
+    params: &str,
+    keyword: &str,
+    suffix: &str,
+    body: Vec<String>,
+    indent: usize,
+) -> String {
+    if body.is_empty() {
+        format!(
+            "{}{}{}{} := {}{} {{}}",
             indent_text(indent),
             name,
             render_specifiers(specifiers),
             params,
-            render_specifiers(class_specifiers)
-        )),
-        ExprKind::InterfaceDefinition { parents, .. } => {
-            let parents = render_parents(parents);
-            Some(format!(
-                "{}{}{}{} := interface{} {{}}",
-                indent_text(indent),
-                name,
-                render_specifiers(specifiers),
-                params,
-                parents
-            ))
-        }
-        _ => None,
+            keyword,
+            suffix
+        )
+    } else {
+        format!(
+            "{}{}{}{} := {}{}:\n{}",
+            indent_text(indent),
+            name,
+            render_specifiers(specifiers),
+            params,
+            keyword,
+            suffix,
+            body.join("\n")
+        )
     }
 }
 
@@ -404,6 +451,12 @@ fn render_type_param(param: &TypeParam) -> String {
         TypeParamConstraint::Subtype(target) => {
             format!("{}:subtype({})", param.name, render_type_name(target))
         }
+        TypeParamConstraint::TypeBounds { lower, upper } => format!(
+            "{}:type({}, {})",
+            param.name,
+            render_type_name(lower),
+            render_type_name(upper)
+        ),
     }
 }
 
@@ -448,7 +501,21 @@ fn render_type_name(name: &TypeName) -> String {
         TypeName::Any => "any".to_string(),
         TypeName::Comparable => "comparable".to_string(),
         TypeName::Type => "type".to_string(),
+        TypeName::TypeBounds { lower, upper } => {
+            format!(
+                "type({}, {})",
+                render_type_name(lower),
+                render_type_name(upper)
+            )
+        }
         TypeName::IntRange { min, max } => format!("int_range({min}, {max})"),
+        TypeName::FloatRange(range) => {
+            format!(
+                "float_range({}, {})",
+                range.min.render(),
+                range.max.render()
+            )
+        }
         TypeName::Array(Some(item)) => format!("[]{}", render_type_name(item)),
         TypeName::Array(None) => "[]any".to_string(),
         TypeName::Map(key, value) => {

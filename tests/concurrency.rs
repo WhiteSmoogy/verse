@@ -25,8 +25,8 @@ fn checks_official_modifier_stack_member_surface() {
     let source = r#"
 Use(Stack:modifier_stack(int), Modifier:modifier(int))<transacts>:void =
     block:
-        First:?rational = Stack.FirstPosition
-        Last:?rational = Stack.LastPosition
+        First:rational = Stack.FirstPosition
+        Last:rational = Stack.LastPosition
         Value:int = Stack.Evaluate(40)
         Modified:int = Modifier.Evaluate(Value)
         Subscription:cancelable = Stack.AddModifier(Modifier, 1)
@@ -97,9 +97,9 @@ Modifier.Evaluate(42)
 fn evaluates_external_modifier_stack_as_empty_runtime_stack() {
     let source = r#"
 Stack:modifier_stack(int) = external {}
-NoFirst := if (Stack.FirstPosition?). 0 else. 20
-NoLast := if (Stack.LastPosition?). 0 else. 22
-NoFirst + NoLast + Stack.Evaluate(0)
+First := if (Stack.FirstPosition = 0). 20 else. 0
+Last := if (Stack.LastPosition = 0). 22 else. 0
+First + Last + Stack.Evaluate(0)
 "#;
 
     assert_eq!(
@@ -128,15 +128,16 @@ Handle:cancelable = Stack.AddModifier(multiply{Factor := 10}, 0)
 BeforeCancel:int = Stack.Evaluate(4)
 Handle.Cancel()
 AfterCancel:int = Stack.Evaluate(4)
-FirstIsZero := if (Position := Stack.FirstPosition?, Position = 0). 1 else. 0
-BeforeCancel + AfterCancel + FirstIsZero
+FirstIsZero := if (Stack.FirstPosition = 0). 1 else. 0
+LastIsZero := if (Stack.LastPosition = 0). 1 else. 0
+BeforeCancel + AfterCancel + FirstIsZero + LastIsZero
 "#;
 
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
     );
-    assert_eq!(eval(source), Value::Int(67));
+    assert_eq!(eval(source), Value::Int(68));
 }
 
 #[test]
@@ -686,6 +687,23 @@ Handle.Cancel()
 }
 
 #[test]
+fn evaluates_external_parameterless_listenable_subscribe_and_cancel_runtime() {
+    let source = r#"
+Handler():void = {}
+Source:listenable() = external {}
+Handle:cancelable = Source.Subscribe(Handler)
+Handle.Cancel()
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_external_awaitable_pending_does_not_block_race_winner() {
     let source = r#"
 var Result:int = 0
@@ -739,6 +757,25 @@ SubscribeTo(Source:listenable(int)):cancelable = Source.Subscribe(Handler)
 }
 
 #[test]
+fn checks_official_parameterless_listenable_exposed_members() {
+    let source = r#"
+Wait(Source:listenable())<suspends>:void = Source.Await()
+Handler():void = {}
+SubscribeTo(Source:listenable()):cancelable = Source.Subscribe(Handler)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::Listenable(None)]),
+            Type::Interface("cancelable".into())
+        )
+    );
+}
+
+#[test]
 fn checks_official_event_subtype_of_awaitable_and_signalable() {
     let source = r#"
 AcceptAwaitable(Source:awaitable(int)):int = 1
@@ -777,6 +814,240 @@ Use(Source:listenable(int)):int = AcceptAwaitable(Source) + AcceptSubscribable(S
 }
 
 #[test]
+fn checks_official_parameterless_listenable_subtype_of_awaitable_and_subscribable() {
+    let source = r#"
+AcceptAwaitable(Source:awaitable()):int = 1
+AcceptSubscribable(Source:subscribable()):int = 2
+Use(Source:listenable()):int = AcceptAwaitable(Source) + AcceptSubscribable(Source)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::Listenable(None)]),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn checks_official_subscribable_event_intrnl_member_surface_and_supertypes() {
+    let source = r#"
+Wait(Source:subscribable_event_intrnl(int))<suspends>:int = Source.Await()
+Notify(Source:subscribable_event_intrnl(int)):void = Source.Signal(42)
+SignalFn(Source:subscribable_event_intrnl(int)):type{_(:int)<predicts>:void} = Source.Signal
+Handler(Value:int)<transacts>:void = {}
+SubscribeTo(Source:subscribable_event_intrnl(int)):cancelable = Source.Subscribe(Handler)
+AcceptEvent(Source:event(int)):int = 1
+AcceptListenable(Source:listenable(int)):int = 2
+AcceptAwaitable(Source:awaitable(int)):int = 4
+AcceptSignalable(Source:signalable(int)):int = 8
+AcceptSubscribable(Source:subscribable(int)):int = 16
+Use(Source:subscribable_event_intrnl(int)):int =
+    AcceptEvent(Source) + AcceptListenable(Source) + AcceptAwaitable(Source) + AcceptSignalable(Source) + AcceptSubscribable(Source)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::SubscribableEventIntrnl(Some(Box::new(
+                Type::Int
+            )))]),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn checks_official_parameterless_subscribable_event_intrnl_members() {
+    let source = r#"
+Wait(Source:subscribable_event_intrnl())<suspends>:void = Source.Await()
+Notify(Source:subscribable_event_intrnl()):void = Source.Signal()
+SignalFn(Source:subscribable_event_intrnl()):type{_()<predicts>:void} = Source.Signal
+Handler()<transacts>:void = {}
+SubscribeTo(Source:subscribable_event_intrnl()):cancelable = Source.Subscribe(Handler)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::SubscribableEventIntrnl(None)]),
+            Type::Interface("cancelable".into())
+        )
+    );
+}
+
+#[test]
+fn evaluates_external_subscribable_event_intrnl_signal_runtime_surface() {
+    let source = r#"
+var Result:int = 0
+Source:subscribable_event_intrnl(int) = external {}
+Handler(Value:int)<transacts>:void =
+    set Result = Result + Value
+Wait()<suspends><transacts>:void =
+    Value := Source.Await()
+    set Result = Result + Value * 10
+Run()<suspends><transacts>:void =
+    Source.Subscribe(Handler)
+    spawn{Wait()}
+    Source.Signal(4)
+spawn{Run()}
+Result
+"#;
+
+    assert_eq!(eval(source), Value::Int(44));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_official_subscribable_event_member_surface_and_supertypes() {
+    let source = r#"
+Wait(Source:subscribable_event(int))<suspends>:int = Source.Await()
+Notify(Source:subscribable_event(int)):void = Source.Signal(42)
+SignalFn(Source:subscribable_event(int)):type{_(:int)<predicts>:void} = Source.Signal
+Broadcast(Source:subscribable_event(int))<predicts>:void = Source.Broadcast(42)
+Handler(Value:int)<transacts>:void = {}
+SubscribeTo(Source:subscribable_event(int)):cancelable = Source.Subscribe(Handler)
+AcceptIntrnl(Source:subscribable_event_intrnl(int)):int = 1
+AcceptEvent(Source:event(int)):int = 2
+AcceptListenable(Source:listenable(int)):int = 4
+AcceptAwaitable(Source:awaitable(int)):int = 8
+AcceptSignalable(Source:signalable(int)):int = 16
+AcceptSubscribable(Source:subscribable(int)):int = 32
+Use(Source:subscribable_event(int)):int =
+    AcceptIntrnl(Source) + AcceptEvent(Source) + AcceptListenable(Source) + AcceptAwaitable(Source) + AcceptSignalable(Source) + AcceptSubscribable(Source)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::SubscribableEvent(Box::new(Type::Int))]),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn evaluates_external_subscribable_event_broadcast_runtime_surface() {
+    let source = r#"
+var Result:int = 0
+Source:subscribable_event(int) = external {}
+Handler(Value:int)<transacts>:void =
+    set Result = Result + Value
+Wait()<suspends><transacts>:void =
+    Value := Source.Await()
+    set Result = Result + Value * 10
+Run()<suspends><transacts>:void =
+    Source.Subscribe(Handler)
+    spawn{Wait()}
+    Source.Broadcast(4)
+spawn{Run()}
+Result
+"#;
+
+    assert_eq!(eval(source), Value::Int(44));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_official_sticky_event_member_surface_and_supertypes() {
+    let source = r#"
+Wait(Source:sticky_event(int))<suspends>:int = Source.Await()
+Notify(Source:sticky_event(int)):void = Source.Signal(42)
+Clear(Source:sticky_event(int))<writes>:void = Source.ClearSignal()
+Ready(Source:sticky_event(int))<reads><decides>:void = Source.IsSignaled[]
+AcceptEvent(Source:event(int)):int = 1
+AcceptAwaitable(Source:awaitable(int)):int = 2
+AcceptSignalable(Source:signalable(int)):int = 4
+Use(Source:sticky_event(int)):int =
+    AcceptEvent(Source) + AcceptAwaitable(Source) + AcceptSignalable(Source)
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            Vec::<String>::new(),
+            Some(vec![Type::StickyEvent(Some(Box::new(Type::Int)))]),
+            Type::Int
+        )
+    );
+}
+
+#[test]
+fn checks_official_parameterless_sticky_event_members() {
+    let source = r#"
+Wait(Source:sticky_event())<suspends>:void = Source.Await()
+Notify(Source:sticky_event()):void = Source.Signal()
+Clear(Source:sticky_event())<writes>:void = Source.ClearSignal()
+Ready(Source:sticky_event())<reads><decides>:void = Source.IsSignaled[]
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            vec!["reads".to_string(), "decides".to_string()],
+            Some(vec![Type::StickyEvent(None)]),
+            Type::None
+        )
+    );
+}
+
+#[test]
+fn evaluates_official_sticky_event_signal_state_and_clear_runtime() {
+    let source = r#"
+Ready:sticky_event() = sticky_event(){}
+Before:int = if (Ready.IsSignaled[]). 1 else. 0
+Ready.Signal()
+After:int = if (Ready.IsSignaled[]). 40 else. 0
+Ready.ClearSignal()
+Cleared:int = if (Ready.IsSignaled[]). 0 else. 2
+Before + After + Cleared
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_official_sticky_event_await_returns_cached_signal_payload() {
+    let source = r#"
+var Result:int = 0
+Ready:sticky_event(int) = sticky_event(int){}
+Wait()<suspends><transacts>:void =
+    Value := Ready.Await()
+    set Result = Value + 2
+Ready.Signal(40)
+spawn{Wait()}
+Result
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_official_awaitable_await_outside_async_context() {
     let error = check_source("Wait(Waitable:awaitable(int)):int = Waitable.Await()")
         .expect_err("source should fail");
@@ -795,6 +1066,34 @@ fn rejects_official_task_await_outside_async_context() {
 #[test]
 fn rejects_official_event_signal_payload_type_mismatch() {
     let error = check_source(r#"Notify(Event:event(int)):void = Event.Signal("bad")"#)
+        .expect_err("source should fail");
+
+    assert!(error.to_string().contains("argument 1 expected `int`"));
+}
+
+#[test]
+fn rejects_official_subscribable_event_intrnl_signal_payload_type_mismatch() {
+    let error = check_source(
+        r#"Notify(Source:subscribable_event_intrnl(int)):void = Source.Signal("bad")"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains("argument 1 expected `int`"));
+}
+
+#[test]
+fn rejects_official_subscribable_event_broadcast_payload_type_mismatch() {
+    let error = check_source(
+        r#"Notify(Source:subscribable_event(int))<predicts>:void = Source.Broadcast("bad")"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains("argument 1 expected `int`"));
+}
+
+#[test]
+fn rejects_official_sticky_event_signal_payload_type_mismatch() {
+    let error = check_source(r#"Notify(Source:sticky_event(int)):void = Source.Signal("bad")"#)
         .expect_err("source should fail");
 
     assert!(error.to_string().contains("argument 1 expected `int`"));
@@ -843,6 +1142,63 @@ SubscribeTo(Source:subscribable(int))<computes>:cancelable = Source.Subscribe(Ha
     assert!(error.to_string().contains(
         "function with <computes> effect cannot call function requiring <transacts> effect"
     ));
+}
+
+#[test]
+fn rejects_official_subscribable_event_intrnl_subscribe_in_computes_function() {
+    let error = check_source(
+        r#"
+Handler(Value:int):void = {}
+SubscribeTo(Source:subscribable_event_intrnl(int))<computes>:cancelable = Source.Subscribe(Handler)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
+}
+
+#[test]
+fn rejects_official_subscribable_event_intrnl_signal_in_computes_function() {
+    let error = check_source(
+        r#"
+Notify(Source:subscribable_event_intrnl(int))<computes>:void = Source.Signal(42)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <no_rollback> effect"
+    ));
+}
+
+#[test]
+fn rejects_official_sticky_event_clear_signal_in_computes_function() {
+    let error = check_source(
+        r#"
+Clear(Source:sticky_event())<computes>:void = Source.ClearSignal()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <writes> effect"
+    ));
+}
+
+#[test]
+fn runtime_errors_on_official_sticky_event_signal_while_already_signaled() {
+    let error = run_source(
+        r#"
+Ready:sticky_event() = sticky_event(){}
+Ready.Signal()
+Ready.Signal()
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(error.to_string().contains("already signaled sticky_event"));
 }
 
 #[test]
@@ -2467,6 +2823,42 @@ fn rejects_official_event_parametric_type_wrong_arity() {
         error
             .to_string()
             .contains("parametric type `event` expected 0 or 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_subscribable_event_intrnl_parametric_type_wrong_arity() {
+    let error = check_source("Value:subscribable_event_intrnl(int, string) = external {}")
+        .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `subscribable_event_intrnl` expected 0 or 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_subscribable_event_parametric_type_wrong_arity() {
+    let error =
+        check_source("Value:subscribable_event() = external {}").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `subscribable_event` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_sticky_event_parametric_type_wrong_arity() {
+    let error = check_source("Value:sticky_event(int, string) = external {}")
+        .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `sticky_event` expected 0 or 1 type arguments")
     );
 }
 

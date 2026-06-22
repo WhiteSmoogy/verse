@@ -6,7 +6,7 @@ use crate::ast::{
     ForBinding, ForClause, InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind,
     StructField, TypeAnnotation, TypeName, TypeParamConstraint, UnaryOp,
 };
-use crate::checker::{IntRange, Type};
+use crate::checker::{IntRange, ParametricTypeKind, Type};
 use crate::colors::NAMED_COLORS;
 use crate::error::VerseError;
 use crate::semantics::{SemanticFacts, SemanticProgram};
@@ -88,6 +88,13 @@ pub struct ClassDescriptor {
     name: String,
     unique: bool,
     base_class: Option<String>,
+    interfaces: Vec<String>,
+    abstract_class: bool,
+    epic_internal_class: bool,
+    final_class: bool,
+    final_super: bool,
+    concrete: bool,
+    castable: bool,
     fields: Vec<String>,
     methods: Vec<ClassMethodDescriptor>,
     blocks: Vec<ClassBlockDescriptor>,
@@ -110,6 +117,34 @@ impl ClassDescriptor {
 
     pub fn base_class(&self) -> Option<&str> {
         self.base_class.as_deref()
+    }
+
+    pub fn interfaces(&self) -> &[String] {
+        &self.interfaces
+    }
+
+    pub fn abstract_class(&self) -> bool {
+        self.abstract_class
+    }
+
+    pub fn epic_internal_class(&self) -> bool {
+        self.epic_internal_class
+    }
+
+    pub fn final_class(&self) -> bool {
+        self.final_class
+    }
+
+    pub fn final_super(&self) -> bool {
+        self.final_super
+    }
+
+    pub fn concrete(&self) -> bool {
+        self.concrete
+    }
+
+    pub fn castable(&self) -> bool {
+        self.castable
     }
 
     pub fn fields(&self) -> &[String] {
@@ -316,20 +351,49 @@ impl BytecodeChunk {
 pub enum Constant {
     Int(i64),
     Float(f64),
-    Char { value: char, kind: CharacterKind },
+    Char {
+        value: char,
+        kind: CharacterKind,
+    },
     Bool(bool),
     String(String),
     None,
     Type(TypeName),
     Option(Option<Box<Constant>>),
-    Range { start: i64, end: i64 },
+    Range {
+        start: i64,
+        end: i64,
+    },
     Tuple(Vec<Constant>),
-    EnumValue { enum_name: String, variant: String },
+    EnumValue {
+        enum_name: String,
+        variant: String,
+    },
     Function(usize),
     NativeFunction(String),
-    StructType { name: String, computes: bool },
-    ClassType { name: String, unique: bool },
-    InterfaceType { name: String },
+    StructType {
+        name: String,
+        computes: bool,
+    },
+    ClassType {
+        name: String,
+        base: Option<String>,
+        interfaces: Vec<String>,
+        unique: bool,
+        abstract_class: bool,
+        epic_internal_class: bool,
+        final_class: bool,
+        final_super: bool,
+        concrete: bool,
+        castable: bool,
+    },
+    InterfaceType {
+        name: String,
+    },
+    ParametricType {
+        name: String,
+        params: Vec<String>,
+    },
     External(TypeName),
     GlobalRef(String),
 }
@@ -1449,9 +1513,33 @@ struct Lowerer<'semantic> {
 struct ClassLayout {
     runtime_name: String,
     base_class: Option<String>,
+    interfaces: Vec<String>,
     object_kind: ObjectKind,
     unique: bool,
+    abstract_class: bool,
+    epic_internal_class: bool,
+    final_class: bool,
+    final_super: bool,
+    concrete: bool,
+    castable: bool,
     fields: Vec<StructField>,
+}
+
+impl ClassLayout {
+    fn class_type_constant(&self) -> Constant {
+        Constant::ClassType {
+            name: self.runtime_name.clone(),
+            base: self.base_class.clone(),
+            interfaces: self.interfaces.clone(),
+            unique: self.unique,
+            abstract_class: self.abstract_class,
+            epic_internal_class: self.epic_internal_class,
+            final_class: self.final_class,
+            final_super: self.final_super,
+            concrete: self.concrete,
+            castable: self.castable,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1467,16 +1555,72 @@ struct InterfaceLayout {
     methods: Vec<ClassMethod>,
 }
 
+const BUILTIN_RUNTIME_CLASS_NAMES: &[&str] = &[
+    "diagnostic",
+    "entity",
+    "component",
+    "tag",
+    "session",
+    "player",
+    "agent",
+    "team",
+];
+
+fn builtin_class_layout(name: &str) -> ClassLayout {
+    ClassLayout {
+        runtime_name: name.to_string(),
+        base_class: None,
+        interfaces: Vec::new(),
+        object_kind: ObjectKind::Class,
+        unique: false,
+        abstract_class: false,
+        epic_internal_class: false,
+        final_class: false,
+        final_super: false,
+        concrete: false,
+        castable: false,
+        fields: Vec::new(),
+    }
+}
+
+fn builtin_class_descriptor(name: &str) -> ClassDescriptor {
+    ClassDescriptor {
+        name: name.to_string(),
+        unique: false,
+        base_class: None,
+        interfaces: Vec::new(),
+        abstract_class: false,
+        epic_internal_class: false,
+        final_class: false,
+        final_super: false,
+        concrete: false,
+        castable: false,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        blocks: Vec::new(),
+    }
+}
+
 impl<'semantic> Lowerer<'semantic> {
     fn new(semantic: &'semantic SemanticProgram) -> Self {
         let mut class_layouts = HashMap::new();
+        for name in BUILTIN_RUNTIME_CLASS_NAMES {
+            class_layouts.insert((*name).to_string(), builtin_class_layout(name));
+        }
         class_layouts.insert(
             "locale".to_string(),
             ClassLayout {
                 runtime_name: "locale".to_string(),
                 base_class: None,
+                interfaces: Vec::new(),
                 object_kind: ObjectKind::Struct { computes: false },
                 unique: false,
+                abstract_class: false,
+                epic_internal_class: false,
+                final_class: false,
+                final_super: false,
+                concrete: false,
+                castable: false,
                 fields: Vec::new(),
             },
         );
@@ -1485,7 +1629,10 @@ impl<'semantic> Lowerer<'semantic> {
             facts: &semantic.facts,
             chunks: Vec::new(),
             functions: Vec::new(),
-            classes: Vec::new(),
+            classes: BUILTIN_RUNTIME_CLASS_NAMES
+                .iter()
+                .map(|name| builtin_class_descriptor(name))
+                .collect(),
             class_layouts,
             enum_layouts: HashMap::new(),
             interface_layouts: HashMap::new(),
@@ -1525,13 +1672,18 @@ impl<'semantic> Lowerer<'semantic> {
     fn predeclare_global_bindings(&mut self, statements: &[Stmt], namespace: Option<&str>) {
         for statement in statements {
             match &statement.kind {
-                StmtKind::Let { name, expr, .. } => {
+                StmtKind::Let {
+                    name,
+                    annotation,
+                    expr,
+                    ..
+                } => {
                     let runtime_name = namespace
                         .map(|namespace| format!("{namespace}.{name}"))
                         .unwrap_or_else(|| name.clone());
                     if let ExprKind::ModuleDefinition { statements, .. } = &expr.kind {
                         self.predeclare_global_bindings(statements, Some(&runtime_name));
-                    } else if should_predeclare_runtime_global_let(expr) {
+                    } else if should_predeclare_runtime_global_let(annotation.as_ref(), expr) {
                         self.predeclare_global_binding(
                             runtime_name,
                             false,
@@ -1616,10 +1768,12 @@ impl<'semantic> Lowerer<'semantic> {
                             base,
                             fields,
                             interfaces,
+                            specifiers,
                             ..
                         } => self.predeclare_class_layout(
                             name.clone(),
                             runtime_name,
+                            specifiers,
                             ObjectKind::Class,
                             base.as_ref(),
                             interfaces,
@@ -1630,6 +1784,7 @@ impl<'semantic> Lowerer<'semantic> {
                         } => self.predeclare_class_layout(
                             name.clone(),
                             runtime_name,
+                            &[],
                             ObjectKind::Struct {
                                 computes: *computes,
                             },
@@ -1652,19 +1807,28 @@ impl<'semantic> Lowerer<'semantic> {
                         _ => {}
                     }
                 }
-                StmtKind::ParametricType { name, expr, .. } => match &expr.kind {
+                StmtKind::ParametricType {
+                    name,
+                    specifiers,
+                    expr,
+                    ..
+                } => match &expr.kind {
                     ExprKind::ClassDefinition {
                         base,
                         fields,
                         interfaces,
+                        specifiers: class_specifiers,
                         ..
                     } => {
                         let runtime_name = namespace
                             .map(|namespace| format!("{namespace}.{name}"))
                             .unwrap_or_else(|| name.clone());
+                        let mut runtime_specifiers = specifiers.clone();
+                        runtime_specifiers.extend(class_specifiers.clone());
                         self.predeclare_class_layout(
                             name.clone(),
                             runtime_name,
+                            &runtime_specifiers,
                             ObjectKind::Class,
                             base.as_ref(),
                             interfaces,
@@ -1686,6 +1850,7 @@ impl<'semantic> Lowerer<'semantic> {
                         self.predeclare_class_layout(
                             name.clone(),
                             runtime_name,
+                            &[],
                             ObjectKind::Struct {
                                 computes: *computes,
                             },
@@ -1730,7 +1895,7 @@ impl<'semantic> Lowerer<'semantic> {
                 state.last_value = state.none();
                 Ok(())
             }
-            StmtKind::TypeAlias { .. } => {
+            StmtKind::TypeAlias { .. } | StmtKind::ParametricTypeAlias { .. } => {
                 state.last_value = state.none();
                 Ok(())
             }
@@ -1773,12 +1938,11 @@ impl<'semantic> Lowerer<'semantic> {
                         blocks,
                         extension_methods,
                     )?;
-                    let class_type = state.constant(Constant::ClassType {
-                        name: name.clone(),
-                        unique: runtime_specifiers
-                            .iter()
-                            .any(|specifier| specifier == "unique"),
-                    });
+                    let class_type_constant = self
+                        .resolve_class_layout(name, state)
+                        .ok_or(UnsupportedBytecode)?
+                        .class_type_constant();
+                    let class_type = state.constant(class_type_constant);
                     state.define(
                         name.clone(),
                         Binding {
@@ -1826,6 +1990,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.predeclare_class_layout(
                         name.clone(),
                         name.clone(),
+                        &[],
                         ObjectKind::Struct {
                             computes: *computes,
                         },
@@ -1891,10 +2056,11 @@ impl<'semantic> Lowerer<'semantic> {
                         blocks,
                         extension_methods,
                     )?;
-                    let class_type = state.constant(Constant::ClassType {
-                        name: name.clone(),
-                        unique: specifiers.iter().any(|specifier| specifier == "unique"),
-                    });
+                    let class_type_constant = self
+                        .resolve_class_layout(name, state)
+                        .ok_or(UnsupportedBytecode)?
+                        .class_type_constant();
+                    let class_type = state.constant(class_type_constant);
                     state.define(
                         name.clone(),
                         Binding {
@@ -1942,6 +2108,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.predeclare_class_layout(
                         name.clone(),
                         name.clone(),
+                        &[],
                         ObjectKind::Struct {
                             computes: *computes,
                         },
@@ -1970,7 +2137,8 @@ impl<'semantic> Lowerer<'semantic> {
                     state.last_value = state.none();
                     return Ok(());
                 }
-                if is_compile_time_type_expr(expr) {
+                if is_compile_time_type_expr(expr) && !is_type_value_annotation(annotation.as_ref())
+                {
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2199,7 +2367,7 @@ impl<'semantic> Lowerer<'semantic> {
                 state.last_value = state.none();
                 Ok(())
             }
-            StmtKind::TypeAlias { .. } => {
+            StmtKind::TypeAlias { .. } | StmtKind::ParametricTypeAlias { .. } => {
                 state.last_value = state.none();
                 Ok(())
             }
@@ -2244,12 +2412,11 @@ impl<'semantic> Lowerer<'semantic> {
                         extension_methods,
                     )?;
                     let binding = Binding {
-                        operand: state.constant(Constant::ClassType {
-                            name: qualified.clone(),
-                            unique: runtime_specifiers
-                                .iter()
-                                .any(|specifier| specifier == "unique"),
-                        }),
+                        operand: state.constant(
+                            self.resolve_class_layout(&qualified, state)
+                                .ok_or(UnsupportedBytecode)?
+                                .class_type_constant(),
+                        ),
                         mutable: false,
                         ref_backed: false,
                         iterable_kind: None,
@@ -2293,6 +2460,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.predeclare_class_layout(
                         name.clone(),
                         qualified.clone(),
+                        &[],
                         ObjectKind::Struct {
                             computes: *computes,
                         },
@@ -2358,10 +2526,11 @@ impl<'semantic> Lowerer<'semantic> {
                         extension_methods,
                     )?;
                     let binding = Binding {
-                        operand: state.constant(Constant::ClassType {
-                            name: qualified.clone(),
-                            unique: specifiers.iter().any(|specifier| specifier == "unique"),
-                        }),
+                        operand: state.constant(
+                            self.resolve_class_layout(&qualified, state)
+                                .ok_or(UnsupportedBytecode)?
+                                .class_type_constant(),
+                        ),
                         mutable: false,
                         ref_backed: false,
                         iterable_kind: None,
@@ -2405,6 +2574,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.predeclare_class_layout(
                         name.clone(),
                         qualified.clone(),
+                        &[],
                         ObjectKind::Struct {
                             computes: *computes,
                         },
@@ -2431,7 +2601,8 @@ impl<'semantic> Lowerer<'semantic> {
                     state.last_value = state.none();
                     return Ok(());
                 }
-                if is_compile_time_type_expr(expr) {
+                if is_compile_time_type_expr(expr) && !is_type_value_annotation(annotation.as_ref())
+                {
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2597,6 +2768,7 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         local_name: String,
         runtime_name: String,
+        specifiers: &[String],
         object_kind: ObjectKind,
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
@@ -2604,11 +2776,23 @@ impl<'semantic> Lowerer<'semantic> {
     ) {
         let (base_class, layout_fields) =
             self.collect_class_layout_fields(base, interfaces, &fields);
+        let interface_names = self.class_interface_names(base, interfaces);
         let layout = ClassLayout {
             runtime_name: runtime_name.clone(),
             base_class,
+            interfaces: interface_names,
             object_kind,
-            unique: false,
+            unique: specifiers.iter().any(|specifier| specifier == "unique"),
+            abstract_class: specifiers.iter().any(|specifier| specifier == "abstract"),
+            epic_internal_class: specifiers
+                .iter()
+                .any(|specifier| specifier == "epic_internal"),
+            final_class: specifiers.iter().any(|specifier| specifier == "final"),
+            final_super: specifiers
+                .iter()
+                .any(|specifier| specifier == "final_super"),
+            concrete: specifiers.iter().any(|specifier| specifier == "concrete"),
+            castable: specifiers.iter().any(|specifier| specifier == "castable"),
             fields: layout_fields,
         };
         self.class_layouts.insert(local_name, layout.clone());
@@ -2723,6 +2907,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> Result<(), UnsupportedBytecode> {
         let (base_class_name, layout_fields) =
             self.collect_class_layout_fields(base, interfaces, &fields);
+        let interface_names = self.class_interface_names(base, interfaces);
 
         let class_extensions = extension_methods
             .iter()
@@ -2816,6 +3001,17 @@ impl<'semantic> Lowerer<'semantic> {
             name: runtime_name.clone(),
             unique: specifiers.iter().any(|specifier| specifier == "unique"),
             base_class: base_class_name.clone(),
+            interfaces: interface_names.clone(),
+            abstract_class: specifiers.iter().any(|specifier| specifier == "abstract"),
+            epic_internal_class: specifiers
+                .iter()
+                .any(|specifier| specifier == "epic_internal"),
+            final_class: specifiers.iter().any(|specifier| specifier == "final"),
+            final_super: specifiers
+                .iter()
+                .any(|specifier| specifier == "final_super"),
+            concrete: specifiers.iter().any(|specifier| specifier == "concrete"),
+            castable: specifiers.iter().any(|specifier| specifier == "castable"),
             fields: layout_fields
                 .iter()
                 .map(|field| field.name.clone())
@@ -2826,8 +3022,19 @@ impl<'semantic> Lowerer<'semantic> {
         let layout = ClassLayout {
             runtime_name: runtime_name.clone(),
             base_class: base_class_name.clone(),
+            interfaces: interface_names,
             object_kind: ObjectKind::Class,
             unique: specifiers.iter().any(|specifier| specifier == "unique"),
+            abstract_class: specifiers.iter().any(|specifier| specifier == "abstract"),
+            epic_internal_class: specifiers
+                .iter()
+                .any(|specifier| specifier == "epic_internal"),
+            final_class: specifiers.iter().any(|specifier| specifier == "final"),
+            final_super: specifiers
+                .iter()
+                .any(|specifier| specifier == "final_super"),
+            concrete: specifiers.iter().any(|specifier| specifier == "concrete"),
+            castable: specifiers.iter().any(|specifier| specifier == "castable"),
             fields: layout_fields,
         };
         self.class_layouts.insert(local_name, layout.clone());
@@ -3054,6 +3261,12 @@ impl<'semantic> Lowerer<'semantic> {
         expr: &Expr,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
+        if let Some((name, params)) = self.lower_parametric_type_value(expr) {
+            return Ok(state.constant(Constant::ParametricType { name, params }));
+        }
+        if let Some(type_name) = self.lower_alias_type_value(expr, state) {
+            return Ok(state.constant(Constant::Type(type_name)));
+        }
         if let Some(constant) = lower_constant_expr(expr)? {
             return Ok(state.constant(constant));
         }
@@ -3167,6 +3380,17 @@ impl<'semantic> Lowerer<'semantic> {
                     .unwrap_or(TypeName::Any);
                 Ok(state.constant(Constant::Type(type_name)))
             }
+            ExprKind::TypeAnnotationLiteral { .. } => {
+                let type_name = self
+                    .facts
+                    .expression_type(expr.span)
+                    .and_then(|value_type| match value_type {
+                        Type::TypeValueOf(item) => type_to_runtime_type_name(item.as_ref()),
+                        other => type_to_runtime_type_name(&other),
+                    })
+                    .unwrap_or(TypeName::Any);
+                Ok(state.constant(Constant::Type(type_name)))
+            }
             ExprKind::Set { target, op, expr } => {
                 self.lower_assignment(target, *op, expr, state, expr.span)?;
                 Ok(state.none())
@@ -3238,6 +3462,14 @@ impl<'semantic> Lowerer<'semantic> {
                         return self.lower_identifier(&qualified, state, expr.span);
                     }
                 }
+                if self
+                    .facts
+                    .expression_type(object.span)
+                    .is_some_and(type_is_type_value_for_extension_accessor)
+                    && let Some(extension) = state.lookup_extension(name)
+                {
+                    return self.lower_extension_call(object, &[], extension, state, expr.span);
+                }
                 self.lower_field_access(object, name, state, expr.span)
             }
             ExprKind::QualifiedMember {
@@ -3252,6 +3484,14 @@ impl<'semantic> Lowerer<'semantic> {
                     {
                         return self.lower_identifier(&qualified, state, expr.span);
                     }
+                }
+                if self
+                    .facts
+                    .expression_type(object.span)
+                    .is_some_and(type_is_type_value_for_extension_accessor)
+                    && let Some(extension) = state.lookup_qualified_extension(qualifier, name)
+                {
+                    return self.lower_extension_call(object, &[], extension, state, expr.span);
                 }
                 self.lower_field_access(object, &format!("({qualifier}:){name}"), state, expr.span)
             }
@@ -3272,6 +3512,73 @@ impl<'semantic> Lowerer<'semantic> {
             }
             _ => Err(UnsupportedBytecode),
         }
+    }
+
+    fn lower_alias_type_value(&self, expr: &Expr, state: &ChunkState) -> Option<TypeName> {
+        let Type::TypeValueOf(item) = self.facts.expression_type(expr.span)? else {
+            return None;
+        };
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                if self.runtime_identifier_exists(name, state) {
+                    return None;
+                }
+            }
+            ExprKind::QualifiedName { qualifier, name } => {
+                let qualified = format!("{qualifier}.{name}");
+                if self.runtime_identifier_exists(&qualified, state) {
+                    return None;
+                }
+            }
+            ExprKind::Member { object, name } => {
+                let qualified =
+                    compile_time_member_path(object).map(|path| format!("{path}.{name}"))?;
+                if self.runtime_identifier_exists(&qualified, state) {
+                    return None;
+                }
+            }
+            ExprKind::QualifiedMember {
+                object,
+                qualifier,
+                name,
+            } => {
+                let qualified = compile_time_member_path(object)
+                    .map(|path| format!("{path}.{qualifier}.{name}"))?;
+                if self.runtime_identifier_exists(&qualified, state) {
+                    return None;
+                }
+            }
+            ExprKind::Call { callee, .. } => {
+                if !self.facts.is_static_type_function_call(expr.span) {
+                    let name = callable_lookup_name(callee)?;
+                    if self.runtime_identifier_exists(&name, state) {
+                        return None;
+                    }
+                }
+            }
+            ExprKind::Tuple(_) => {}
+            _ => return None,
+        }
+        type_to_runtime_type_name(item)
+    }
+
+    fn lower_parametric_type_value(&self, expr: &Expr) -> Option<(String, Vec<String>)> {
+        let Type::ParametricType {
+            name,
+            params,
+            kind: ParametricTypeKind::Alias,
+        } = self.facts.expression_type(expr.span)?
+        else {
+            return None;
+        };
+        Some((name.clone(), params.clone()))
+    }
+
+    fn runtime_identifier_exists(&self, name: &str, state: &ChunkState) -> bool {
+        state.lookup(name).is_some()
+            || self.callable_names.contains(name)
+            || bytecode_native_function_name(name)
+            || self.class_layouts.contains_key(name)
     }
 
     fn define_mutable_binding(
@@ -3357,10 +3664,7 @@ impl<'semantic> Lowerer<'semantic> {
             if let Some(layout) = self.resolve_class_layout(name, state) {
                 match layout.object_kind {
                     ObjectKind::Class => {
-                        return Ok(state.constant(Constant::ClassType {
-                            name: layout.runtime_name.clone(),
-                            unique: layout.unique,
-                        }));
+                        return Ok(state.constant(layout.class_type_constant()));
                     }
                     ObjectKind::Struct { computes } => {
                         return Ok(state.constant(Constant::StructType {
@@ -7087,7 +7391,7 @@ impl<'semantic> Lowerer<'semantic> {
             };
             class_name
         };
-        if matches!(class_name.as_str(), "event" | "generator") {
+        if matches!(class_name.as_str(), "event" | "generator" | "sticky_event") {
             if !entries.is_empty() {
                 return Err(UnsupportedBytecode);
             }
@@ -8156,6 +8460,7 @@ impl<'semantic> Lowerer<'semantic> {
             | StmtKind::TypeAlias { .. }
             | StmtKind::ScopedAccessLevel { .. }
             | StmtKind::ParametricType { .. }
+            | StmtKind::ParametricTypeAlias { .. }
             | StmtKind::ExtensionMethod(_) => false,
         }
     }
@@ -8251,6 +8556,7 @@ fn collect_capture_names_stmt(stmt: &Stmt, bound: &mut HashSet<String>, names: &
         }
         StmtKind::Using { .. }
         | StmtKind::TypeAlias { .. }
+        | StmtKind::ParametricTypeAlias { .. }
         | StmtKind::ScopedAccessLevel { .. }
         | StmtKind::Break => {}
     }
@@ -8269,6 +8575,7 @@ fn collect_capture_names_expr(expr: &Expr, bound: &mut HashSet<String>, names: &
         | ExprKind::UnwrapOption(expr) => {
             collect_capture_names_expr(expr, bound, names);
         }
+        ExprKind::TypeAnnotationLiteral { .. } => {}
         ExprKind::Binary { left, right, .. } => {
             collect_capture_names_expr(left, bound, names);
             collect_capture_names_expr(right, bound, names);
@@ -8610,6 +8917,7 @@ fn bytecode_type_from_type_name(name: &TypeName) -> Type {
         TypeName::Int => Type::Int,
         TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
         TypeName::Float => Type::Float,
+        TypeName::FloatRange(range) => Type::FloatRange(*range),
         TypeName::Rational => Type::Rational,
         TypeName::Number => Type::Number,
         TypeName::Bool => Type::Bool,
@@ -8622,6 +8930,10 @@ fn bytecode_type_from_type_name(name: &TypeName) -> Type {
         TypeName::Any => Type::Any,
         TypeName::Comparable => Type::Comparable,
         TypeName::Type => Type::TypeValue,
+        TypeName::TypeBounds { lower, upper } => Type::TypeValueBounds {
+            lower: Box::new(bytecode_type_from_type_name(lower)),
+            upper: Box::new(bytecode_type_from_type_name(upper)),
+        },
         TypeName::Array(item) => Type::Array(Box::new(
             item.as_deref()
                 .map(bytecode_type_from_type_name)
@@ -8644,6 +8956,19 @@ fn bytecode_type_from_type_name(name: &TypeName) -> Type {
             Type::Task(Box::new(bytecode_type_from_type_name(&args[0])))
         }
         TypeName::Applied { name, args } if name == "event" => Type::Event(
+            args.first()
+                .map(|arg| Box::new(bytecode_type_from_type_name(arg))),
+        ),
+        TypeName::Applied { name, args } if name == "subscribable_event_intrnl" => {
+            Type::SubscribableEventIntrnl(
+                args.first()
+                    .map(|arg| Box::new(bytecode_type_from_type_name(arg))),
+            )
+        }
+        TypeName::Applied { name, args } if name == "subscribable_event" && args.len() == 1 => {
+            Type::SubscribableEvent(Box::new(bytecode_type_from_type_name(&args[0])))
+        }
+        TypeName::Applied { name, args } if name == "sticky_event" => Type::StickyEvent(
             args.first()
                 .map(|arg| Box::new(bytecode_type_from_type_name(arg))),
         ),
@@ -8682,6 +9007,14 @@ fn bytecode_argument_type_matches(expected: Option<&Type>, actual: Option<&Type>
     }
 }
 
+fn bytecode_optional_payload_matches(expected: Option<&Type>, actual: Option<&Type>) -> bool {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => bytecode_type_matches(expected, actual),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn bytecode_argument_match_score(expected: &Type, actual: &Type) -> usize {
     if expected == actual {
         0
@@ -8699,13 +9032,14 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
         (Any | Unknown, _) | (_, Any | Unknown) | (Param(_, _), _) => true,
         (Int, Int | IntRange(_)) => true,
         (IntRange(_), Int | IntRange(_)) => true,
-        (Float, Float) => true,
+        (Float, Float | FloatRange(_)) => true,
+        (FloatRange(expected), FloatRange(actual)) if expected.contains_range(*actual) => true,
         (Rational, Rational) => true,
-        (Number, Int | IntRange(_) | Float | Rational | Number) => true,
+        (Number, Int | IntRange(_) | Float | FloatRange(_) | Rational | Number) => true,
         (
             Comparable,
-            Int | IntRange(_) | Float | Rational | Number | Bool | String | Char | Char8 | Char32
-            | Enum(_),
+            Int | IntRange(_) | Float | FloatRange(_) | Rational | Number | Bool | String | Char
+            | Char8 | Char32 | Enum(_),
         ) => true,
         (Message, Message | String) => true,
         (String, String) => true,
@@ -8733,6 +9067,10 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
         | (CastableSubtype(expected), CastableSubtype(actual))
         | (ConcreteSubtype(expected), ConcreteSubtype(actual))
         | (ClassifiableSubset(expected), ClassifiableSubset(actual))
+        | (ClassifiableSubsetKey(expected), ClassifiableSubsetKey(actual))
+        | (ClassifiableSubsetVar(expected), ClassifiableSubsetVar(actual))
+        | (SuccessResult(expected), SuccessResult(actual))
+        | (ErrorResult(expected), ErrorResult(actual))
         | (Modifier(expected), Modifier(actual))
         | (ModifierStack(expected), ModifierStack(actual))
         | (Signalable(expected), Signalable(actual)) => bytecode_type_matches(expected, actual),
@@ -8742,6 +9080,12 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
             bytecode_type_matches(expected_key, actual_key)
                 && bytecode_type_matches(expected_value, actual_value)
         }
+        (Result(expected_success, _), SuccessResult(actual_success)) => {
+            bytecode_type_matches(expected_success, actual_success)
+        }
+        (Result(_, expected_error), ErrorResult(actual_error)) => {
+            bytecode_type_matches(expected_error, actual_error)
+        }
         (Tuple(expected), Tuple(actual)) => {
             expected.len() == actual.len()
                 && expected
@@ -8750,6 +9094,8 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
                     .all(|(expected, actual)| bytecode_type_matches(expected, actual))
         }
         (Event(expected), Event(actual))
+        | (SubscribableEventIntrnl(expected), SubscribableEventIntrnl(actual))
+        | (StickyEvent(expected), StickyEvent(actual))
         | (Generator(expected), Generator(actual))
         | (Awaitable(expected), Awaitable(actual))
         | (Subscribable(expected), Subscribable(actual))
@@ -8757,6 +9103,33 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
             (Some(expected), Some(actual)) => bytecode_type_matches(expected, actual),
             _ => true,
         },
+        (SubscribableEvent(expected), SubscribableEvent(actual)) => {
+            bytecode_type_matches(expected, actual)
+        }
+        (Awaitable(expected), SubscribableEvent(actual))
+        | (SubscribableEventIntrnl(expected), SubscribableEvent(actual))
+        | (Event(expected), SubscribableEvent(actual))
+        | (Listenable(expected), SubscribableEvent(actual))
+        | (Subscribable(expected), SubscribableEvent(actual)) => {
+            bytecode_optional_payload_matches(expected.as_deref(), Some(actual.as_ref()))
+        }
+        (Awaitable(expected), SubscribableEventIntrnl(actual))
+        | (Awaitable(expected), StickyEvent(actual))
+        | (Event(expected), SubscribableEventIntrnl(actual))
+        | (Event(expected), StickyEvent(actual))
+        | (Listenable(expected), SubscribableEventIntrnl(actual))
+        | (Subscribable(expected), SubscribableEventIntrnl(actual)) => {
+            bytecode_optional_payload_matches(expected.as_deref(), actual.as_deref())
+        }
+        (Signalable(expected), SubscribableEvent(actual)) => {
+            bytecode_type_matches(expected, actual)
+        }
+        (Signalable(expected), SubscribableEventIntrnl(actual)) => actual
+            .as_deref()
+            .is_some_and(|actual| bytecode_type_matches(expected, actual)),
+        (Signalable(expected), StickyEvent(actual)) => actual
+            .as_deref()
+            .is_some_and(|actual| bytecode_type_matches(expected, actual)),
         (
             Function {
                 param_types: expected_params,
@@ -8951,6 +9324,7 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
             max: range.max,
         },
         Type::Float => TypeName::Float,
+        Type::FloatRange(range) => TypeName::FloatRange(*range),
         Type::Rational => TypeName::Rational,
         Type::Number => TypeName::Number,
         Type::Bool => TypeName::Bool,
@@ -8963,6 +9337,11 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
         Type::Any | Type::Unknown => TypeName::Any,
         Type::Comparable => TypeName::Comparable,
         Type::TypeValue => TypeName::Type,
+        Type::TypeValueOf(_) => TypeName::Type,
+        Type::TypeValueBounds { lower, upper } => TypeName::TypeBounds {
+            lower: Box::new(type_to_runtime_type_name(lower)?),
+            upper: Box::new(type_to_runtime_type_name(upper)?),
+        },
         Type::Enum(name)
         | Type::Struct(name)
         | Type::Class(name)
@@ -9005,6 +9384,14 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
             }
         }
         Type::Event(payload) => applied_runtime_type("event", payload.as_deref())?,
+        Type::SubscribableEventIntrnl(payload) => {
+            applied_runtime_type("subscribable_event_intrnl", payload.as_deref())?
+        }
+        Type::SubscribableEvent(payload) => TypeName::Applied {
+            name: "subscribable_event".to_string(),
+            args: vec![type_to_runtime_type_name(payload)?],
+        },
+        Type::StickyEvent(payload) => applied_runtime_type("sticky_event", payload.as_deref())?,
         Type::Task(payload) => TypeName::Applied {
             name: "task".to_string(),
             args: vec![type_to_runtime_type_name(payload)?],
@@ -9026,6 +9413,14 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
             name: "classifiable_subset".to_string(),
             args: vec![type_to_runtime_type_name(item)?],
         },
+        Type::ClassifiableSubsetKey(item) => TypeName::Applied {
+            name: "classifiable_subset_key".to_string(),
+            args: vec![type_to_runtime_type_name(item)?],
+        },
+        Type::ClassifiableSubsetVar(item) => TypeName::Applied {
+            name: "classifiable_subset_var".to_string(),
+            args: vec![type_to_runtime_type_name(item)?],
+        },
         Type::Modifier(item) => TypeName::Applied {
             name: "modifier".to_string(),
             args: vec![type_to_runtime_type_name(item)?],
@@ -9041,6 +9436,21 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
         },
         Type::Subscribable(payload) => applied_runtime_type("subscribable", payload.as_deref())?,
         Type::Listenable(payload) => applied_runtime_type("listenable", payload.as_deref())?,
+        Type::Result(success, error) => TypeName::Applied {
+            name: "result".to_string(),
+            args: vec![
+                type_to_runtime_type_name(success)?,
+                type_to_runtime_type_name(error)?,
+            ],
+        },
+        Type::SuccessResult(item) => TypeName::Applied {
+            name: "success_result".to_string(),
+            args: vec![type_to_runtime_type_name(item)?],
+        },
+        Type::ErrorResult(item) => TypeName::Applied {
+            name: "error_result".to_string(),
+            args: vec![type_to_runtime_type_name(item)?],
+        },
         Type::Never
         | Type::Range
         | Type::EnumType(_)
@@ -9048,9 +9458,22 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
         | Type::ClassType(_)
         | Type::InterfaceType(_)
         | Type::ParametricType { .. }
-        | Type::Result(_, _)
         | Type::Overload(_) => return None,
     })
+}
+
+fn type_is_type_value_for_extension_accessor(value_type: &Type) -> bool {
+    matches!(
+        value_type,
+        Type::TypeValueOf(_)
+            | Type::StructType(_)
+            | Type::ClassType(_)
+            | Type::InterfaceType(_)
+            | Type::ParametricType { .. }
+            | Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+    )
 }
 
 fn applied_runtime_type(name: &str, payload: Option<&Type>) -> Option<TypeName> {
@@ -9080,7 +9503,7 @@ fn is_compile_time_type_expr(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::Ident(name) if is_builtin_type_identifier(name))
 }
 
-fn should_predeclare_runtime_global_let(expr: &Expr) -> bool {
+fn should_predeclare_runtime_global_let(annotation: Option<&TypeAnnotation>, expr: &Expr) -> bool {
     !matches!(
         expr.kind,
         ExprKind::ModuleDefinition { .. }
@@ -9088,7 +9511,14 @@ fn should_predeclare_runtime_global_let(expr: &Expr) -> bool {
             | ExprKind::ClassDefinition { .. }
             | ExprKind::StructDefinition { .. }
             | ExprKind::EnumDefinition { .. }
-    ) && !is_compile_time_type_expr(expr)
+    ) && (!is_compile_time_type_expr(expr) || is_type_value_annotation(annotation))
+}
+
+fn is_type_value_annotation(annotation: Option<&TypeAnnotation>) -> bool {
+    matches!(
+        annotation.map(|annotation| &annotation.name),
+        Some(TypeName::Type)
+    )
 }
 
 fn call_uses_await_sequence(callee: &Expr) -> bool {
@@ -9192,6 +9622,9 @@ fn bytecode_native_function_name(name: &str) -> bool {
             | "Concatenate"
             | "ConcatenateMaps"
             | "MakeClassifiableSubset"
+            | "MakeClassifiableSubsetVar"
+            | "GetCastableFinalSuperClass"
+            | "GetCastableFinalSuperClassFromType"
             | "MakeSuccess"
             | "MakeError"
             | "Sleep"
@@ -9237,6 +9670,8 @@ fn bytecode_native_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Log" => vec![vec!["B"], vec!["X"]],
         "IsAlmostEqual" => vec![vec!["Val1"], vec!["Val2"], vec!["AbsoluteTolerance"]],
         "Concatenate" => vec![vec!["Arrays"]],
+        "GetCastableFinalSuperClass" => vec![vec!["base_type"], vec!["Instance"]],
+        "GetCastableFinalSuperClassFromType" => vec![vec!["base_type"], vec!["sub_type"]],
         "Sleep" => vec![vec!["Seconds"]],
         _ => return None,
     };
