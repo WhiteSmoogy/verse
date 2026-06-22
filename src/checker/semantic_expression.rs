@@ -77,6 +77,10 @@ impl Checker {
                 annotation,
                 expr,
             } => self.check_var_expression(name, annotation, expr, false, expr.span),
+            ExprKind::TypeLiteral { expr } => {
+                self.check_expr(expr)?;
+                Ok(Type::TypeValue)
+            }
             ExprKind::External => Ok(Type::Unknown),
             ExprKind::Case { subject, arms } => self.check_case(subject, arms, expr.span),
             ExprKind::Loop { body } => {
@@ -1290,14 +1294,18 @@ impl Checker {
 
             let param_types = self.param_types(params)?;
             let param_specs = self.param_specs(params)?;
-            Ok(Type::Function {
+            let function_type = Type::Function {
                 arity: Some(params.len()),
                 arity_range: None,
                 effects: effects.to_vec(),
                 param_types: Some(param_types),
                 param_specs: Some(param_specs),
                 return_type: Box::new(checked_return),
-            })
+            };
+            if has_effect(effects, "native") {
+                self.ensure_native_function_signature(&function_type, body.span)?;
+            }
+            Ok(function_type)
         })();
         self.pop_type_param_scope();
         result
@@ -2390,8 +2398,10 @@ impl Checker {
                     "event"
                     | "task"
                     | "generator"
+                    | "subtype"
                     | "castable_subtype"
                     | "concrete_subtype"
+                    | "castable_concrete_subtype"
                     | "classifiable_subset"
                     | "modifier"
                     | "modifier_stack"
@@ -2686,6 +2696,7 @@ impl Checker {
                 self.expr_never_completes(target) || self.expr_never_completes(expr)
             }
             ExprKind::Var { expr, .. } => self.expr_never_completes(expr),
+            ExprKind::TypeLiteral { expr } => self.expr_never_completes(expr),
             ExprKind::For { clauses, .. } => clauses
                 .iter()
                 .any(|clause| self.for_clause_expr_never_completes(clause)),
@@ -3005,6 +3016,7 @@ impl Checker {
                 | Type::Event(_)
                 | Type::Task(_)
                 | Type::Generator(_)
+                | Type::Subtype(_)
                 | Type::CastableSubtype(_)
                 | Type::ConcreteSubtype(_)
                 | Type::ClassifiableSubset(_)
@@ -3461,7 +3473,9 @@ impl Checker {
             || matches!(expected, Type::Number) && is_numeric_type(actual)
             || matches!((expected, actual), (Type::Rational, Type::Int))
             || matches!((expected, actual), (Type::Float, Type::Int))
+            || matches!(expected, Type::TypeValue) && Self::is_type_value_type(actual)
             || matches!((expected, actual), (Type::Message, Type::String))
+            || is_byte_char_type(expected) && is_byte_char_type(actual)
             || matches!((expected, actual), (Type::Array(item), Type::String) if is_string_char_type(item))
             || matches!((expected, actual), (Type::String, Type::Array(item)) if is_string_char_type(item))
             || matches!(
@@ -3545,11 +3559,21 @@ impl Checker {
             (Type::Generator(expected), Type::Generator(actual)) => {
                 self.optional_payload_is_assignable(expected.as_deref(), actual.as_deref())
             }
+            (Type::Subtype(expected), Type::ClassType(actual)) => {
+                self.class_type_value_satisfies_subtype(actual, expected)
+            }
             (Type::CastableSubtype(expected), Type::ClassType(actual)) => {
                 self.class_type_value_is_castable_subtype(actual, expected)
             }
             (Type::ConcreteSubtype(expected), Type::ClassType(actual)) => {
                 self.class_type_value_is_concrete_subtype(actual, expected)
+            }
+            (Type::Subtype(expected), Type::Subtype(actual)) => {
+                self.subtype_constraint_implies(actual, expected)
+            }
+            (Type::Subtype(expected), Type::CastableSubtype(actual))
+            | (Type::Subtype(expected), Type::ConcreteSubtype(actual)) => {
+                self.subtype_constraint_implies(actual, expected)
             }
             (Type::CastableSubtype(expected), Type::CastableSubtype(actual))
             | (Type::ConcreteSubtype(expected), Type::ConcreteSubtype(actual))
@@ -3579,6 +3603,19 @@ impl Checker {
         }
     }
 
+    fn is_type_value_type(actual: &Type) -> bool {
+        matches!(
+            actual,
+            Type::StructType(_)
+                | Type::ClassType(_)
+                | Type::InterfaceType(_)
+                | Type::ParametricType { .. }
+                | Type::Subtype(_)
+                | Type::CastableSubtype(_)
+                | Type::ConcreteSubtype(_)
+        )
+    }
+
     pub(super) fn class_type_value_is_castable_subtype(
         &self,
         actual: &str,
@@ -3605,10 +3642,38 @@ impl Checker {
 
     pub(super) fn class_type_value_satisfies_subtype(&self, actual: &str, expected: &Type) -> bool {
         match expected {
+            Type::Subtype(expected) => self.class_type_value_satisfies_subtype(actual, expected),
             Type::CastableSubtype(expected) => {
                 self.class_type_value_is_castable_subtype(actual, expected)
             }
+            Type::ConcreteSubtype(expected) => {
+                self.class_type_value_is_concrete_subtype(actual, expected)
+            }
             _ => self.is_assignable(expected, &Type::Class(actual.to_string())),
+        }
+    }
+
+    pub(super) fn subtype_constraint_implies(&self, actual: &Type, expected: &Type) -> bool {
+        match expected {
+            Type::Subtype(expected) => self.subtype_constraint_implies(actual, expected),
+            Type::CastableSubtype(expected) => match actual {
+                Type::Subtype(actual) => self.subtype_constraint_implies(actual, expected),
+                Type::CastableSubtype(actual) => self.subtype_constraint_implies(actual, expected),
+                Type::ConcreteSubtype(actual) => self.subtype_constraint_implies(actual, expected),
+                _ => false,
+            },
+            Type::ConcreteSubtype(expected) => match actual {
+                Type::ConcreteSubtype(actual) => self.subtype_constraint_implies(actual, expected),
+                _ => false,
+            },
+            _ => match actual {
+                Type::Subtype(actual)
+                | Type::CastableSubtype(actual)
+                | Type::ConcreteSubtype(actual) => {
+                    self.subtype_constraint_implies(actual, expected)
+                }
+                _ => self.is_assignable(expected, actual),
+            },
         }
     }
 
@@ -3653,6 +3718,7 @@ impl Checker {
                 .is_some_and(|info| info.persistable),
             Type::Any
             | Type::Comparable
+            | Type::TypeValue
             | Type::Unknown
             | Type::Never
             | Type::Range
@@ -3669,6 +3735,63 @@ impl Checker {
             | Type::Event(_)
             | Type::Task(_)
             | Type::Generator(_)
+            | Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+            | Type::ClassifiableSubset(_)
+            | Type::Modifier(_)
+            | Type::ModifierStack(_)
+            | Type::Awaitable(_)
+            | Type::Signalable(_)
+            | Type::Subscribable(_)
+            | Type::Listenable(_)
+            | Type::Function { .. }
+            | Type::Overload(_) => false,
+        }
+    }
+
+    pub(super) fn is_predicts_var_data_type(&self, value_type: &Type) -> bool {
+        match value_type {
+            Type::Int | Type::IntRange(_) | Type::Float | Type::Bool => true,
+            Type::Option(item) | Type::Array(item) => self.is_predicts_var_data_type(item),
+            Type::Map(key, value) => {
+                self.is_predicts_var_data_type(key) && self.is_predicts_var_data_type(value)
+            }
+            Type::Enum(_) => true,
+            Type::Class(name) => self
+                .struct_types
+                .get(name)
+                .is_some_and(|info| info.kind == AggregateKind::Class),
+            Type::Rational
+            | Type::Number
+            | Type::String
+            | Type::Message
+            | Type::Char
+            | Type::Char8
+            | Type::Char32
+            | Type::None
+            | Type::Any
+            | Type::Comparable
+            | Type::TypeValue
+            | Type::Unknown
+            | Type::Never
+            | Type::Range
+            | Type::EnumType(_)
+            | Type::Struct(_)
+            | Type::StructType(_)
+            | Type::ClassType(_)
+            | Type::Interface(_)
+            | Type::InterfaceType(_)
+            | Type::Module(_)
+            | Type::Param(_, _)
+            | Type::ParametricType { .. }
+            | Type::WeakMap(_, _)
+            | Type::Tuple(_)
+            | Type::Result(_, _)
+            | Type::Event(_)
+            | Type::Task(_)
+            | Type::Generator(_)
+            | Type::Subtype(_)
             | Type::CastableSubtype(_)
             | Type::ConcreteSubtype(_)
             | Type::ClassifiableSubset(_)
@@ -4042,6 +4165,7 @@ impl Checker {
                 | Type::Event(_)
                 | Type::Task(_)
                 | Type::Generator(_)
+                | Type::Subtype(_)
                 | Type::CastableSubtype(_)
                 | Type::ConcreteSubtype(_)
                 | Type::ClassifiableSubset(_)
@@ -4800,6 +4924,7 @@ impl Checker {
             Type::Task(payload) => {
                 return match name {
                     "Await" => Ok(await_type(Some(payload.as_ref()))),
+                    "Cancel" => Ok(task_cancel_type()),
                     _ => Err(VerseError::check_at(
                         format!("class `{object_type}` has no member `{name}`"),
                         span,

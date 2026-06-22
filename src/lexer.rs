@@ -108,6 +108,7 @@ impl Lexer {
                 }
                 '/' => tokens.push(self.token(TokenKind::Slash, start)),
                 '%' => tokens.push(self.token(TokenKind::Percent, start)),
+                '&' => tokens.push(self.token(TokenKind::Ampersand, start)),
                 '(' => tokens.push(self.token(TokenKind::LParen, start)),
                 ')' => tokens.push(self.token(TokenKind::RParen, start)),
                 '[' => tokens.push(self.token(TokenKind::LBracket, start)),

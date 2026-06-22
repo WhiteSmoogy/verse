@@ -175,9 +175,11 @@ Subscription:subscribable() = external {}
 Background:task(int) = external {}
 Produced:generator(int) = external {}
 UntypedProduced:generator() = external {}
+AnyTagType:subtype(tag) = external {}
 TagType:castable_subtype(tag) = external {}
 ComponentType:castable_subtype(component) = external {}
 EntityPrefab:concrete_subtype(castable_subtype(entity)) = external {}
+ShortEntityPrefab:castable_concrete_subtype(entity) = external {}
 TagSet:classifiable_subset(tag) = external {}
 ScoreModifier:modifier(int) = external {}
 ScoreStack:modifier_stack(int) = external {}
@@ -197,24 +199,30 @@ fn evaluates_official_parametric_type_alias_annotations() {
 task_result := result(task(int), []string)
 Value:task_result = external {}
 tag_type := castable_subtype(tag)
+any_tag_type := subtype(tag)
 entity_prefab_type := concrete_subtype(castable_subtype(entity))
+short_entity_prefab_type := castable_concrete_subtype(entity)
 tag_set_type := classifiable_subset(tag)
 score_modifier_type := modifier(int)
 score_stack_type := modifier_stack(int)
-Use(Value:task_result, Tag:tag_type, Prefab:entity_prefab_type, Tags:tag_set_type, Modifier:score_modifier_type, Stack:score_stack_type):int = 42
+Use(Value:task_result, AnyTag:any_tag_type, Tag:tag_type, Prefab:entity_prefab_type, ShortPrefab:short_entity_prefab_type, Tags:tag_set_type, Modifier:score_modifier_type, Stack:score_stack_type):int = 42
 "#;
 
     assert_eq!(
         function_shape(check_source(source).expect("source should check")),
         (
-            Some(6),
+            Some(8),
             Vec::<String>::new(),
             Some(vec![
                 Type::Result(
                     Box::new(Type::Task(Box::new(Type::Int))),
                     Box::new(Type::Array(Box::new(Type::String))),
                 ),
+                Type::Subtype(Box::new(Type::Class("tag".to_string()))),
                 Type::CastableSubtype(Box::new(Type::Class("tag".to_string()))),
+                Type::ConcreteSubtype(Box::new(Type::CastableSubtype(Box::new(Type::Class(
+                    "entity".to_string()
+                ))))),
                 Type::ConcreteSubtype(Box::new(Type::CastableSubtype(Box::new(Type::Class(
                     "entity".to_string()
                 ))))),
@@ -224,6 +232,139 @@ Use(Value:task_result, Tag:tag_type, Prefab:entity_prefab_type, Tags:tag_set_typ
             ]),
             Type::Int
         )
+    );
+}
+
+#[test]
+fn evaluates_class_type_value_as_type_annotation() {
+    let source = r#"
+item := class:
+    Value:int = 0
+Use(Kind:type):int = 42
+Use(item)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_struct_type_value_as_type_annotation() {
+    let source = r#"
+point := struct:
+    X:int = 0
+Use(Kind:type):int = 42
+Use(point)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_interface_type_value_as_type_annotation() {
+    let source = r#"
+readable := interface:
+    Read():int
+Use(Kind:type):int = 42
+Use(readable)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_parametric_type_value_as_type_annotation() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+Use(Kind:type):int = 42
+Use(box)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_function_returning_type_value() {
+    let source = r#"
+item := class:
+    Value:int = 0
+Pick():type = item
+Use(Kind:type):int = 42
+Use(Pick())
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_function_returning_struct_and_interface_type_values() {
+    let source = r#"
+point := struct:
+    X:int = 0
+readable := interface:
+    Read():int
+PickPoint():type = point
+PickReadable():type = readable
+Use(Kind:type):int = 21
+Use(PickPoint()) + Use(PickReadable())
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_non_type_value_as_type_annotation() {
+    let error = check_source(
+        r#"
+Use(Kind:type):int = 42
+Use(42)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("argument 1 expected `type`, got `int`")
+    );
+}
+
+#[test]
+fn evaluates_type_literal_expression_for_primitive_value() {
+    let source = r#"
+Use(Kind:type):int = 42
+Use(type{1})
+"#;
+
+    assert_eq!(eval("type{1}"), Value::Type(TypeName::Int));
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
     );
 }
 
@@ -487,6 +628,17 @@ fn rejects_type_alias_conflicting_with_official_castable_subtype_parametric_type
         error
             .to_string()
             .contains("type alias `castable_subtype` conflicts with builtin type name")
+    );
+}
+
+#[test]
+fn rejects_type_alias_conflicting_with_official_subtype_parametric_type() {
+    let error = check_source("subtype := int").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("type alias `subtype` conflicts with builtin type name")
     );
 }
 

@@ -6,7 +6,7 @@ use crate::ast::{
 };
 use crate::error::VerseError;
 use crate::parser::parse_source;
-use crate::project::load_project_source;
+use crate::project::load_project_own_source;
 
 pub fn generate_digest(source: &str) -> Result<String, VerseError> {
     let program = parse_source(source)?;
@@ -14,7 +14,7 @@ pub fn generate_digest(source: &str) -> Result<String, VerseError> {
 }
 
 pub fn generate_project_digest(path: impl AsRef<Path>) -> Result<String, VerseError> {
-    let source = load_project_source(path)?;
+    let source = load_project_own_source(path)?;
     generate_digest(&source)
 }
 
@@ -447,6 +447,7 @@ fn render_type_name(name: &TypeName) -> String {
         TypeName::None => "void".to_string(),
         TypeName::Any => "any".to_string(),
         TypeName::Comparable => "comparable".to_string(),
+        TypeName::Type => "type".to_string(),
         TypeName::IntRange { min, max } => format!("int_range({min}, {max})"),
         TypeName::Array(Some(item)) => format!("[]{}", render_type_name(item)),
         TypeName::Array(None) => "[]any".to_string(),

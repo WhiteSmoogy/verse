@@ -200,8 +200,10 @@ pub(super) fn value_copy(value: &Value) -> Value {
             entries: entries.clone(),
             entry_id: *entry_id,
         },
+        Value::Subtype(item) => Value::Subtype(item.clone()),
         Value::CastableSubtype(item) => Value::CastableSubtype(item.clone()),
         Value::ConcreteSubtype(item) => Value::ConcreteSubtype(item.clone()),
+        Value::Type(item) => Value::Type(item.clone()),
         Value::ClassifiableSubset(items) => Value::ClassifiableSubset(Rc::new(RefCell::new(
             items.borrow().iter().map(value_copy).collect(),
         ))),

@@ -506,6 +506,7 @@ pub(super) fn infer_type_params_from_type(
         }
         (Type::Option(pattern), Type::Option(actual))
         | (Type::Task(pattern), Type::Task(actual))
+        | (Type::Subtype(pattern), Type::Subtype(actual))
         | (Type::CastableSubtype(pattern), Type::CastableSubtype(actual))
         | (Type::ConcreteSubtype(pattern), Type::ConcreteSubtype(actual))
         | (Type::ClassifiableSubset(pattern), Type::ClassifiableSubset(actual))
@@ -592,6 +593,7 @@ pub(super) fn substitute_type_params(value_type: &Type, inferred: &HashMap<Strin
                 .as_deref()
                 .map(|payload| Box::new(substitute_type_params(payload, inferred))),
         ),
+        Type::Subtype(item) => Type::Subtype(Box::new(substitute_type_params(item, inferred))),
         Type::CastableSubtype(item) => {
             Type::CastableSubtype(Box::new(substitute_type_params(item, inferred)))
         }
@@ -664,6 +666,7 @@ pub(super) fn type_contains_type_param(value_type: &Type) -> bool {
         Type::Array(item)
         | Type::Option(item)
         | Type::Task(item)
+        | Type::Subtype(item)
         | Type::CastableSubtype(item)
         | Type::ConcreteSubtype(item)
         | Type::ClassifiableSubset(item)
@@ -719,6 +722,7 @@ pub(super) fn type_contains_type_param(value_type: &Type) -> bool {
         | Type::Interface(_)
         | Type::InterfaceType(_)
         | Type::Module(_)
+        | Type::TypeValue
         | Type::ParametricType { .. } => false,
     }
 }

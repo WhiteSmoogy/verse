@@ -320,13 +320,16 @@ pub enum Constant {
     Bool(bool),
     String(String),
     None,
+    Type(TypeName),
     Option(Option<Box<Constant>>),
     Range { start: i64, end: i64 },
     Tuple(Vec<Constant>),
     EnumValue { enum_name: String, variant: String },
     Function(usize),
     NativeFunction(String),
+    StructType { name: String, computes: bool },
     ClassType { name: String, unique: bool },
+    InterfaceType { name: String },
     External(TypeName),
     GlobalRef(String),
 }
@@ -1447,6 +1450,7 @@ struct ClassLayout {
     runtime_name: String,
     base_class: Option<String>,
     object_kind: ObjectKind,
+    unique: bool,
     fields: Vec<StructField>,
 }
 
@@ -1458,6 +1462,7 @@ struct EnumLayout {
 
 #[derive(Debug, Clone)]
 struct InterfaceLayout {
+    runtime_name: String,
     fields: Vec<StructField>,
     methods: Vec<ClassMethod>,
 }
@@ -1471,6 +1476,7 @@ impl<'semantic> Lowerer<'semantic> {
                 runtime_name: "locale".to_string(),
                 base_class: None,
                 object_kind: ObjectKind::Struct { computes: false },
+                unique: false,
                 fields: Vec::new(),
             },
         );
@@ -1799,6 +1805,17 @@ impl<'semantic> Lowerer<'semantic> {
                         fields.clone(),
                         methods.clone(),
                     );
+                    let interface_type =
+                        state.constant(Constant::InterfaceType { name: name.clone() });
+                    state.define(
+                        name.clone(),
+                        Binding {
+                            operand: interface_type,
+                            mutable: false,
+                            ref_backed: false,
+                            iterable_kind: None,
+                        },
+                    );
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -1815,6 +1832,19 @@ impl<'semantic> Lowerer<'semantic> {
                         None,
                         &[],
                         fields.clone(),
+                    );
+                    let struct_type = state.constant(Constant::StructType {
+                        name: name.clone(),
+                        computes: *computes,
+                    });
+                    state.define(
+                        name.clone(),
+                        Binding {
+                            operand: struct_type,
+                            mutable: false,
+                            ref_backed: false,
+                            iterable_kind: None,
+                        },
                     );
                     state.last_value = state.none();
                     return Ok(());
@@ -1891,6 +1921,17 @@ impl<'semantic> Lowerer<'semantic> {
                         fields.clone(),
                         methods.clone(),
                     );
+                    let interface_type =
+                        state.constant(Constant::InterfaceType { name: name.clone() });
+                    state.define(
+                        name.clone(),
+                        Binding {
+                            operand: interface_type,
+                            mutable: false,
+                            ref_backed: false,
+                            iterable_kind: None,
+                        },
+                    );
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -1907,6 +1948,19 @@ impl<'semantic> Lowerer<'semantic> {
                         None,
                         &[],
                         fields.clone(),
+                    );
+                    let struct_type = state.constant(Constant::StructType {
+                        name: name.clone(),
+                        computes: *computes,
+                    });
+                    state.define(
+                        name.clone(),
+                        Binding {
+                            operand: struct_type,
+                            mutable: false,
+                            ref_backed: false,
+                            iterable_kind: None,
+                        },
                     );
                     state.last_value = state.none();
                     return Ok(());
@@ -2214,11 +2268,21 @@ impl<'semantic> Lowerer<'semantic> {
                 {
                     self.register_interface_layout(
                         name.clone(),
-                        qualified,
+                        qualified.clone(),
                         parents,
                         fields.clone(),
                         methods.clone(),
                     );
+                    let binding = Binding {
+                        operand: state.constant(Constant::InterfaceType {
+                            name: qualified.clone(),
+                        }),
+                        mutable: false,
+                        ref_backed: false,
+                        iterable_kind: None,
+                    };
+                    state.define(name.clone(), binding);
+                    state.define_global(qualified, binding);
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2236,6 +2300,17 @@ impl<'semantic> Lowerer<'semantic> {
                         &[],
                         fields.clone(),
                     );
+                    let binding = Binding {
+                        operand: state.constant(Constant::StructType {
+                            name: qualified.clone(),
+                            computes: *computes,
+                        }),
+                        mutable: false,
+                        ref_backed: false,
+                        iterable_kind: None,
+                    };
+                    state.define(name.clone(), binding);
+                    state.define_global(qualified, binding);
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2305,11 +2380,21 @@ impl<'semantic> Lowerer<'semantic> {
                 {
                     self.register_interface_layout(
                         name.clone(),
-                        qualified,
+                        qualified.clone(),
                         parents,
                         fields.clone(),
                         methods.clone(),
                     );
+                    let binding = Binding {
+                        operand: state.constant(Constant::InterfaceType {
+                            name: qualified.clone(),
+                        }),
+                        mutable: false,
+                        ref_backed: false,
+                        iterable_kind: None,
+                    };
+                    state.define(name.clone(), binding);
+                    state.define_global(qualified, binding);
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2327,6 +2412,17 @@ impl<'semantic> Lowerer<'semantic> {
                         &[],
                         fields.clone(),
                     );
+                    let binding = Binding {
+                        operand: state.constant(Constant::StructType {
+                            name: qualified.clone(),
+                            computes: *computes,
+                        }),
+                        mutable: false,
+                        ref_backed: false,
+                        iterable_kind: None,
+                    };
+                    state.define(name.clone(), binding);
+                    state.define_global(qualified, binding);
                     state.last_value = state.none();
                     return Ok(());
                 }
@@ -2512,6 +2608,7 @@ impl<'semantic> Lowerer<'semantic> {
             runtime_name: runtime_name.clone(),
             base_class,
             object_kind,
+            unique: false,
             fields: layout_fields,
         };
         self.class_layouts.insert(local_name, layout.clone());
@@ -2543,7 +2640,7 @@ impl<'semantic> Lowerer<'semantic> {
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
     ) {
-        let layout = self.collect_interface_layout(parents, fields, methods);
+        let layout = self.collect_interface_layout(runtime_name.clone(), parents, fields, methods);
         self.interface_layouts.insert(local_name, layout.clone());
         self.interface_layouts.insert(runtime_name, layout);
     }
@@ -2587,6 +2684,7 @@ impl<'semantic> Lowerer<'semantic> {
 
     fn collect_interface_layout(
         &self,
+        runtime_name: String,
         parents: &[TypeAnnotation],
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
@@ -2604,6 +2702,7 @@ impl<'semantic> Lowerer<'semantic> {
         merge_struct_fields(&mut layout_fields, fields);
         layout_methods.extend(methods);
         InterfaceLayout {
+            runtime_name,
             fields: layout_fields,
             methods: layout_methods,
         }
@@ -2728,6 +2827,7 @@ impl<'semantic> Lowerer<'semantic> {
             runtime_name: runtime_name.clone(),
             base_class: base_class_name.clone(),
             object_kind: ObjectKind::Class,
+            unique: specifiers.iter().any(|specifier| specifier == "unique"),
             fields: layout_fields,
         };
         self.class_layouts.insert(local_name, layout.clone());
@@ -2793,7 +2893,7 @@ impl<'semantic> Lowerer<'semantic> {
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
     ) {
-        let layout = self.collect_interface_layout(parents, fields, methods);
+        let layout = self.collect_interface_layout(runtime_name.clone(), parents, fields, methods);
         self.interface_layouts.insert(local_name, layout.clone());
         self.interface_layouts.insert(runtime_name, layout);
     }
@@ -3059,6 +3159,14 @@ impl<'semantic> Lowerer<'semantic> {
             ExprKind::Var {
                 name, expr: value, ..
             } => self.lower_var_expression(name, value, state, expr.span),
+            ExprKind::TypeLiteral { expr: value } => {
+                let type_name = self
+                    .facts
+                    .expression_type(value.span)
+                    .and_then(type_to_runtime_type_name)
+                    .unwrap_or(TypeName::Any);
+                Ok(state.constant(Constant::Type(type_name)))
+            }
             ExprKind::Set { target, op, expr } => {
                 self.lower_assignment(target, *op, expr, state, expr.span)?;
                 Ok(state.none())
@@ -3245,6 +3353,27 @@ impl<'semantic> Lowerer<'semantic> {
         let Some(binding) = state.lookup(name) else {
             if let Some(function) = self.function_descriptor_index(name) {
                 return Ok(state.constant(Constant::Function(function)));
+            }
+            if let Some(layout) = self.resolve_class_layout(name, state) {
+                match layout.object_kind {
+                    ObjectKind::Class => {
+                        return Ok(state.constant(Constant::ClassType {
+                            name: layout.runtime_name.clone(),
+                            unique: layout.unique,
+                        }));
+                    }
+                    ObjectKind::Struct { computes } => {
+                        return Ok(state.constant(Constant::StructType {
+                            name: layout.runtime_name.clone(),
+                            computes,
+                        }));
+                    }
+                }
+            }
+            if let Some(layout) = self.resolve_interface_layout(name) {
+                return Ok(state.constant(Constant::InterfaceType {
+                    name: layout.runtime_name.clone(),
+                }));
             }
             return Err(UnsupportedBytecode);
         };
@@ -8135,6 +8264,7 @@ fn collect_capture_names_expr(expr: &Expr, bound: &mut HashSet<String>, names: &
             }
         }
         ExprKind::Unary { expr, .. }
+        | ExprKind::TypeLiteral { expr }
         | ExprKind::Option(Some(expr))
         | ExprKind::UnwrapOption(expr) => {
             collect_capture_names_expr(expr, bound, names);
@@ -8491,6 +8621,7 @@ fn bytecode_type_from_type_name(name: &TypeName) -> Type {
         TypeName::None => Type::None,
         TypeName::Any => Type::Any,
         TypeName::Comparable => Type::Comparable,
+        TypeName::Type => Type::TypeValue,
         TypeName::Array(item) => Type::Array(Box::new(
             item.as_deref()
                 .map(bytecode_type_from_type_name)
@@ -8579,8 +8710,12 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
         (Message, Message | String) => true,
         (String, String) => true,
         (Bool, Bool) => true,
-        (Char, Char) | (Char8, Char8) | (Char32, Char32) => true,
+        (Char | Char8, Char | Char8) | (Char32, Char32) => true,
         (None, None) => true,
+        (TypeValue, StructType(_) | ClassType(_) | InterfaceType(_) | ParametricType { .. }) => {
+            true
+        }
+        (TypeValue, Subtype(_) | CastableSubtype(_) | ConcreteSubtype(_)) => true,
         (Range, Range) => true,
         (Enum(left), Enum(right))
         | (EnumType(left), EnumType(right))
@@ -8594,6 +8729,7 @@ fn bytecode_type_matches(expected: &Type, actual: &Type) -> bool {
         (Array(expected), Array(actual))
         | (Option(expected), Option(actual))
         | (Task(expected), Task(actual))
+        | (Subtype(expected), Subtype(actual))
         | (CastableSubtype(expected), CastableSubtype(actual))
         | (ConcreteSubtype(expected), ConcreteSubtype(actual))
         | (ClassifiableSubset(expected), ClassifiableSubset(actual))
@@ -8826,6 +8962,7 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
         Type::None => TypeName::None,
         Type::Any | Type::Unknown => TypeName::Any,
         Type::Comparable => TypeName::Comparable,
+        Type::TypeValue => TypeName::Type,
         Type::Enum(name)
         | Type::Struct(name)
         | Type::Class(name)
@@ -8873,6 +9010,10 @@ fn type_to_runtime_type_name(value_type: &Type) -> Option<TypeName> {
             args: vec![type_to_runtime_type_name(payload)?],
         },
         Type::Generator(item) => applied_runtime_type("generator", item.as_deref())?,
+        Type::Subtype(item) => TypeName::Applied {
+            name: "subtype".to_string(),
+            args: vec![type_to_runtime_type_name(item)?],
+        },
         Type::CastableSubtype(item) => TypeName::Applied {
             name: "castable_subtype".to_string(),
             args: vec![type_to_runtime_type_name(item)?],
@@ -9002,6 +9143,10 @@ fn bytecode_native_function_name(name: &str) -> bool {
             | "FitsInPlayerMap"
             | "Mod"
             | "Quotient"
+            | "BitAnd"
+            | "BitOr"
+            | "BitXor"
+            | "BitNot"
             | "Clamp"
             | "Lerp"
             | "Abs"
@@ -9083,6 +9228,8 @@ fn bytecode_native_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Lerp" => vec![vec!["From"], vec!["To"], vec!["Parameter"]],
         "Abs" | "Ceil" | "Floor" => vec![vec!["Value", "Val"]],
         "Min" | "Max" => vec![vec!["X"], vec!["Y"]],
+        "BitAnd" | "BitOr" | "BitXor" => vec![vec!["X"], vec!["Y"]],
+        "BitNot" => vec![vec!["X"]],
         "Int" | "Sgn" => vec![vec!["Val"]],
         "Sqrt" | "Sin" | "Cos" | "Tan" | "ArcSin" | "ArcCos" | "Sinh" | "Cosh" | "Tanh"
         | "ArSinh" | "ArCosh" | "ArTanh" | "Exp" | "Ln" => vec![vec!["X"]],

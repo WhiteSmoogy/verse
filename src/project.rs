@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{ExprKind, Program, Stmt, StmtKind};
 use crate::checker::{Type, check_source_in_package};
+use crate::digest::generate_digest_for_program;
 use crate::error::VerseError;
 use crate::parser::parse_source;
 use crate::pipeline::run_source_in_package;
@@ -12,6 +13,11 @@ use crate::token::Span;
 
 pub fn load_project_source(path: impl AsRef<Path>) -> Result<String, VerseError> {
     SourceProject::from_path(path.as_ref())?.load_source()
+}
+
+pub(crate) fn load_project_own_source(path: impl AsRef<Path>) -> Result<String, VerseError> {
+    let project = SourceProject::from_path(path.as_ref())?;
+    ProjectLoader::new(project.without_dependencies()).load_own_source()
 }
 
 pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
@@ -31,6 +37,7 @@ pub struct SourceProject {
     pub root: PathBuf,
     pub entry: PathBuf,
     pub package: Option<String>,
+    pub dependencies: Vec<String>,
 }
 
 impl SourceProject {
@@ -58,6 +65,7 @@ impl SourceProject {
             root,
             entry,
             package: None,
+            dependencies: Vec::new(),
         })
     }
 
@@ -76,23 +84,36 @@ impl SourceProject {
             entry: absolute_from(&root, &entry),
             root,
             package: manifest.package,
+            dependencies: manifest.dependencies,
         })
     }
 
     pub fn load_source(&self) -> Result<String, VerseError> {
         ProjectLoader::new(self.clone()).load()
     }
+
+    fn without_dependencies(&self) -> Self {
+        let mut project = self.clone();
+        project.dependencies.clear();
+        project
+    }
 }
 
 struct ProjectManifest {
     entry: Option<PathBuf>,
     package: Option<String>,
+    dependencies: Vec<String>,
 }
 
 struct ProjectLoader {
     root: PathBuf,
     entry: PathBuf,
+    package: Option<String>,
+    dependencies: Vec<String>,
+    direct_dependency_packages: HashSet<String>,
+    dependency_module_packages: HashMap<String, String>,
     loaded: HashSet<PathBuf>,
+    loaded_dependency_digests: HashSet<PathBuf>,
     sources: Vec<String>,
 }
 
@@ -107,6 +128,7 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
     let mut manifest = ProjectManifest {
         entry: None,
         package: None,
+        dependencies: Vec::new(),
     };
 
     for (index, line) in source.lines().enumerate() {
@@ -130,6 +152,9 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
         match key {
             "entry" => manifest.entry = Some(PathBuf::from(value)),
             "package" => manifest.package = Some(value.to_string()),
+            "dependencyPackages" | "dependencies" | "dependency" => {
+                manifest.dependencies.extend(parse_dependency_list(value));
+            }
             _ => {
                 return Err(VerseError::parse(
                     format!("unknown project manifest key `{key}` in {}", path.display()),
@@ -139,7 +164,48 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
         }
     }
 
+    validate_manifest_dependencies(&manifest, path)?;
     Ok(manifest)
+}
+
+fn parse_dependency_list(value: &str) -> Vec<String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|dependency| dependency.trim().trim_matches('"').trim_matches('\''))
+        .filter(|dependency| !dependency.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn validate_manifest_dependencies(
+    manifest: &ProjectManifest,
+    path: &Path,
+) -> Result<(), VerseError> {
+    let mut seen = HashSet::new();
+    for dependency in &manifest.dependencies {
+        if manifest.package.as_ref() == Some(dependency) {
+            return Err(VerseError::parse(
+                format!(
+                    "package `{dependency}` cannot depend on itself in {}",
+                    path.display()
+                ),
+                Span::new(0, 0, 1, 1),
+            ));
+        }
+        if !seen.insert(dependency) {
+            return Err(VerseError::parse(
+                format!(
+                    "duplicate dependency package `{dependency}` in {}",
+                    path.display()
+                ),
+                Span::new(0, 0, 1, 1),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> {
@@ -172,6 +238,80 @@ fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> 
     }
 }
 
+fn find_dependency_manifest(
+    root: &Path,
+    package: Option<&str>,
+    dependency: &str,
+) -> Result<PathBuf, VerseError> {
+    let mut matches = Vec::new();
+    for search_root in dependency_search_roots(root, package) {
+        for manifest in package_manifest_candidates(&search_root)? {
+            let source = read_source_file(&manifest)?;
+            let candidate = parse_project_manifest(&source, &manifest)?;
+            if candidate.package.as_deref() == Some(dependency) {
+                matches.push(manifest);
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+
+    match matches.len() {
+        0 => Err(VerseError::parse(
+            format!(
+                "unknown dependency package `{dependency}` near {}",
+                root.display()
+            ),
+            Span::new(0, 0, 1, 1),
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => Err(VerseError::parse(
+            format!(
+                "multiple `.vproject` manifests define dependency package `{dependency}` near {}",
+                root.display()
+            ),
+            Span::new(0, 0, 1, 1),
+        )),
+    }
+}
+
+fn dependency_search_roots(root: &Path, package: Option<&str>) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    if root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| Some(name) == package)
+        && let Some(parent) = root.parent()
+    {
+        roots.push(parent.to_path_buf());
+    }
+    roots
+}
+
+fn package_manifest_candidates(search_root: &Path) -> Result<Vec<PathBuf>, VerseError> {
+    let mut manifests = Vec::new();
+    manifests.extend(manifest_files_in(search_root)?);
+    for dir in child_dirs(search_root)? {
+        manifests.extend(manifest_files_in(&dir)?);
+    }
+    manifests.sort();
+    Ok(manifests)
+}
+
+fn manifest_files_in(dir: &Path) -> Result<Vec<PathBuf>, VerseError> {
+    read_dir_entries(dir).map(|entries| {
+        entries
+            .into_iter()
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "vproject")
+            })
+            .collect()
+    })
+}
+
 fn absolute_from(root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -182,26 +322,164 @@ fn absolute_from(root: &Path, path: &Path) -> PathBuf {
 
 impl ProjectLoader {
     fn new(project: SourceProject) -> Self {
+        let dependencies = project.dependencies;
+        let direct_dependency_packages = dependencies.iter().cloned().collect();
         Self {
             root: project.root,
             entry: project.entry,
+            package: project.package,
+            dependencies,
+            direct_dependency_packages,
+            dependency_module_packages: HashMap::new(),
             loaded: HashSet::new(),
+            loaded_dependency_digests: HashSet::new(),
             sources: Vec::new(),
         }
     }
 
     fn load(mut self) -> Result<String, VerseError> {
+        self.load_dependency_digests()?;
+        self.load_own_sources()?;
+        Ok(self.sources.join("\n"))
+    }
+
+    fn load_own_source(mut self) -> Result<String, VerseError> {
+        self.load_own_sources()?;
+        Ok(self.sources.join("\n"))
+    }
+
+    fn load_own_sources(&mut self) -> Result<(), VerseError> {
         let entry_source = read_source_file(&self.entry)?;
         let entry_program = parse_source(&entry_source)?;
         let imports = collect_local_imports(&entry_program, &[]);
         for import in imports {
+            self.ensure_declared_dependency_import(&import)?;
             self.load_import(&import)?;
         }
         self.load_implicit_root_modules()?;
         self.load_implicit_root_sources()?;
         self.sources
             .push(render_source_chunk(&self.entry, &entry_source));
-        Ok(self.sources.join("\n"))
+        Ok(())
+    }
+
+    fn load_dependency_digests(&mut self) -> Result<(), VerseError> {
+        let dependencies = self.dependencies.clone();
+        let root = self.root.clone();
+        let package = self.package.clone();
+        let mut visiting = HashSet::new();
+        for dependency in dependencies {
+            self.load_dependency_digest_recursive(
+                &root,
+                package.as_deref(),
+                &dependency,
+                &mut visiting,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn load_dependency_digest_recursive(
+        &mut self,
+        root: &Path,
+        package: Option<&str>,
+        dependency: &str,
+        visiting: &mut HashSet<PathBuf>,
+    ) -> Result<(), VerseError> {
+        let manifest = find_dependency_manifest(root, package, dependency)?;
+        let key = canonical_key(&manifest);
+        if self.loaded_dependency_digests.contains(&key) || !visiting.insert(key.clone()) {
+            return Ok(());
+        }
+
+        let project = SourceProject::from_manifest(&manifest)?;
+        let dependencies = project.dependencies.clone();
+        let dependency_root = project.root.clone();
+        let dependency_package = project.package.clone();
+        for dependency in dependencies {
+            self.load_dependency_digest_recursive(
+                &dependency_root,
+                dependency_package.as_deref(),
+                &dependency,
+                visiting,
+            )?;
+        }
+
+        let source = ProjectLoader::new(project.without_dependencies()).load_own_source()?;
+        let program = parse_source(&source)?;
+        let digest = generate_digest_for_program(&program);
+        if !digest.trim().is_empty() {
+            let digest_program = parse_source(&digest)?;
+            self.record_dependency_digest_modules(&digest_program, project.package.as_deref());
+            self.sources
+                .push(render_source_chunk(&manifest, digest.trim()));
+        }
+        visiting.remove(&key);
+        self.loaded_dependency_digests.insert(key);
+        Ok(())
+    }
+
+    fn record_dependency_digest_modules(&mut self, program: &Program, package: Option<&str>) {
+        let Some(package) = package else {
+            return;
+        };
+        let package = package.to_string();
+        let package_is_direct = self.direct_dependency_packages.contains(&package);
+        for statement in &program.statements {
+            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                continue;
+            };
+            if !matches!(expr.kind, ExprKind::ModuleDefinition { .. }) {
+                continue;
+            }
+            let existing_is_direct = self
+                .dependency_module_packages
+                .get(name)
+                .is_some_and(|existing| self.direct_dependency_packages.contains(existing));
+            if package_is_direct || !existing_is_direct {
+                self.dependency_module_packages
+                    .insert(name.clone(), package.clone());
+            }
+        }
+    }
+
+    fn ensure_declared_dependency_import(&self, module_path: &str) -> Result<(), VerseError> {
+        if self.local_module_may_exist(module_path) {
+            return Ok(());
+        }
+        let root = module_path.split('.').next().unwrap_or(module_path);
+        let Some(package) = self.dependency_module_packages.get(root) else {
+            return Ok(());
+        };
+        if self.direct_dependency_packages.contains(package) {
+            return Ok(());
+        }
+        let current_package = self.package.as_deref().unwrap_or("<unknown>");
+        Err(VerseError::parse(
+            format!(
+                "module `{module_path}` is defined in dependency package `{package}`, but package `{current_package}` does not declare a direct dependency on `{package}`"
+            ),
+            Span::new(0, 0, 1, 1),
+        ))
+    }
+
+    fn local_module_may_exist(&self, module_path: &str) -> bool {
+        let parts = module_path
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        let Some(first) = parts.first() else {
+            return false;
+        };
+        if self.root.join(format!("{first}.verse")).is_file() || self.root.join(first).is_dir() {
+            return true;
+        }
+        if parts.len() > 1 {
+            let full = self.root.join(parts.iter().collect::<PathBuf>());
+            full.with_extension("verse").is_file() || full.is_dir()
+        } else {
+            false
+        }
     }
 
     fn load_import(&mut self, module_path: &str) -> Result<(), VerseError> {
@@ -221,6 +499,7 @@ impl ProjectLoader {
         }
 
         for import in &module_text.imports {
+            self.ensure_declared_dependency_import(import)?;
             self.load_import(import)?;
         }
 

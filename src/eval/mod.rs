@@ -16,9 +16,9 @@ pub(crate) use bytecode::{
     bytecode_call_native_cancel_method, bytecode_call_native_event_method,
     bytecode_call_native_subscribable_method, bytecode_call_native_subscription_cancel_method,
     bytecode_class_instance_value, bytecode_class_type_value, bytecode_event_signal_payload,
-    bytecode_external_value, bytecode_load_field_value, bytecode_modifier_stack_add,
-    bytecode_modifier_stack_ordered_modifiers, bytecode_native_member_value,
-    bytecode_new_running_task,
+    bytecode_external_value, bytecode_interface_type_value, bytecode_load_field_value,
+    bytecode_modifier_stack_add, bytecode_modifier_stack_ordered_modifiers,
+    bytecode_native_member_value, bytecode_new_running_task, bytecode_struct_type_value,
 };
 mod color_ops;
 use color_ops::{
@@ -190,8 +190,10 @@ pub enum Value {
         entries: Rc<RefCell<Vec<RuntimeModifierEntry>>>,
         entry_id: u64,
     },
+    Subtype(TypeName),
     CastableSubtype(TypeName),
     ConcreteSubtype(TypeName),
+    Type(TypeName),
     ClassifiableSubset(Rc<RefCell<Vec<Value>>>),
     ParametricType {
         name: String,
@@ -523,8 +525,10 @@ impl PartialEq for Value {
                     entry_id: right_id,
                 },
             ) => left_id == right_id && Rc::ptr_eq(left_entries, right_entries),
+            (Self::Subtype(left), Self::Subtype(right)) => left == right,
             (Self::CastableSubtype(left), Self::CastableSubtype(right)) => left == right,
             (Self::ConcreteSubtype(left), Self::ConcreteSubtype(right)) => left == right,
+            (Self::Type(left), Self::Type(right)) => left == right,
             (Self::ClassifiableSubset(left), Self::ClassifiableSubset(right)) => {
                 *left.borrow() == *right.borrow()
             }
@@ -695,6 +699,9 @@ impl fmt::Display for Value {
                 write!(formatter, "<modifier_stack({})>", entries.borrow().len())
             }
             Self::ModifierCancelHandle { .. } => write!(formatter, "<cancelable>"),
+            Self::Subtype(item) => {
+                write!(formatter, "<subtype({})>", render_runtime_type_name(item))
+            }
             Self::CastableSubtype(item) => {
                 write!(
                     formatter,
@@ -709,6 +716,7 @@ impl fmt::Display for Value {
                     render_runtime_type_name(item)
                 )
             }
+            Self::Type(item) => write!(formatter, "<type({})>", render_runtime_type_name(item)),
             Self::ClassifiableSubset(items) => {
                 write!(formatter, "<classifiable_subset({})>", items.borrow().len())
             }
@@ -805,6 +813,7 @@ fn render_runtime_type_name(type_name: &TypeName) -> String {
         TypeName::None => "void".to_string(),
         TypeName::Any => "any".to_string(),
         TypeName::Comparable => "comparable".to_string(),
+        TypeName::Type => "type".to_string(),
         TypeName::IntRange { min, max } => format!("int_range({min},{max})"),
         TypeName::Array(None) => "array".to_string(),
         TypeName::Array(Some(item)) => format!("[]{}", render_runtime_type_name(item)),
@@ -855,7 +864,7 @@ fn tuple_value_to_array(value: Value) -> Value {
 }
 
 fn type_name_is_string_char(name: &TypeName) -> bool {
-    matches!(name, TypeName::Char)
+    matches!(name, TypeName::Char | TypeName::Char8)
 }
 
 fn upsert_map_entry(entries: &mut Vec<(Value, Value)>, key: Value, value: Value) {
@@ -1254,6 +1263,10 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
         "FitsInPlayerMap" => (Some(1), true, native_fits_in_player_map),
         "Mod" => (Some(2), true, native_mod),
         "Quotient" => (Some(2), true, native_quotient),
+        "BitAnd" => (Some(2), false, native_bit_and),
+        "BitOr" => (Some(2), false, native_bit_or),
+        "BitXor" => (Some(2), false, native_bit_xor),
+        "BitNot" => (Some(1), false, native_bit_not),
         "Clamp" => (Some(3), false, native_clamp),
         "Lerp" => (Some(3), false, native_lerp),
         "Abs" => (Some(1), false, native_abs),
@@ -1325,6 +1338,10 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
             "FitsInPlayerMap" => "FitsInPlayerMap",
             "Mod" => "Mod",
             "Quotient" => "Quotient",
+            "BitAnd" => "BitAnd",
+            "BitOr" => "BitOr",
+            "BitXor" => "BitXor",
+            "BitNot" => "BitNot",
             "Clamp" => "Clamp",
             "Lerp" => "Lerp",
             "Abs" => "Abs",
@@ -1732,6 +1749,8 @@ fn native_named_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Lerp" => vec![vec!["From"], vec!["To"], vec!["Parameter"]],
         "Abs" | "Ceil" | "Floor" => vec![vec!["Value"]],
         "Min" | "Max" => vec![vec!["X"], vec!["Y"]],
+        "BitAnd" | "BitOr" | "BitXor" => vec![vec!["X"], vec!["Y"]],
+        "BitNot" => vec![vec!["X"]],
         "Round" | "Int" | "Sgn" => vec![vec!["Val"]],
         "Sqrt" | "Sin" | "Cos" | "Tan" | "ArcSin" | "ArcCos" | "Sinh" | "Cosh" | "Tanh"
         | "ArSinh" | "ArCosh" | "ArTanh" | "Exp" | "Ln" => vec![vec!["X"]],
@@ -1898,6 +1917,7 @@ fn event_signal_value(payload: Option<&TypeName>, args: &[CallValue]) -> Value {
 fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
     match payload {
         TypeName::Any | TypeName::Comparable => true,
+        TypeName::Type => runtime_value_is_type_value(value),
         TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
         TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
         TypeName::Rational => matches!(value, Value::Int(_) | Value::Rational(_)),
@@ -1960,6 +1980,21 @@ fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
                 | Value::External
         ),
     }
+}
+
+fn runtime_value_is_type_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::StructType { .. }
+            | Value::ClassType { .. }
+            | Value::InterfaceType { .. }
+            | Value::ParametricType { .. }
+            | Value::Subtype(_)
+            | Value::CastableSubtype(_)
+            | Value::ConcreteSubtype(_)
+            | Value::Type(_)
+            | Value::External
+    )
 }
 
 fn runtime_named_value_matches(value: &Value, expected: &str) -> bool {
@@ -2531,6 +2566,36 @@ fn native_quotient(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseEr
     Ok(NativeResult::Value(Value::Int(integer_from_i128(
         quotient,
         "`Quotient` result",
+        span,
+    )?)))
+}
+
+fn native_bit_and(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let [left, right]: [Value; 2] = args.try_into().expect("arity checked by caller");
+    Ok(NativeResult::Value(Value::Int(
+        expect_integer(&left, "`BitAnd` X", span)? & expect_integer(&right, "`BitAnd` Y", span)?,
+    )))
+}
+
+fn native_bit_or(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let [left, right]: [Value; 2] = args.try_into().expect("arity checked by caller");
+    Ok(NativeResult::Value(Value::Int(
+        expect_integer(&left, "`BitOr` X", span)? | expect_integer(&right, "`BitOr` Y", span)?,
+    )))
+}
+
+fn native_bit_xor(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let [left, right]: [Value; 2] = args.try_into().expect("arity checked by caller");
+    Ok(NativeResult::Value(Value::Int(
+        expect_integer(&left, "`BitXor` X", span)? ^ expect_integer(&right, "`BitXor` Y", span)?,
+    )))
+}
+
+fn native_bit_not(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
+    Ok(NativeResult::Value(Value::Int(!expect_integer(
+        &value,
+        "`BitNot` X",
         span,
     )?)))
 }

@@ -13,6 +13,7 @@ pub enum Effect {
     Reads,
     Writes,
     Allocates,
+    Predicts,
     Suspends,
     Decides,
 }
@@ -28,6 +29,7 @@ impl Effect {
             "reads" => Some(Self::Reads),
             "writes" => Some(Self::Writes),
             "allocates" => Some(Self::Allocates),
+            "predicts" => Some(Self::Predicts),
             "suspends" => Some(Self::Suspends),
             "decides" => Some(Self::Decides),
             _ => None,
@@ -44,6 +46,7 @@ impl Effect {
             Self::Reads => "reads",
             Self::Writes => "writes",
             Self::Allocates => "allocates",
+            Self::Predicts => "predicts",
             Self::Suspends => "suspends",
             Self::Decides => "decides",
         }

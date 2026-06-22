@@ -62,6 +62,11 @@ struct Parser {
 struct StructSpecifiers {
     persistable: bool,
     computes: bool,
+    concrete: bool,
+    uht_comparable: bool,
+    predicts: bool,
+    internal: bool,
+    epic_internal: bool,
 }
 
 impl Parser {
@@ -859,6 +864,9 @@ impl Parser {
             TokenKind::Ident(name) if name == "option" && self.match_lbrace() => {
                 self.finish_option_brace(token.span)
             }
+            TokenKind::Ident(name) if name == "type" && self.match_lbrace() => {
+                self.finish_type_literal(token.span)
+            }
             TokenKind::Ident(name) if name == "external" && self.match_lbrace() => {
                 self.finish_external(token.span)
             }
@@ -914,6 +922,17 @@ impl Parser {
                 expr: Box::new(expr),
             },
             span,
+        ))
+    }
+
+    fn finish_type_literal(&mut self, type_span: Span) -> Result<Expr, VerseError> {
+        let expr = self.parse_expression()?;
+        let close_span = self.consume_rbrace("expected `}` after type expression")?;
+        Ok(Expr::new(
+            ExprKind::TypeLiteral {
+                expr: Box::new(expr),
+            },
+            type_span.through(close_span),
         ))
     }
 
@@ -1662,37 +1681,22 @@ impl Parser {
                 return Err(self.error_at_current("unexpected indentation in struct field block"));
             }
 
-            let (name, name_span) = self.consume_ident("expected struct field name")?;
-            let annotation = self.parse_optional_type_annotation()?;
-            if annotation.is_none() {
+            let attributes = self.parse_field_attributes(field_indent)?;
+            let field = self.parse_class_like_field(attributes, "struct")?;
+            if field.mutable {
                 return Err(VerseError::parse(
-                    "expected explicit type annotation after struct field name",
-                    name_span,
+                    "struct fields cannot be mutable",
+                    field.span,
                 ));
             }
 
-            let default = if self.match_equal() {
-                Some(self.parse_expression()?)
-            } else {
-                None
-            };
-            let field_span = default
-                .as_ref()
-                .map_or(name_span, |expr| name_span.through(expr.span));
-
-            if fields.iter().any(|field: &StructField| field.name == name) {
-                return Err(VerseError::parse("duplicate struct field", name_span));
+            if fields
+                .iter()
+                .any(|existing: &StructField| existing.name == field.name)
+            {
+                return Err(VerseError::parse("duplicate struct field", field.span));
             }
-            fields.push(StructField {
-                name,
-                attributes: Vec::new(),
-                var_specifiers: Vec::new(),
-                specifiers: Vec::new(),
-                annotation,
-                default,
-                mutable: false,
-                span: field_span,
-            });
+            fields.push(field);
 
             let consumed = self.skip_separators();
             if consumed == 0 {
@@ -1741,6 +1745,51 @@ impl Parser {
                         ));
                     }
                     specifiers.computes = true;
+                }
+                "concrete" => {
+                    if specifiers.concrete {
+                        return Err(VerseError::parse(
+                            "duplicate struct specifier `concrete`",
+                            specifier_span,
+                        ));
+                    }
+                    specifiers.concrete = true;
+                }
+                "uht_comparable" => {
+                    if specifiers.uht_comparable {
+                        return Err(VerseError::parse(
+                            "duplicate struct specifier `uht_comparable`",
+                            specifier_span,
+                        ));
+                    }
+                    specifiers.uht_comparable = true;
+                }
+                "predicts" => {
+                    if specifiers.predicts {
+                        return Err(VerseError::parse(
+                            "duplicate struct specifier `predicts`",
+                            specifier_span,
+                        ));
+                    }
+                    specifiers.predicts = true;
+                }
+                "internal" => {
+                    if specifiers.internal {
+                        return Err(VerseError::parse(
+                            "duplicate struct specifier `internal`",
+                            specifier_span,
+                        ));
+                    }
+                    specifiers.internal = true;
+                }
+                "epic_internal" => {
+                    if specifiers.epic_internal {
+                        return Err(VerseError::parse(
+                            "duplicate struct specifier `epic_internal`",
+                            specifier_span,
+                        ));
+                    }
+                    specifiers.epic_internal = true;
                 }
                 _ => unreachable!("struct specifier should be validated"),
             }
@@ -2093,10 +2142,10 @@ impl Parser {
         };
         let (name, name_span) = self.consume_ident(&format!("expected {context} field name"))?;
         let mut specifiers = Vec::new();
-        for specifier in self.parse_class_field_specifiers()? {
+        for specifier in self.parse_class_field_specifiers(context)? {
             if specifiers.iter().any(|existing| existing == &specifier) {
                 return Err(VerseError::parse(
-                    format!("duplicate class field specifier `{specifier}`"),
+                    format!("duplicate {context} field specifier `{specifier}`"),
                     name_span,
                 ));
             }
@@ -2214,25 +2263,25 @@ impl Parser {
         Ok(specifiers)
     }
 
-    fn parse_class_field_specifiers(&mut self) -> Result<Vec<String>, VerseError> {
+    fn parse_class_field_specifiers(&mut self, context: &str) -> Result<Vec<String>, VerseError> {
         let mut specifiers: Vec<String> = Vec::new();
         while self.match_less() {
             let (name, name_span) =
-                self.consume_ident("expected class field specifier after `<`")?;
+                self.consume_ident(&format!("expected {context} field specifier after `<`"))?;
             let specifier = if name == "scoped" {
-                self.parse_scoped_access_specifier("class field")?
+                self.parse_scoped_access_specifier(&format!("{context} field"))?
             } else if let Some(specifier) = self.named_scoped_access_specifier(&name) {
                 specifier
             } else {
                 validate_class_field_specifier(&name, name_span)?;
                 name
             };
-            self.consume_greater("expected `>` after class field specifier")?;
+            self.consume_greater(&format!("expected `>` after {context} field specifier"))?;
             if specifiers.iter().any(|existing| {
                 specifier_duplicate_key(existing) == specifier_duplicate_key(&specifier)
             }) {
                 return Err(duplicate_specifier_error(
-                    "class field",
+                    &format!("{context} field"),
                     specifier_duplicate_key(&specifier),
                     name_span,
                 ));
@@ -2288,16 +2337,23 @@ impl Parser {
                 ));
             }
 
+            let mut attribute_end = name_span;
             let arguments = if self.match_lbrace() {
                 self.finish_field_attribute_brace_arguments()?
             } else if self.match_colon() {
                 self.finish_field_attribute_colon_arguments(field_indent)?
+            } else if name == "doc" && self.match_lparen() {
+                let doc_expr = self.parse_expression()?;
+                attribute_end =
+                    self.consume_rparen("expected `)` after field attribute argument")?;
+                let _ = doc_expr;
+                Vec::new()
             } else {
                 Vec::new()
             };
             let span = arguments
                 .last()
-                .map_or(attribute_start.through(name_span), |arg| {
+                .map_or(attribute_start.through(attribute_end), |arg| {
                     attribute_start.through(arg.span)
                 });
             attributes.push(FieldAttribute {
@@ -3055,37 +3111,62 @@ impl Parser {
     ) -> Result<Vec<TypeParam>, VerseError> {
         let mut params = Vec::new();
         loop {
-            let (name, name_span) =
-                self.consume_ident(&format!("expected {context} type parameter name"))?;
+            let mut names = Vec::new();
+            names.push(self.consume_ident(&format!("expected {context} type parameter name"))?);
+            while self.match_ampersand() {
+                names.push(
+                    self.consume_ident(&format!(
+                        "expected {context} type parameter name after `&`"
+                    ))?,
+                );
+            }
             self.consume_colon("expected `:` after type parameter name")?;
             let (constraint, constraint_span) =
                 self.consume_ident("expected type parameter constraint")?;
             let constraint = match constraint.as_str() {
                 "type" => TypeParamConstraint::Type,
-                "subtype" => {
-                    self.consume_lparen("expected `(` after `subtype` type parameter constraint")?;
-                    let parent = self.consume_type_name("expected supertype in `subtype(...)`")?;
-                    self.consume_rparen("expected `)` after `subtype` type parameter constraint")?;
-                    TypeParamConstraint::Subtype(parent.name)
+                "subtype"
+                | "castable_subtype"
+                | "concrete_subtype"
+                | "castable_concrete_subtype" => {
+                    self.consume_lparen(&format!(
+                        "expected `(` after `{constraint}` type parameter constraint"
+                    ))?;
+                    let parent = self
+                        .consume_type_name(&format!("expected supertype in `{constraint}(...)`"))?;
+                    self.consume_rparen(&format!(
+                        "expected `)` after `{constraint}` type parameter constraint"
+                    ))?;
+                    let parent = if constraint == "subtype" {
+                        parent.name
+                    } else {
+                        TypeName::Applied {
+                            name: constraint,
+                            args: vec![parent.name],
+                        }
+                    };
+                    TypeParamConstraint::Subtype(parent)
                 }
                 _ => {
                     return Err(VerseError::parse(
-                        "type parameter constraints must be `type` or `subtype(...)`",
+                        "type parameter constraints must be `type`, `subtype(...)`, `castable_subtype(...)`, `concrete_subtype(...)`, or `castable_concrete_subtype(...)`",
                         constraint_span,
                     ));
                 }
             };
-            if params.iter().any(|param: &TypeParam| param.name == name) {
-                return Err(VerseError::parse(
-                    format!("duplicate type parameter `{name}`"),
-                    name_span,
-                ));
+            for (name, name_span) in names {
+                if params.iter().any(|param: &TypeParam| param.name == name) {
+                    return Err(VerseError::parse(
+                        format!("duplicate type parameter `{name}`"),
+                        name_span,
+                    ));
+                }
+                params.push(TypeParam {
+                    name,
+                    constraint: constraint.clone(),
+                    span: name_span,
+                });
             }
-            params.push(TypeParam {
-                name,
-                constraint,
-                span: name_span,
-            });
 
             if self.match_comma() {
                 continue;
@@ -4565,6 +4646,10 @@ impl Parser {
         self.match_kind(|kind| matches!(kind, TokenKind::Percent))
     }
 
+    fn match_ampersand(&mut self) -> bool {
+        self.match_kind(|kind| matches!(kind, TokenKind::Ampersand))
+    }
+
     fn match_lparen(&mut self) -> bool {
         self.match_kind(|kind| matches!(kind, TokenKind::LParen))
     }
@@ -4810,6 +4895,7 @@ fn is_known_effect_specifier(name: &str) -> bool {
             | "reads"
             | "writes"
             | "allocates"
+            | "predicts"
     )
 }
 
@@ -4851,7 +4937,9 @@ fn specifier_duplicate_key(specifier: &str) -> &str {
 }
 
 fn validate_data_specifier(name: &str, span: Span) -> Result<(), VerseError> {
-    if is_known_access_specifier(name) || matches!(name, "localizes" | "native" | "scoped") {
+    if is_known_access_specifier(name)
+        || matches!(name, "localizes" | "native" | "scoped" | "predicts")
+    {
         Ok(())
     } else if is_known_effect_specifier(name) || is_known_declaration_specifier(name) {
         Err(VerseError::parse(
@@ -4883,7 +4971,16 @@ fn validate_enum_specifier(name: &str, span: Span) -> Result<(), VerseError> {
 }
 
 fn validate_struct_specifier(name: &str, span: Span) -> Result<(), VerseError> {
-    if matches!(name, "persistable" | "computes") {
+    if matches!(
+        name,
+        "persistable"
+            | "computes"
+            | "concrete"
+            | "uht_comparable"
+            | "predicts"
+            | "internal"
+            | "epic_internal"
+    ) {
         Ok(())
     } else if is_known_effect_specifier(name) || is_known_declaration_specifier(name) {
         Err(VerseError::parse(
@@ -4915,6 +5012,7 @@ fn is_known_declaration_specifier(name: &str) -> bool {
             | "unique"
             | "concrete"
             | "persistable"
+            | "uht_comparable"
             | "constructor"
             | "localizes"
     )
@@ -4949,8 +5047,10 @@ fn validate_class_specifier(name: &str, span: Span) -> Result<(), VerseError> {
 }
 
 fn validate_class_field_specifier(name: &str, span: Span) -> Result<(), VerseError> {
-    if matches!(name, "override" | "final" | "localizes" | "native")
-        || is_known_access_specifier(name)
+    if matches!(
+        name,
+        "override" | "final" | "localizes" | "native" | "predicts"
+    ) || is_known_access_specifier(name)
     {
         Ok(())
     } else if is_known_effect_specifier(name) || is_known_declaration_specifier(name) {
@@ -4987,7 +5087,7 @@ fn is_known_access_specifier(name: &str) -> bool {
 }
 
 fn validate_field_attribute(name: &str, span: Span) -> Result<(), VerseError> {
-    if name == "editable" {
+    if matches!(name, "editable" | "doc" | "predicts_extern") {
         Ok(())
     } else {
         Err(VerseError::parse(
@@ -5053,8 +5153,10 @@ fn is_builtin_type_alias_target_name(name: &str) -> bool {
             | "event"
             | "task"
             | "generator"
+            | "subtype"
             | "castable_subtype"
             | "concrete_subtype"
+            | "castable_concrete_subtype"
             | "classifiable_subset"
             | "modifier"
             | "modifier_stack"

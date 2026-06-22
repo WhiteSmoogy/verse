@@ -292,12 +292,22 @@ impl Checker {
         params: &[TypeParam],
         span: Span,
     ) -> Result<(), VerseError> {
-        for param in params {
-            if let TypeParamConstraint::Subtype(parent) = &param.constraint {
-                self.type_name_to_type_name(parent, span)?;
+        self.push_type_param_scope(params.iter().map(|param| {
+            (
+                param.name.clone(),
+                Type::Param(param.name.clone(), param.constraint.clone()),
+            )
+        }));
+        let result = (|| {
+            for param in params {
+                if let TypeParamConstraint::Subtype(parent) = &param.constraint {
+                    self.type_name_to_type_name(parent, span)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.pop_type_param_scope();
+        result
     }
 
     pub(super) fn check_extension_method(
@@ -488,7 +498,11 @@ impl Checker {
             }
             let qualified = self.current_qualified_name(name);
             if !self.struct_types.contains_key(&qualified) {
-                let fields = self.struct_field_infos_with_owner(fields, Some(&qualified))?;
+                let fields = self.struct_field_infos_with_owner(
+                    fields,
+                    Some(&qualified),
+                    FieldOwnerKind::Struct,
+                )?;
                 if *persistable {
                     self.ensure_persistable_struct(&qualified, &fields)?;
                 }
@@ -504,6 +518,7 @@ impl Checker {
                         final_class: false,
                         concrete: false,
                         castable: false,
+                        native: field_has_specifier(specifiers, "native"),
                         persistable: *persistable,
                         computes: *computes,
                         constructor_effects: Vec::new(),
@@ -578,6 +593,7 @@ impl Checker {
                         final_class: class_has_specifier(class_specifiers, "final"),
                         concrete: class_has_specifier(class_specifiers, "concrete"),
                         castable,
+                        native: field_has_specifier(specifiers, "native"),
                         persistable: class_has_specifier(class_specifiers, "persistable"),
                         computes: false,
                         constructor_effects: class_constructor_effects(blocks),
@@ -692,6 +708,13 @@ impl Checker {
         } else {
             inferred
         };
+
+        if specifiers.iter().any(|specifier| specifier == "predicts") {
+            return Err(VerseError::check_at(
+                "`predicts` data specifier can only be used on class fields",
+                span,
+            ));
+        }
 
         if self.scopes.len() == 1 && self.type_aliases.contains_key(name) {
             return Err(VerseError::check_at(
@@ -912,6 +935,29 @@ impl Checker {
         if let Some(info) = self.module_types.get_mut(qualified) {
             info.access = access;
             info.scopes = scopes.to_vec();
+        }
+    }
+
+    pub(super) fn ensure_predicts_specifier_type(
+        &self,
+        context: &str,
+        specifiers: &[String],
+        value_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if !specifiers.iter().any(|specifier| specifier == "predicts") {
+            return Ok(());
+        }
+
+        if self.is_predicts_var_data_type(value_type) {
+            Ok(())
+        } else {
+            Err(VerseError::check_at(
+                format!(
+                    "`predicts` {context} specifier requires a prediction-compatible type, got `{value_type}`"
+                ),
+                span,
+            ))
         }
     }
 

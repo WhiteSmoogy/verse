@@ -399,6 +399,37 @@ Letter
 }
 
 #[test]
+fn evaluates_char8_literals_and_string_compatibility() {
+    let source = r#"
+Letter:char8 = 'A'
+Text:[]char8 = "OK"
+Label:string = Text
+ToString(Letter) + Label
+"#;
+
+    assert_eq!(eval(source), Value::String("AOK".into()));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::String
+    );
+}
+
+#[test]
+fn evaluates_char8_array_function_parameter_and_return() {
+    let source = r#"
+Echo(Text:[]char8):[]char8 = Text
+Label:string = Echo("OK")
+Label
+"#;
+
+    assert_eq!(eval(source), Value::String("OK".into()));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::String
+    );
+}
+
+#[test]
 fn evaluates_non_ascii_char32_literals_and_annotations() {
     let source = r#"
 Letter:char32 = '好'
@@ -625,6 +656,17 @@ fn rejects_char32_literal_assigned_to_char() {
         error
             .to_string()
             .contains("binding `Letter` is annotated as `char` but expression has type `char32`")
+    );
+}
+
+#[test]
+fn rejects_char32_literal_assigned_to_char8() {
+    let error = check_source("Letter:char8 = '好'").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("binding `Letter` is annotated as `char8` but expression has type `char32`")
     );
 }
 

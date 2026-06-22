@@ -70,8 +70,10 @@ fn player_map_value_size_inner(value: &Value, depth: usize) -> Option<usize> {
         | Value::Modifier { .. }
         | Value::ModifierStack { .. }
         | Value::ModifierCancelHandle { .. }
+        | Value::Subtype(_)
         | Value::CastableSubtype(_)
         | Value::ConcreteSubtype(_)
+        | Value::Type(_)
         | Value::ClassifiableSubset(_)
         | Value::Diagnostic(_)
         | Value::External

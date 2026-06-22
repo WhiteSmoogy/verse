@@ -100,6 +100,23 @@ str(Text.DefaultText)
 }
 
 #[test]
+fn rejects_top_level_predicts_data_specifier() {
+    let error = check_source(
+        r#"
+Level<predicts>:int = 42
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`predicts` data specifier can only be used on class fields"),
+        "{error}"
+    );
+}
+
+#[test]
 fn evaluates_external_class_field_default_as_opaque_value() {
     let source = r#"
 concrete_material := class:

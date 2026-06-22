@@ -238,6 +238,23 @@ Wait(Task:task(int))<suspends>:int = Task.Await()
 }
 
 #[test]
+fn checks_official_task_cancel_member() {
+    let source = r#"
+Stop(Task:task(int))<transacts>:void = Task.Cancel()
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            vec!["transacts".to_string()],
+            Some(vec![Type::Task(Box::new(Type::Int))]),
+            Type::None
+        )
+    );
+}
+
+#[test]
 fn checks_official_task_subtype_of_awaitable() {
     let source = r#"
 AcceptAwaitable(Source:awaitable(int)):int = 42
@@ -407,7 +424,7 @@ spawn{Run()}
 Result
 "#;
 
-    assert_eq!(eval(source), Value::Int(42));
+    assert_deterministic(source, Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -669,15 +686,37 @@ Handle.Cancel()
 }
 
 #[test]
+fn evaluates_external_awaitable_pending_does_not_block_race_winner() {
+    let source = r#"
+var Result:int = 0
+Source:awaitable(int) = external {}
+Wait()<suspends>:int =
+    Source.Await()
+Fast()<suspends>:int =
+    Sleep(0.0)
+    42
+Run()<suspends><transacts>:void =
+    Winner := race:
+        Wait()
+        Fast()
+    set Result = Winner
+spawn{Run()}
+Result
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_external_subscribable_bad_callback_through_run_source() {
     let error = run_source("Source:subscribable(int) = external {}\nSource.Subscribe(42)")
         .expect_err("source should runtime error");
 
-    assert!(
-        error
-            .to_string()
-            .contains("argument 1 expected `function/1 -> none`, got `int`")
-    );
+    assert!(error.to_string().contains("no overload matches"));
 }
 
 #[test]
@@ -816,7 +855,7 @@ SubscribeTo(Source:subscribable(int)):cancelable = Source.Subscribe(Bad)
     )
     .expect_err("source should fail");
 
-    assert!(error.to_string().contains("argument 1 expected"));
+    assert!(error.to_string().contains("no overload matches"));
 }
 
 #[test]
@@ -833,6 +872,24 @@ fn rejects_official_task_unknown_signal_member() {
         .expect_err("source should fail");
 
     assert!(error.to_string().contains("has no member `Signal`"));
+}
+
+#[test]
+fn rejects_official_task_cancel_arguments() {
+    let error = check_source("Stop(Task:task(int))<transacts>:void = Task.Cancel(1)")
+        .expect_err("source should fail");
+
+    assert!(error.to_string().contains("expected 0 arguments"));
+}
+
+#[test]
+fn rejects_official_task_cancel_in_computes_function() {
+    let error = check_source("Stop(Task:task(int))<computes>:void = Task.Cancel()")
+        .expect_err("source should fail");
+
+    assert!(error.to_string().contains(
+        "function with <computes> effect cannot call function requiring <transacts> effect"
+    ));
 }
 
 #[test]
@@ -889,6 +946,53 @@ Result
 "#;
 
     assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_official_task_cancel_prevents_pending_sleep_resume() {
+    let source = r#"
+var Result:int = 0
+Worker()<suspends><transacts>:void =
+    Sleep(1.0)
+    set Result = 99
+Run()<suspends><transacts>:void =
+    Task:task(void) = spawn{Worker()}
+    Task.Cancel()
+    Sleep(1.0)
+spawn{Run()}
+Result
+"#;
+
+    assert_eq!(eval(source), Value::Int(0));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_official_task_cancel_runs_defer_once() {
+    let source = r#"
+var Trace:int = 0
+Worker()<suspends><transacts>:void =
+    defer:
+        set Trace = Trace * 10 + 1
+    Sleep(1.0)
+    set Trace = Trace * 10 + 9
+Run()<suspends><transacts>:void =
+    Task:task(void) = spawn{Worker()}
+    Task.Cancel()
+    Task.Cancel()
+    Sleep(1.0)
+spawn{Run()}
+Trace
+"#;
+
+    assert_eq!(eval(source), Value::Int(1));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int

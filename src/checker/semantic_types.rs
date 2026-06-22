@@ -7,7 +7,8 @@ use crate::token::Span;
 
 use super::{
     AggregateKind, ParametricTypeKind, StructFieldInfo, StructInfo, char_array_type, color_type,
-    is_builtin_comparable_class_name, is_char_type, is_string_char_type, render_effects,
+    is_builtin_comparable_class_name, is_byte_char_type, is_char_type, is_string_char_type,
+    render_effects,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,7 @@ pub enum Type {
     None,
     Any,
     Comparable,
+    TypeValue,
     Unknown,
     Never,
     Range,
@@ -73,6 +75,7 @@ pub enum Type {
     Event(Option<Box<Type>>),
     Task(Box<Type>),
     Generator(Option<Box<Type>>),
+    Subtype(Box<Type>),
     CastableSubtype(Box<Type>),
     ConcreteSubtype(Box<Type>),
     ClassifiableSubset(Box<Type>),
@@ -119,6 +122,7 @@ impl fmt::Display for Type {
             Self::None => write!(formatter, "none"),
             Self::Any => write!(formatter, "any"),
             Self::Comparable => write!(formatter, "comparable"),
+            Self::TypeValue => write!(formatter, "type"),
             Self::Unknown => write!(formatter, "unknown"),
             Self::Never => write!(formatter, "never"),
             Self::Range => write!(formatter, "range"),
@@ -153,6 +157,7 @@ impl fmt::Display for Type {
             Self::Task(payload) => write!(formatter, "task({payload})"),
             Self::Generator(Some(item)) => write!(formatter, "generator({item})"),
             Self::Generator(None) => write!(formatter, "generator()"),
+            Self::Subtype(item) => write!(formatter, "subtype({item})"),
             Self::CastableSubtype(item) => write!(formatter, "castable_subtype({item})"),
             Self::ConcreteSubtype(item) => write!(formatter, "concrete_subtype({item})"),
             Self::ClassifiableSubset(item) => write!(formatter, "classifiable_subset({item})"),
@@ -272,6 +277,7 @@ pub(super) fn ensure_equality_comparable_inner(
         | Type::Overload(_)
         | Type::Range
         | Type::Never
+        | Type::TypeValue
         | Type::EnumType(_)
         | Type::StructType(_)
         | Type::ClassType(_)
@@ -284,6 +290,7 @@ pub(super) fn ensure_equality_comparable_inner(
         | Type::Event(_)
         | Type::Task(_)
         | Type::Generator(_)
+        | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)
@@ -425,6 +432,7 @@ pub(super) fn ensure_comparable_key_inner(
         | Type::Overload(_)
         | Type::Range
         | Type::Never
+        | Type::TypeValue
         | Type::EnumType(_)
         | Type::StructType(_)
         | Type::ClassType(_)
@@ -436,6 +444,7 @@ pub(super) fn ensure_comparable_key_inner(
         | Type::Event(_)
         | Type::Task(_)
         | Type::Generator(_)
+        | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)
@@ -598,6 +607,9 @@ pub(super) fn check_add(
         (Type::ClassifiableSubset(left), Type::ClassifiableSubset(right)) => Ok(
             Type::ClassifiableSubset(Box::new(unify_types(left, right, left_span)?)),
         ),
+        (Type::Subtype(left), Type::Subtype(right)) => Ok(Type::Subtype(Box::new(unify_types(
+            left, right, left_span,
+        )?))),
         (Type::String, Type::Array(item)) | (Type::Array(item), Type::String)
             if is_string_char_type(item) =>
         {
@@ -738,6 +750,7 @@ pub(super) fn unify_types(left: &Type, right: &Type, span: Span) -> Result<Type,
         (left, right) if is_numeric_type(left) && is_numeric_type(right) => {
             Ok(unify_numeric_types(left, right))
         }
+        (left, right) if is_byte_char_type(left) && is_byte_char_type(right) => Ok(Type::Char),
         (Type::String, Type::Array(item)) | (Type::Array(item), Type::String)
             if is_string_char_type(item) =>
         {

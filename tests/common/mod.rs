@@ -14,6 +14,11 @@ pub use verse_rs::{
 pub fn eval(source: &str) -> Value {
     run_source(source).expect("source should run")
 }
+pub fn assert_deterministic(source: &str, expected: Value) {
+    for _ in 0..3 {
+        assert_eq!(eval(source), expected);
+    }
+}
 pub fn assert_failable_context_error(source: &str) {
     let error = check_source(source).expect_err("source should fail");
     assert!(

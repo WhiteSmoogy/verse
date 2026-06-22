@@ -980,6 +980,141 @@ widget{}.Value
 }
 
 #[test]
+fn evaluates_native_class_inheriting_native_class() {
+    let source = r#"
+base<native> := class:
+    Value:int = 40
+
+child<native> := class(base):
+    Bonus:int = 2
+
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_native_class_inheriting_non_native_class() {
+    let error = check_source(
+        r#"
+base := class:
+    Value:int = 40
+
+child<native> := class(base):
+    Bonus:int = 2
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("native class `child` cannot inherit from non-native class `base`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluates_native_class_member_with_native_struct_type() {
+    let source = r#"
+point<native> := struct:
+    X<native>:int = 0
+
+holder<native> := class:
+    P:point = point{}
+
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_native_class_member_with_non_native_struct_type() {
+    let error = check_source(
+        r#"
+point := struct:
+    X:int = 0
+
+holder<native> := class:
+    P:point = point{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`struct point` contained as a member in a native type must also be native"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_native_field_in_non_native_class() {
+    let error = check_source(
+        r#"
+holder := class:
+    Value<native>:int = 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`native` field specifier requires a native enclosing type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_native_method_in_non_native_class() {
+    let error = check_source(
+        r#"
+holder := class:
+    Read<native>():int = 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`native` method specifier requires a native enclosing class"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_native_method_with_non_native_struct_parameter() {
+    let error = check_source(
+        r#"
+point := struct:
+    X:int = 0
+
+holder<native> := class:
+    Use<native>(P:point):void
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "`struct point` used as a parameter/result in a native function must also be native"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn checks_decides_abstract_class_method_without_call_effect() {
     let source = r#"
 picker := class<abstract>:
@@ -1214,6 +1349,46 @@ Value.Elements.Length + Value.Extra
 "#;
 
     assert_eq!(eval(source), Value::Int(2));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_user_parametric_interface_method_runtime_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Read<public>():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override><public>():t = Value
+
+Value:reader(int) = box(int){Value := 42}
+Value.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_user_parametric_class_scoped_extension_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    (Item:box(t)).Read<public>():t = Item.Value
+    Use<public>():t = Self.Read()
+
+Value := box(int){Value := 42}
+Value.Use()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -1480,6 +1655,83 @@ Use(RootType, LeafType)
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
+    );
+}
+
+#[test]
+fn evaluates_class_type_as_subtype() {
+    let source = r#"
+base_item := class:
+    Value:int = 40
+child_item := class(base_item):
+    Extra:int = 2
+BaseType:subtype(base_item) = base_item
+ChildType:subtype(base_item) = child_item
+Use(Kind:subtype(base_item)):int = 21
+Use(BaseType) + Use(ChildType)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_interface_implementer_class_type_as_subtype() {
+    let source = r#"
+named := interface:
+    Name:string
+widget := class(named):
+    Name<override>:string = "ready"
+WidgetType:subtype(named) = widget
+Use(Kind:subtype(named)):int = 42
+Use(WidgetType)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_unrelated_class_type_as_subtype() {
+    let error = check_source(
+        r#"
+base_item := class:
+    Value:int = 0
+other_item := class:
+    Value:int = 1
+ItemType:subtype(base_item) = other_item
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "annotated as `subtype(base_item)` but expression has type `class<other_item>`"
+        )
+    );
+}
+
+#[test]
+fn rejects_non_class_type_value_as_subtype() {
+    let error = check_source(
+        r#"
+base_item := class:
+    Value:int = 0
+Item:subtype(base_item) = base_item{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("annotated as `subtype(base_item)` but expression has type `base_item`")
     );
 }
 
@@ -3694,6 +3946,120 @@ text_base := class:
         error
             .to_string()
             .contains("`localizes` field specifier requires a `message` annotation")
+    );
+}
+
+#[test]
+fn evaluates_native_predicts_class_field_specifier() {
+    let source = r#"
+log_level<native><public> := enum:
+    Debug
+    Normal
+
+log<native><public> := class:
+    DefaultLevel<native><public><predicts>:log_level = log_level.Normal
+
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_predicts_class_field_non_predicts_type() {
+    let error = check_source(
+        r#"
+point := struct:
+    X:int = 0
+
+box := class:
+    Field<predicts>:point = point{}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "`predicts` field specifier requires a prediction-compatible type, got `point`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluates_predicts_extern_class_field_attribute() {
+    let source = r#"
+sync_state := class:
+    @predicts_extern
+    State<predicts>:int = 0
+
+42
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_predicts_extern_without_predicts_field_specifier() {
+    let error = check_source(
+        r#"
+sync_state := class:
+    @predicts_extern
+    State:int = 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("@predicts_extern requires <predicts> on the same data member"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_predicts_override_class_field() {
+    let error = check_source(
+        r#"
+base := class:
+    Field:int = 0
+
+child := class(base):
+    Field<override><predicts>:int = 1
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("<override> cannot be used with <predicts> yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_predicts_interface_field() {
+    let error = check_source(
+        r#"
+readable := interface:
+    Field<predicts>:int
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`predicts` field specifier can only be used on class fields"),
+        "{error}"
     );
 }
 

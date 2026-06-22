@@ -19,6 +19,7 @@ pub(super) struct ParametricTypeInfo {
     pub(super) expr: Expr,
     pub(super) kind: ParametricTypeKind,
     pub(super) access: AccessLevel,
+    pub(super) native: bool,
     pub(super) module_path: Vec<String>,
     pub(super) span: Span,
 }
@@ -394,6 +395,24 @@ impl Checker {
                 return_type: Box::new(Type::Int),
             }),
         );
+        for name in ["BitAnd", "BitOr", "BitXor"] {
+            globals.insert(
+                name.to_string(),
+                Symbol::immutable(native_function_type(
+                    &["computes"],
+                    vec![("X", Type::Int), ("Y", Type::Int)],
+                    Type::Int,
+                )),
+            );
+        }
+        globals.insert(
+            "BitNot".to_string(),
+            Symbol::immutable(native_function_type(
+                &["computes"],
+                vec![("X", Type::Int)],
+                Type::Int,
+            )),
+        );
         globals.insert(
             "Clamp".to_string(),
             Symbol::immutable(Type::Overload(vec![
@@ -756,7 +775,13 @@ impl Checker {
         statements: &[Stmt],
     ) -> Result<(), VerseError> {
         for statement in statements {
-            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+            let StmtKind::Let {
+                name,
+                specifiers,
+                expr,
+                ..
+            } = &statement.kind
+            else {
                 continue;
             };
             if matches!(expr.kind, ExprKind::InterfaceDefinition { .. }) {
@@ -815,6 +840,7 @@ impl Checker {
                 final_class: false,
                 concrete: false,
                 castable: false,
+                native: field_has_specifier(specifiers, "native"),
                 persistable,
                 computes,
                 constructor_effects: Vec::new(),
@@ -949,6 +975,7 @@ impl Checker {
                             expr: expr.clone(),
                             kind,
                             access,
+                            native: field_has_specifier(specifiers, "native"),
                             module_path: self.module_path.clone(),
                             span: statement.span,
                         },
@@ -1115,6 +1142,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::Type => Type::TypeValue,
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.resolve_type_alias_target(item, span, visiting)?,
@@ -1733,6 +1761,7 @@ impl Checker {
             | TypeName::None
             | TypeName::Any
             | TypeName::Comparable
+            | TypeName::Type
             | TypeName::IntRange { .. }
             | TypeName::Function => {}
         }
@@ -1770,6 +1799,7 @@ impl Checker {
             | Type::Event(Some(item))
             | Type::Task(item)
             | Type::Generator(Some(item))
+            | Type::Subtype(item)
             | Type::CastableSubtype(item)
             | Type::ConcreteSubtype(item)
             | Type::ClassifiableSubset(item)
@@ -1832,6 +1862,7 @@ impl Checker {
             | Type::None
             | Type::Any
             | Type::Comparable
+            | Type::TypeValue
             | Type::Unknown
             | Type::Never
             | Type::Range
@@ -2004,9 +2035,13 @@ impl Checker {
     pub(super) fn scoped_accessible(&self, scopes: &[String]) -> bool {
         let package_name = self.package_name.as_deref();
         let current_module = self.current_module_name();
+        let current_absolute_module = self.current_absolute_module_name();
         scopes.iter().any(|scope| {
             package_name.is_some_and(|package| scoped_scope_contains(scope, package))
                 || current_module
+                    .as_deref()
+                    .is_some_and(|module| scoped_scope_contains(scope, module))
+                || current_absolute_module
                     .as_deref()
                     .is_some_and(|module| scoped_scope_contains(scope, module))
         })
@@ -2016,6 +2051,20 @@ impl Checker {
         self.current_module_name()
             .as_deref()
             .is_some_and(|current| scoped_scope_contains(module_name, current))
+    }
+
+    fn current_absolute_module_name(&self) -> Option<String> {
+        let package = self.package_name.as_deref()?;
+        if !package.starts_with('/') {
+            return None;
+        }
+        let package = package.trim_end_matches('/');
+        let module = self.current_module_name()?.replace('.', "/");
+        if package.is_empty() {
+            Some(format!("/{module}"))
+        } else {
+            Some(format!("{package}/{module}"))
+        }
     }
 
     pub(super) fn module_or_parent_scoped_accessible(&self, module_name: &str) -> bool {
@@ -2338,6 +2387,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::Type => Type::TypeValue,
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name(item, span)?,
@@ -2441,6 +2491,7 @@ impl Checker {
             TypeName::None => Type::None,
             TypeName::Any => Type::Any,
             TypeName::Comparable => Type::Comparable,
+            TypeName::Type => Type::TypeValue,
             TypeName::IntRange { min, max } => Type::IntRange(IntRange::new(*min, *max)),
             TypeName::Array(item) => Type::Array(Box::new(match item.as_deref() {
                 Some(item) => self.type_name_to_type_name_for_assignability(item)?,
@@ -2655,6 +2706,7 @@ impl Checker {
                         final_class: false,
                         concrete: false,
                         castable: false,
+                        native: info.native,
                         persistable: *persistable,
                         computes: *computes,
                         constructor_effects: Vec::new(),
@@ -2664,7 +2716,11 @@ impl Checker {
                         methods: Vec::new(),
                     },
                 );
-                let fields = self.struct_field_infos_with_owner(fields, Some(&instance_name))?;
+                let fields = self.struct_field_infos_with_owner(
+                    fields,
+                    Some(&instance_name),
+                    FieldOwnerKind::Struct,
+                )?;
                 if *persistable {
                     self.ensure_persistable_struct(&instance_name, &fields)?;
                 }
@@ -2680,6 +2736,7 @@ impl Checker {
                         final_class: false,
                         concrete: false,
                         castable: false,
+                        native: info.native,
                         persistable: *persistable,
                         computes: *computes,
                         constructor_effects: Vec::new(),
@@ -2715,6 +2772,7 @@ impl Checker {
                         final_class: class_has_specifier(specifiers, "final"),
                         concrete: class_has_specifier(specifiers, "concrete"),
                         castable: class_has_specifier(specifiers, "castable"),
+                        native: info.native,
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
                         constructor_effects: class_constructor_effects(blocks),
@@ -2750,6 +2808,7 @@ impl Checker {
                         final_class: class_has_specifier(specifiers, "final"),
                         concrete: class_has_specifier(specifiers, "concrete"),
                         castable,
+                        native: info.native,
                         persistable: class_has_specifier(specifiers, "persistable"),
                         computes: false,
                         constructor_effects: class_constructor_effects(blocks),
@@ -2777,8 +2836,11 @@ impl Checker {
                 );
                 let parent_names = self.interface_parent_names(parents)?;
                 let inherited_fields = self.interface_field_requirements(&parent_names)?;
-                let local_fields =
-                    self.struct_field_infos_with_owner(fields, Some(&instance_name))?;
+                let local_fields = self.struct_field_infos_with_owner(
+                    fields,
+                    Some(&instance_name),
+                    FieldOwnerKind::Interface,
+                )?;
                 let fields =
                     self.merge_interface_field_set(inherited_fields, local_fields, info.span)?;
                 let inherited_methods = self.interface_method_requirements(&parent_names)?;
@@ -2853,23 +2915,36 @@ impl Checker {
         args: &[Type],
         span: Span,
     ) -> Result<(), VerseError> {
+        let inferred = params
+            .iter()
+            .zip(args.iter())
+            .map(|(param, arg)| (param.name.clone(), arg.clone()))
+            .collect::<HashMap<_, _>>();
         for (param, arg) in params.iter().zip(args) {
-            self.ensure_type_arg_satisfies_constraint(&param.name, &param.constraint, arg, span)?;
+            self.ensure_type_arg_satisfies_constraint_with_inferred(
+                &param.name,
+                &param.constraint,
+                arg,
+                Some(&inferred),
+                span,
+            )?;
         }
         Ok(())
     }
 
-    pub(super) fn ensure_type_arg_satisfies_constraint(
+    fn ensure_type_arg_satisfies_constraint_with_inferred(
         &mut self,
         param_name: &str,
         constraint: &TypeParamConstraint,
         actual: &Type,
+        inferred: Option<&HashMap<String, Type>>,
         span: Span,
     ) -> Result<(), VerseError> {
         match constraint {
             TypeParamConstraint::Type => Ok(()),
             TypeParamConstraint::Subtype(expected_name) => {
-                let expected = self.type_name_to_type_name(expected_name, span)?;
+                let expected =
+                    self.type_name_to_type_name_for_constraint(expected_name, inferred, span)?;
                 if self.is_assignable(&expected, actual) {
                     Ok(())
                 } else {
@@ -2882,6 +2957,25 @@ impl Checker {
                 }
             }
         }
+    }
+
+    fn type_name_to_type_name_for_constraint(
+        &mut self,
+        name: &TypeName,
+        inferred: Option<&HashMap<String, Type>>,
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        let Some(inferred) = inferred else {
+            return self.type_name_to_type_name(name, span);
+        };
+        self.push_type_param_scope(
+            inferred
+                .iter()
+                .map(|(name, value_type)| (name.clone(), value_type.clone())),
+        );
+        let result = self.type_name_to_type_name(name, span);
+        self.pop_type_param_scope();
+        result
     }
 
     pub(super) fn ensure_inferred_type_param_constraints(
@@ -2916,7 +3010,13 @@ impl Checker {
             Type::Param(name, constraint) => {
                 if !checked.iter().any(|checked_name| checked_name == name) {
                     if let Some(actual) = inferred.get(name) {
-                        self.ensure_type_arg_satisfies_constraint(name, constraint, actual, span)?;
+                        self.ensure_type_arg_satisfies_constraint_with_inferred(
+                            name,
+                            constraint,
+                            actual,
+                            Some(inferred),
+                            span,
+                        )?;
                     }
                     checked.push(name.clone());
                 }
@@ -2925,6 +3025,7 @@ impl Checker {
             Type::Array(item)
             | Type::Option(item)
             | Type::Task(item)
+            | Type::Subtype(item)
             | Type::CastableSubtype(item)
             | Type::ConcreteSubtype(item)
             | Type::ClassifiableSubset(item)

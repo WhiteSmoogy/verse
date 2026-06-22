@@ -4,6 +4,7 @@ use crate::ir::IrProgram;
 use crate::ir::bytecode::BytecodeProgram;
 
 pub(crate) mod bytecode_vm;
+pub(crate) mod host;
 
 #[derive(Default)]
 pub struct VerseVm;
@@ -16,8 +17,30 @@ impl VerseVm {
     pub fn run_ir_program(&mut self, program: &IrProgram) -> Result<Value, VerseError> {
         run_bytecode_program(program.bytecode_program())
     }
+
+    #[cfg(feature = "tokio-host")]
+    pub fn run_ir_program_with_tokio_host(
+        &mut self,
+        program: &IrProgram,
+    ) -> Result<Value, VerseError> {
+        run_bytecode_program_with_tokio_host(program.bytecode_program())
+    }
 }
 
 pub(crate) fn run_bytecode_program(program: &BytecodeProgram) -> Result<Value, VerseError> {
-    crate::eval::with_stable_runtime_epoch(|| bytecode_vm::BytecodeExecutor::new(program).run())
+    crate::eval::with_stable_runtime_epoch(|| {
+        let mut executor = bytecode_vm::BytecodeExecutor::new(program);
+        executor.run()
+    })
+}
+
+#[cfg(feature = "tokio-host")]
+pub fn run_bytecode_program_with_tokio_host(
+    program: &BytecodeProgram,
+) -> Result<Value, VerseError> {
+    crate::eval::with_stable_runtime_epoch(|| {
+        let mut executor =
+            bytecode_vm::BytecodeExecutor::with_host(program, host::TokioHost::new());
+        executor.run()
+    })
 }

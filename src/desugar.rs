@@ -172,6 +172,9 @@ fn desugar_expr_inner(expr: &Expr, preserve_colon_block: bool) -> Expr {
             annotation: annotation.clone(),
             expr: Box::new(desugar_expr(expr)),
         },
+        ExprKind::TypeLiteral { expr } => ExprKind::TypeLiteral {
+            expr: Box::new(desugar_expr(expr)),
+        },
         ExprKind::External => ExprKind::External,
         ExprKind::Loop { body } => ExprKind::Loop {
             body: Box::new(desugar_expr(body)),

@@ -114,6 +114,7 @@ pub enum TokenKind {
     Slash,
     SlashEqual,
     Percent,
+    Ampersand,
     LParen,
     RParen,
     LBracket,

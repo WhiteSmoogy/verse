@@ -14,6 +14,7 @@ pub(super) struct StructInfo {
     pub(super) final_class: bool,
     pub(super) concrete: bool,
     pub(super) castable: bool,
+    pub(super) native: bool,
     pub(super) persistable: bool,
     pub(super) computes: bool,
     pub(super) constructor_effects: Vec<String>,
@@ -27,6 +28,20 @@ pub(super) struct StructInfo {
 pub(super) enum AggregateKind {
     Struct,
     Class,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldOwnerKind {
+    Struct,
+    Class,
+    Interface,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeTypeContext {
+    Function,
+    TypeMember,
+    NativeMember,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,7 +144,11 @@ impl Checker {
             let qualified = self.current_qualified_name(name);
             let parent_names = self.interface_parent_names(parents)?;
             let inherited_fields = self.interface_field_requirements(&parent_names)?;
-            let local_fields = self.struct_field_infos_with_owner(fields, Some(&qualified))?;
+            let local_fields = self.struct_field_infos_with_owner(
+                fields,
+                Some(&qualified),
+                FieldOwnerKind::Interface,
+            )?;
             let fields =
                 self.merge_interface_field_set(inherited_fields, local_fields, statement.span)?;
             let inherited_methods = self.interface_method_requirements(&parent_names)?;
@@ -216,6 +235,12 @@ impl Checker {
     ) -> Result<Vec<ClassMethodInfo>, VerseError> {
         let mut infos = Vec::with_capacity(methods.len());
         for method in methods {
+            if has_effect(&method.effects, "native") {
+                return Err(VerseError::check_at(
+                    "interface functions cannot be marked as `<native>`",
+                    method.span,
+                ));
+            }
             let info = ClassMethodInfo {
                 qualifier: method
                     .qualifier
@@ -474,7 +499,11 @@ impl Checker {
                 } => {
                     let qualified = self.current_qualified_name(name);
                     (
-                        self.struct_field_infos_with_owner(fields, Some(&qualified))?,
+                        self.struct_field_infos_with_owner(
+                            fields,
+                            Some(&qualified),
+                            FieldOwnerKind::Struct,
+                        )?,
                         Vec::new(),
                         AggregateKind::Struct,
                         None,
@@ -570,6 +599,7 @@ impl Checker {
                     final_class,
                     concrete,
                     castable,
+                    native: field_has_specifier(binding_specifiers, "native"),
                     persistable,
                     computes,
                     constructor_effects,
@@ -588,6 +618,7 @@ impl Checker {
         &mut self,
         fields: &[StructField],
         owner: Option<&str>,
+        owner_kind: FieldOwnerKind,
     ) -> Result<Vec<StructFieldInfo>, VerseError> {
         fields
             .iter()
@@ -599,6 +630,27 @@ impl Checker {
                     ));
                 };
                 let value_type = self.type_name_to_type(annotation)?;
+                let owner_native = owner.is_some_and(|owner| self.aggregate_is_native(owner));
+                if owner_native {
+                    self.ensure_native_context_type(
+                        &value_type,
+                        NativeTypeContext::TypeMember,
+                        field.span,
+                    )?;
+                }
+                if field_has_specifier(&field.specifiers, "native") {
+                    if !owner_native {
+                        return Err(VerseError::check_at(
+                            "`native` field specifier requires a native enclosing type",
+                            field.span,
+                        ));
+                    }
+                    self.ensure_native_context_type(
+                        &value_type,
+                        NativeTypeContext::NativeMember,
+                        field.span,
+                    )?;
+                }
                 if field_has_specifier(&field.specifiers, "localizes")
                     && !matches!(annotation.name, TypeName::Message)
                 {
@@ -607,6 +659,34 @@ impl Checker {
                         field.span,
                     ));
                 }
+                if field_has_attribute(&field.attributes, "predicts_extern")
+                    && !field_has_specifier(&field.specifiers, "predicts")
+                {
+                    return Err(VerseError::check_at(
+                        "@predicts_extern requires <predicts> on the same data member",
+                        field.span,
+                    ));
+                }
+                if field_has_specifier(&field.specifiers, "predicts") {
+                    if owner_kind != FieldOwnerKind::Class {
+                        return Err(VerseError::check_at(
+                            "`predicts` field specifier can only be used on class fields",
+                            field.span,
+                        ));
+                    }
+                    if field_has_specifier(&field.specifiers, "override") {
+                        return Err(VerseError::check_at(
+                            "<override> cannot be used with <predicts> yet",
+                            field.span,
+                        ));
+                    }
+                }
+                self.ensure_predicts_specifier_type(
+                    "field",
+                    &field.specifiers,
+                    &value_type,
+                    field.span,
+                )?;
                 if let Some(default) = &field.default {
                     let default_type =
                         self.check_data_member_default(owner, &field.name, default)?;
@@ -656,6 +736,136 @@ impl Checker {
                 })
             })
             .collect()
+    }
+
+    pub(super) fn aggregate_is_native(&self, name: &str) -> bool {
+        self.struct_types.get(name).is_some_and(|info| info.native)
+    }
+
+    pub(super) fn ensure_native_context_type(
+        &self,
+        value_type: &Type,
+        context: NativeTypeContext,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        if let Some((kind, name)) = self.non_native_aggregate_in_type(value_type, context) {
+            let message = match context {
+                NativeTypeContext::Function => {
+                    format!(
+                        "`{kind} {name}` used as a parameter/result in a native function must also be native"
+                    )
+                }
+                NativeTypeContext::TypeMember => {
+                    format!(
+                        "`{kind} {name}` contained as a member in a native type must also be native"
+                    )
+                }
+                NativeTypeContext::NativeMember => {
+                    format!(
+                        "`{kind} {name}` contained in a native member must have a native representation"
+                    )
+                }
+            };
+            return Err(VerseError::check_at(message, span));
+        }
+        Ok(())
+    }
+
+    pub(super) fn ensure_native_function_signature(
+        &self,
+        function_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let Type::Function {
+            param_types,
+            return_type,
+            ..
+        } = function_type
+        else {
+            return Ok(());
+        };
+        if let Some(param_types) = param_types {
+            for param_type in param_types {
+                self.ensure_native_context_type(param_type, NativeTypeContext::Function, span)?;
+            }
+        }
+        self.ensure_native_context_type(return_type, NativeTypeContext::Function, span)
+    }
+
+    fn non_native_aggregate_in_type(
+        &self,
+        value_type: &Type,
+        context: NativeTypeContext,
+    ) -> Option<(&'static str, String)> {
+        match value_type {
+            Type::Struct(name) | Type::StructType(name) => self
+                .struct_types
+                .get(name)
+                .filter(|info| info.kind == AggregateKind::Struct && !info.native)
+                .map(|_| ("struct", name.clone())),
+            Type::Class(name) | Type::ClassType(name) => {
+                if context == NativeTypeContext::TypeMember {
+                    None
+                } else {
+                    self.struct_types
+                        .get(name)
+                        .filter(|info| info.kind == AggregateKind::Class && !info.native)
+                        .map(|_| ("class", name.clone()))
+                }
+            }
+            Type::Array(item)
+            | Type::Option(item)
+            | Type::Generator(Some(item))
+            | Type::Task(item)
+            | Type::Subtype(item)
+            | Type::CastableSubtype(item)
+            | Type::ConcreteSubtype(item)
+            | Type::ClassifiableSubset(item)
+            | Type::Modifier(item)
+            | Type::ModifierStack(item)
+            | Type::Awaitable(Some(item))
+            | Type::Signalable(item)
+            | Type::Subscribable(Some(item))
+            | Type::Listenable(Some(item)) => self.non_native_aggregate_in_type(item, context),
+            Type::Map(key, value) | Type::WeakMap(key, value) | Type::Result(key, value) => self
+                .non_native_aggregate_in_type(key, context)
+                .or_else(|| self.non_native_aggregate_in_type(value, context)),
+            Type::Tuple(items) => items
+                .iter()
+                .find_map(|item| self.non_native_aggregate_in_type(item, context)),
+            Type::Function { .. }
+            | Type::Generator(None)
+            | Type::Awaitable(None)
+            | Type::Subscribable(None)
+            | Type::Listenable(None)
+            | Type::Event(_)
+            | Type::Int
+            | Type::IntRange(_)
+            | Type::Float
+            | Type::Rational
+            | Type::Number
+            | Type::Bool
+            | Type::String
+            | Type::Message
+            | Type::Char
+            | Type::Char8
+            | Type::Char32
+            | Type::None
+            | Type::Any
+            | Type::Comparable
+            | Type::TypeValue
+            | Type::Unknown
+            | Type::Never
+            | Type::Range
+            | Type::Enum(_)
+            | Type::EnumType(_)
+            | Type::Interface(_)
+            | Type::InterfaceType(_)
+            | Type::Module(_)
+            | Type::Param(_, _)
+            | Type::ParametricType { .. }
+            | Type::Overload(_) => None,
+        }
     }
 
     pub(super) fn check_data_member_default(
@@ -811,6 +1021,14 @@ impl Checker {
                                     base.span,
                                 ));
                             }
+                            if self.aggregate_is_native(class_name) && !info.native {
+                                return Err(VerseError::check_at(
+                                    format!(
+                                        "native class `{class_name}` cannot inherit from non-native class `{base_name}`"
+                                    ),
+                                    base.span,
+                                ));
+                            }
                             self.ensure_base_class_constructor_accessible(
                                 &base_name,
                                 info.constructor_access,
@@ -896,7 +1114,8 @@ impl Checker {
         let unique = class_has_specifier(specifiers, "unique") || base_unique;
         let castable = class_has_specifier(specifiers, "castable") || base_castable;
 
-        let local = self.struct_field_infos_with_owner(fields, Some(class_name))?;
+        let local =
+            self.struct_field_infos_with_owner(fields, Some(class_name), FieldOwnerKind::Class)?;
         for mut field in local {
             let source_field = fields
                 .iter()
@@ -1026,6 +1245,7 @@ impl Checker {
                 final_class: class_has_specifier(specifiers, "final"),
                 concrete: class_has_specifier(specifiers, "concrete"),
                 castable,
+                native: self.aggregate_is_native(class_name),
                 persistable: class_has_specifier(specifiers, "persistable"),
                 computes: false,
                 constructor_effects: class_constructor_effects(blocks),
@@ -1481,9 +1701,20 @@ impl Checker {
         inherited_methods: &[ClassMethodInfo],
     ) -> Result<Vec<ClassMethodInfo>, VerseError> {
         let mut infos = Vec::with_capacity(methods.len());
+        let class_native = self.aggregate_is_native(class_name);
         for method in methods {
             self.validate_abstract_class_method_shape(method)?;
             let effects = self.class_or_interface_method_effects(method, inherited_methods)?;
+            if has_effect(&method.effects, "native") && !class_native {
+                return Err(VerseError::check_at(
+                    "`native` method specifier requires a native enclosing class",
+                    method.span,
+                ));
+            }
+            let value_type = self.class_method_declared_type(method, effects)?;
+            if has_effect(&method.effects, "native") {
+                self.ensure_native_function_signature(&value_type, method.span)?;
+            }
             let info = ClassMethodInfo {
                 qualifier: method.qualifier.clone(),
                 name: method.name.clone(),
@@ -1492,7 +1723,7 @@ impl Checker {
                 access: access_level_from_specifiers(&method.effects, "method", method.span)?,
                 scopes: scoped_access_scopes(&method.effects).unwrap_or_default(),
                 owner: Some(class_name.to_string()),
-                value_type: self.class_method_declared_type(method, effects)?,
+                value_type,
                 span: method.span,
             };
             push_distinct_local_method_info(&mut infos, info, "class", &self.struct_types)?;
@@ -1686,6 +1917,7 @@ impl Checker {
         methods: &[ClassMethod],
     ) -> Result<Vec<ClassMethodInfo>, VerseError> {
         let mut infos = Vec::with_capacity(methods.len());
+        let class_native = self.aggregate_is_native(class_name);
         let method_bindings = self
             .struct_types
             .get(class_name)
@@ -1694,12 +1926,22 @@ impl Checker {
 
         for method in methods {
             self.validate_abstract_class_method_shape(method)?;
+            if has_effect(&method.effects, "native") && !class_native {
+                return Err(VerseError::check_at(
+                    "`native` method specifier requires a native enclosing class",
+                    method.span,
+                ));
+            }
             if method.body.is_none() {
                 let effects = self.class_or_interface_method_effects(method, inherited_methods)?;
+                let value_type = self.class_method_declared_type(method, effects)?;
+                if has_effect(&method.effects, "native") {
+                    self.ensure_native_function_signature(&value_type, method.span)?;
+                }
                 infos.push(ClassMethodInfo {
                     qualifier: method.qualifier.clone(),
                     name: method.name.clone(),
-                    value_type: self.class_method_declared_type(method, effects)?,
+                    value_type,
                     final_member: has_effect(&method.effects, "final"),
                     abstract_member: true,
                     access: access_level_from_specifiers(&method.effects, "method", method.span)?,
@@ -1758,6 +2000,9 @@ impl Checker {
             self.pop_scope();
 
             let method_type = method_type?;
+            if has_effect(&method.effects, "native") {
+                self.ensure_native_function_signature(&method_type, method.span)?;
+            }
             let access = access_level_from_specifiers(&method.effects, "method", method.span)?;
             self.ensure_aggregate_member_surface_dependencies_accessible(
                 class_name,

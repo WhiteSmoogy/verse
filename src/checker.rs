@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, ArchetypeLet, AssignOp, BinaryOp, CallArg, CaseArm,
     CasePattern, ClassBlock, ClassMethod, ConcurrentOp, Expr, ExprKind, ExtensionMethod,
-    ForBinding, ForClause, InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind,
-    StructField, TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
+    FieldAttribute, ForBinding, ForClause, InterpolatedStringPart, Param, ParamPattern, Program,
+    Stmt, StmtKind, StructField, TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::desugar::Desugarer;
 use crate::error::{Diagnostic, DiagnosticCode, VerseError};
@@ -14,8 +14,8 @@ use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 
 mod semantic_class;
 use semantic_class::{
-    AccessLevel, AggregateKind, ClassMethodInfo, ExtensionMethodInfo, InterfaceInfo,
-    StructFieldInfo, StructInfo, class_constructor_effects,
+    AccessLevel, AggregateKind, ClassMethodInfo, ExtensionMethodInfo, FieldOwnerKind,
+    InterfaceInfo, StructFieldInfo, StructInfo, class_constructor_effects,
 };
 
 mod definition;
@@ -728,8 +728,10 @@ fn is_reserved_type_alias_name(name: &str) -> bool {
             | "event"
             | "task"
             | "generator"
+            | "subtype"
             | "castable_subtype"
             | "concrete_subtype"
+            | "castable_concrete_subtype"
             | "classifiable_subset"
             | "modifier"
             | "modifier_stack"
@@ -789,7 +791,9 @@ fn defer_body_failable_expr(body: &Expr) -> Option<Span> {
                 defer_body_failable_expr(expr)
             }
         }
-        ExprKind::Var { expr, .. } => defer_body_failable_expr(expr),
+        ExprKind::Var { expr, .. } | ExprKind::TypeLiteral { expr } => {
+            defer_body_failable_expr(expr)
+        }
         ExprKind::Loop { body } => defer_body_failable_expr(body),
         ExprKind::For { clauses, body } => clauses
             .iter()
@@ -937,7 +941,9 @@ fn archetype_body_escape(body: &Expr, loop_depth: usize) -> Option<Span> {
         ExprKind::FailureBind { expr, .. } => archetype_body_escape(expr, loop_depth),
         ExprKind::Set { target, expr, .. } => archetype_body_escape(target, loop_depth)
             .or_else(|| archetype_body_escape(expr, loop_depth)),
-        ExprKind::Var { expr, .. } => archetype_body_escape(expr, loop_depth),
+        ExprKind::Var { expr, .. } | ExprKind::TypeLiteral { expr } => {
+            archetype_body_escape(expr, loop_depth)
+        }
         ExprKind::FailureSequence(items) | ExprKind::Array(items) | ExprKind::Tuple(items) => items
             .iter()
             .find_map(|item| archetype_body_escape(item, loop_depth)),
@@ -1068,7 +1074,9 @@ fn defer_body_escape(body: &Expr, loop_depth: usize) -> Option<(&'static str, Sp
         ExprKind::Set { target, expr, .. } => {
             defer_body_escape(target, loop_depth).or_else(|| defer_body_escape(expr, loop_depth))
         }
-        ExprKind::Var { expr, .. } => defer_body_escape(expr, loop_depth),
+        ExprKind::Var { expr, .. } | ExprKind::TypeLiteral { expr } => {
+            defer_body_escape(expr, loop_depth)
+        }
         ExprKind::FailureSequence(items) | ExprKind::Array(items) | ExprKind::Tuple(items) => items
             .iter()
             .find_map(|item| defer_body_escape(item, loop_depth)),
@@ -1517,6 +1525,10 @@ fn field_has_specifier(specifiers: &[String], name: &str) -> bool {
     specifiers.iter().any(|specifier| specifier == name)
 }
 
+fn field_has_attribute(attributes: &[FieldAttribute], name: &str) -> bool {
+    attributes.iter().any(|attribute| attribute.name == name)
+}
+
 fn render_effects(effects: &[String]) -> String {
     effects
         .iter()
@@ -1644,6 +1656,17 @@ fn await_type(payload: Option<&Type>) -> Type {
     }
 }
 
+fn task_cancel_type() -> Type {
+    Type::Function {
+        arity: Some(0),
+        arity_range: None,
+        effects: vec!["transacts".to_string()],
+        param_types: Some(Vec::new()),
+        param_specs: None,
+        return_type: Box::new(Type::None),
+    }
+}
+
 fn signal_type(payload: Option<&Type>) -> Type {
     let param_types = payload.iter().copied().cloned().collect::<Vec<_>>();
     Type::Function {
@@ -1727,6 +1750,13 @@ fn modifier_stack_add_modifier_type(item_type: &Type) -> Type {
 }
 
 fn subscribe_type(payload: Option<&Type>) -> Type {
+    Type::Overload(vec![
+        subscribe_type_with_callback_effects(payload, &[]),
+        subscribe_type_with_callback_effects(payload, &["transacts"]),
+    ])
+}
+
+fn subscribe_type_with_callback_effects(payload: Option<&Type>, callback_effects: &[&str]) -> Type {
     let callback_param_types = payload.iter().copied().cloned().collect::<Vec<_>>();
     Type::Function {
         arity: Some(1),
@@ -1735,7 +1765,10 @@ fn subscribe_type(payload: Option<&Type>) -> Type {
         param_types: Some(vec![Type::Function {
             arity: Some(callback_param_types.len()),
             arity_range: None,
-            effects: Vec::new(),
+            effects: callback_effects
+                .iter()
+                .map(|effect| (*effect).to_string())
+                .collect(),
             param_types: Some(callback_param_types),
             param_specs: None,
             return_type: Box::new(Type::None),
@@ -1751,8 +1784,10 @@ fn is_official_parametric_type_name(name: &str) -> bool {
         "event"
             | "task"
             | "generator"
+            | "subtype"
             | "castable_subtype"
             | "concrete_subtype"
+            | "castable_concrete_subtype"
             | "classifiable_subset"
             | "modifier"
             | "modifier_stack"
@@ -1785,6 +1820,10 @@ fn official_parametric_type(name: &str, args: &[Type], span: Span) -> Result<Typ
             ensure_parametric_type_arity(name, args, &[0, 1], span)?;
             Ok(Type::Generator(args.first().cloned().map(Box::new)))
         }
+        "subtype" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::Subtype(Box::new(args[0].clone())))
+        }
         "castable_subtype" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
             Ok(Type::CastableSubtype(Box::new(args[0].clone())))
@@ -1792,6 +1831,12 @@ fn official_parametric_type(name: &str, args: &[Type], span: Span) -> Result<Typ
         "concrete_subtype" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
             Ok(Type::ConcreteSubtype(Box::new(args[0].clone())))
+        }
+        "castable_concrete_subtype" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::ConcreteSubtype(Box::new(Type::CastableSubtype(
+                Box::new(args[0].clone()),
+            ))))
         }
         "classifiable_subset" => {
             ensure_parametric_type_arity(name, args, &[1], span)?;
@@ -2080,6 +2125,7 @@ fn builtin_color_info() -> StructInfo {
         final_class: false,
         concrete: false,
         castable: false,
+        native: true,
         persistable: true,
         computes: false,
         constructor_effects: Vec::new(),
@@ -2116,6 +2162,7 @@ fn builtin_color_alpha_info() -> StructInfo {
         final_class: false,
         concrete: false,
         castable: false,
+        native: true,
         persistable: false,
         computes: false,
         constructor_effects: Vec::new(),
@@ -2155,6 +2202,7 @@ fn builtin_locale_info() -> StructInfo {
         final_class: false,
         concrete: false,
         castable: false,
+        native: true,
         persistable: false,
         computes: false,
         constructor_effects: Vec::new(),
@@ -2169,8 +2217,12 @@ fn is_char_type(value_type: &Type) -> bool {
     matches!(value_type, Type::Char | Type::Char8 | Type::Char32)
 }
 
+fn is_byte_char_type(value_type: &Type) -> bool {
+    matches!(value_type, Type::Char | Type::Char8)
+}
+
 fn is_string_char_type(value_type: &Type) -> bool {
-    matches!(value_type, Type::Char)
+    is_byte_char_type(value_type)
 }
 
 fn is_empty_option_literal(expected: &Type, expr: &Expr) -> bool {
@@ -2311,11 +2363,13 @@ fn is_persistable_type_name(
         | Type::Module(_)
         | Type::Param(_, _)
         | Type::ParametricType { .. }
+        | Type::TypeValue
         | Type::WeakMap(_, _)
         | Type::Result(_, _)
         | Type::Event(_)
         | Type::Task(_)
         | Type::Generator(_)
+        | Type::Subtype(_)
         | Type::CastableSubtype(_)
         | Type::ConcreteSubtype(_)
         | Type::ClassifiableSubset(_)

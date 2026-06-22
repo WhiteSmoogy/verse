@@ -103,6 +103,30 @@ Clamped + Interpolated
 }
 
 #[test]
+fn evaluates_official_bitwise_integer_helpers() {
+    let source = r#"
+BitAnd(12, 10) + BitOr(12, 10) + BitXor(12, 10) + BitNot(-15)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_bitwise_helpers_with_non_int_arguments() {
+    let error = check_source("BitAnd(1.0, 1)").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("argument 1 expected `int`, got `float`")
+    );
+}
+
+#[test]
 fn evaluates_official_float_min_max_nan_semantics() {
     let source = r#"
 MinNaN := if ((Min(NaN, 1.0)).IsFinite[]). 0 else. 20

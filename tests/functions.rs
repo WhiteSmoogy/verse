@@ -614,6 +614,16 @@ fn effect_set_models_call_capability_lattice() {
     let no_rollback = EffectSet::from_names(std::iter::empty::<&str>());
     assert!(no_rollback.has_no_rollback());
     assert_eq!(no_rollback.render_declared(), "<no_rollback>");
+
+    let predicts_transacts = EffectSet::from_names(["predicts", "transacts"]);
+    assert_eq!(
+        predicts_transacts.call_required_effects(),
+        vec![Effect::Transacts]
+    );
+    assert_eq!(
+        predicts_transacts.render_declared(),
+        "<predicts><transacts>"
+    );
 }
 
 #[test]
@@ -669,6 +679,10 @@ fn effect_set_models_function_type_assignability() {
     let expected = EffectSet::from_names(["varies"]);
     let actual = EffectSet::from_names(["transacts"]);
     assert!(expected.assignable_from(&actual));
+
+    let expected = EffectSet::from_names(["predicts", "transacts"]);
+    let actual = EffectSet::from_names(["transacts"]);
+    assert!(expected.assignable_from(&actual));
 }
 
 #[test]
@@ -697,6 +711,121 @@ OnBegin<override>()<suspends>:void = print("begin")
             Some(0),
             vec!["override".to_string(), "suspends".to_string()],
             Some(Vec::new()),
+            Type::None
+        )
+    );
+}
+
+#[test]
+fn checks_official_predicts_effect_specifier() {
+    let source = r#"
+Predict<native><public>(Message:string)<predicts><transacts>:void = external {}
+Use()<transacts>:void = Predict("ready")
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(0),
+            vec!["transacts".to_string()],
+            Some(Vec::new()),
+            Type::None
+        )
+    );
+}
+
+#[test]
+fn checks_native_function_with_native_struct_signature() {
+    let source = r#"
+point<native> := struct:
+    X<native>:int = 0
+
+UsePoint<native><public>(Value:point):point = external {}
+UsePoint
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            vec!["native".to_string(), "public".to_string()],
+            Some(vec![Type::Struct("point".to_string())]),
+            Type::Struct("point".to_string())
+        )
+    );
+}
+
+#[test]
+fn rejects_native_function_with_non_native_struct_parameter() {
+    let error = check_source(
+        r#"
+point := struct:
+    X:int = 0
+
+UsePoint<native><public>(Value:point):void = external {}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "`struct point` used as a parameter/result in a native function must also be native"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_native_function_with_non_native_struct_return() {
+    let error = check_source(
+        r#"
+point := struct:
+    X:int = 0
+
+MakePoint<native><public>():point = external {}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "`struct point` used as a parameter/result in a native function must also be native"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn checks_predicts_function_type_effect_specifier() {
+    let source = r#"
+Predict(Message:string)<predicts><transacts>:void = external {}
+Handler:type{_(:string)<predicts><transacts>:void} = Predict
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            vec!["predicts".to_string(), "transacts".to_string()],
+            Some(vec![Type::String]),
+            Type::None
+        )
+    );
+}
+
+#[test]
+fn checks_predicts_function_type_accepts_non_predicts_function() {
+    let source = r#"
+Predict(Message:string)<transacts>:void = external {}
+Handler:type{_(:string)<predicts><transacts>:void} = Predict
+"#;
+
+    assert_eq!(
+        function_shape(check_source(source).expect("source should check")),
+        (
+            Some(1),
+            vec!["predicts".to_string(), "transacts".to_string()],
+            Some(vec![Type::String]),
             Type::None
         )
     );
@@ -772,6 +901,24 @@ fn rejects_computes_function_calling_native_transacts_function() {
     let error = check_source(
         r#"
 Use()<computes>:float = GetRandomFloat(0.0, 1.0)
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error.to_string().contains(
+            "function with <computes> effect cannot call function requiring <transacts> effect"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_computes_function_calling_predicts_transacts_function() {
+    let error = check_source(
+        r#"
+Predict(Message:string)<predicts><transacts>:void = external {}
+Use()<computes>:void = Predict("ready")
 "#,
     )
     .expect_err("source should fail");
@@ -970,6 +1117,22 @@ Double(X:int)<computes><computes>:int = X * 2
         error
             .to_string()
             .contains("duplicate function effect `<computes>`")
+    );
+}
+
+#[test]
+fn rejects_duplicate_predicts_function_effect_specifier() {
+    let error = check_source(
+        r#"
+Predict(Message:string)<predicts><predicts>:void = external {}
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate function effect `<predicts>`")
     );
 }
 
@@ -1627,6 +1790,29 @@ Const(42, "ignored")
 }
 
 #[test]
+fn evaluates_shared_where_type_parameter_constraint() {
+    let source = r#"
+Combine(Left:t, Right:u where t&u:type):tuple(t, u) =
+    (Left, Right)
+
+Combine(40, "ready")
+"#;
+
+    let value = eval(source);
+    let Value::Array(items) = value else {
+        panic!("expected array-backed tuple result");
+    };
+    assert_eq!(
+        *items.borrow(),
+        vec![Value::Int(40), Value::String("ready".to_string())]
+    );
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Tuple(vec![Type::Int, Type::String])
+    );
+}
+
+#[test]
 fn evaluates_anonymous_parameter_subtype_constraint() {
     let source = r#"
 RequireComparable(:t where t:subtype(comparable)):int =
@@ -1639,6 +1825,84 @@ RequireComparable("key")
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
+    );
+}
+
+#[test]
+fn evaluates_castable_and_concrete_type_parameter_constraints() {
+    let source = r#"
+puzzle_light := class<concrete><castable>(tag){}
+
+UseCastable(TagType:t where t:castable_subtype(tag)):int =
+    20
+
+UseConcrete(TagType:u where u:concrete_subtype(castable_subtype(tag))):int =
+    22
+
+UseCastable(puzzle_light) + UseConcrete(puzzle_light)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_castable_concrete_type_parameter_constraint() {
+    let source = r#"
+puzzle_light := class<concrete><castable>(tag){}
+
+Use(TagType:t where t:castable_concrete_subtype(tag)):int =
+    42
+
+Use(puzzle_light)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_dependent_castable_type_parameter_constraint() {
+    let source = r#"
+base_item := class<castable>{}
+child_item := class<castable>(base_item){}
+
+Use(TagType:t, Instance:k where t:castable_subtype(k), k:type):int =
+    42
+
+Use(child_item, base_item{})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_castable_type_parameter_constraint_mismatch() {
+    let source = r#"
+base_item := class{}
+plain_child := class(base_item){}
+
+Use(TagType:t where t:castable_subtype(base_item)):int =
+    42
+
+Use(plain_child)
+"#;
+
+    let error = check_source(source).expect_err("source should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be a subtype of `castable_subtype(base_item)`")
     );
 }
 
@@ -1808,6 +2072,29 @@ fn rejects_official_castable_subtype_parametric_type_wrong_arity() {
         error
             .to_string()
             .contains("parametric type `castable_subtype` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_castable_concrete_subtype_parametric_type_wrong_arity() {
+    let error = check_source("Value:castable_concrete_subtype() = external {}")
+        .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `castable_concrete_subtype` expected 1 type arguments")
+    );
+}
+
+#[test]
+fn rejects_official_subtype_parametric_type_wrong_arity() {
+    let error = check_source("Value:subtype() = external {}").expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("parametric type `subtype` expected 1 type arguments")
     );
 }
 

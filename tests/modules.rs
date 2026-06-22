@@ -1237,6 +1237,360 @@ Api.Answer
 }
 
 #[test]
+fn checks_declared_package_dependency_digest_import() {
+    let root = temp_project_dir("declared_package_dependency_digest_import");
+    write_project_file(
+        &root,
+        "Shared\\Shared.vproject",
+        r#"
+package = Shared
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Shared\\Api.verse",
+        r#"
+Api<public> := module:
+    Hidden:int = 7
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(&root, "Shared\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Shared
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Game\\main.verse",
+        r#"
+using { Api }
+Answer
+"#,
+    );
+
+    let manifest = root.join("Game\\Game.vproject");
+    let project = SourceProject::from_manifest(&manifest).expect("manifest should load");
+    assert_eq!(project.dependencies, vec!["Shared".to_string()]);
+    assert_eq!(
+        check_project_file(&manifest).expect("project should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn checks_transitive_package_dependency_api_surface() {
+    let root = temp_project_dir("transitive_package_dependency_api_surface");
+    write_project_file(
+        &root,
+        "Base\\Base.vproject",
+        r#"
+package = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Base\\Core.verse",
+        r#"
+Core<public> := module:
+    token<public> := class<concrete>:
+        Value<public>:int = 0
+"#,
+    );
+    write_project_file(&root, "Base\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Shared\\Shared.vproject",
+        r#"
+package = Shared
+dependencyPackages = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Shared\\Api.verse",
+        r#"
+SharedApi<public> := module:
+    Make<public>():Core.token = external {}
+"#,
+    );
+    write_project_file(&root, "Shared\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Shared
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Game\\main.verse",
+        r#"
+using { SharedApi }
+0
+"#,
+    );
+
+    let manifest = root.join("Game\\Game.vproject");
+    assert_eq!(
+        check_project_file(&manifest).expect("project should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_direct_import_from_transitive_package_dependency() {
+    let root = temp_project_dir("direct_import_from_transitive_package_dependency");
+    write_project_file(
+        &root,
+        "Base\\Base.vproject",
+        r#"
+package = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Base\\Core.verse",
+        r#"
+Core<public> := module:
+    token<public> := class<concrete>:
+        Value<public>:int = 0
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(&root, "Base\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Shared\\Shared.vproject",
+        r#"
+package = Shared
+dependencyPackages = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Shared\\SharedApi.verse",
+        r#"
+SharedApi<public> := module:
+    Read<public>():Core.token = external {}
+"#,
+    );
+    write_project_file(&root, "Shared\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Shared
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Game\\main.verse",
+        r#"
+using { Core }
+Answer
+"#,
+    );
+
+    let manifest = root.join("Game\\Game.vproject");
+    let error = check_project_file(&manifest).expect_err("project should fail");
+    assert!(
+        error.to_string().contains(
+            "module `Core` is defined in dependency package `Base`, but package `Game` does not declare a direct dependency on `Base`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn checks_direct_import_after_declaring_transitive_package_dependency() {
+    let root = temp_project_dir("direct_import_after_declaring_transitive_package_dependency");
+    write_project_file(
+        &root,
+        "Base\\Base.vproject",
+        r#"
+package = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Base\\Core.verse",
+        r#"
+Core<public> := module:
+    token<public> := class<concrete>:
+        Value<public>:int = 0
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(&root, "Base\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Shared\\Shared.vproject",
+        r#"
+package = Shared
+dependencyPackages = Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Shared\\SharedApi.verse",
+        r#"
+SharedApi<public> := module:
+    Read<public>():Core.token = external {}
+"#,
+    );
+    write_project_file(&root, "Shared\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Shared, Base
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Game\\main.verse",
+        r#"
+using { Core }
+Answer
+"#,
+    );
+
+    let manifest = root.join("Game\\Game.vproject");
+    assert_eq!(
+        check_project_file(&manifest).expect("project should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn rejects_available_package_import_without_declared_dependency() {
+    let root = temp_project_dir("undeclared_package_dependency_import");
+    write_project_file(
+        &root,
+        "Shared\\Shared.vproject",
+        r#"
+package = Shared
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Shared\\Api.verse",
+        r#"
+Api<public> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(&root, "Shared\\main.verse", "false");
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        r#"
+package = Game
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Game\\main.verse",
+        r#"
+using { Api }
+Answer
+"#,
+    );
+
+    let manifest = root.join("Game\\Game.vproject");
+    let error = check_project_file(&manifest).expect_err("project should fail");
+    assert!(error.to_string().contains("unsupported module path `Api`"));
+}
+
+#[test]
+fn rejects_unknown_declared_package_dependency() {
+    let root = temp_project_dir("unknown_declared_package_dependency");
+    write_project_file(
+        &root,
+        "Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Missing
+entry = main.verse
+"#,
+    );
+    write_project_file(&root, "main.verse", "0");
+
+    let manifest = root.join("Game.vproject");
+    let error = check_project_file(&manifest).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown dependency package `Missing`")
+    );
+}
+
+#[test]
+fn rejects_duplicate_declared_package_dependency() {
+    let root = temp_project_dir("duplicate_declared_package_dependency");
+    write_project_file(
+        &root,
+        "Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Shared, Shared
+entry = main.verse
+"#,
+    );
+
+    let manifest = root.join("Game.vproject");
+    let error = SourceProject::from_manifest(&manifest).expect_err("manifest should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate dependency package `Shared`")
+    );
+}
+
+#[test]
+fn rejects_self_declared_package_dependency() {
+    let root = temp_project_dir("self_declared_package_dependency");
+    write_project_file(
+        &root,
+        "Game.vproject",
+        r#"
+package = Game
+dependencyPackages = Game
+entry = main.verse
+"#,
+    );
+
+    let manifest = root.join("Game.vproject");
+    let error = SourceProject::from_manifest(&manifest).expect_err("manifest should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("package `Game` cannot depend on itself")
+    );
+}
+
+#[test]
 fn evaluates_cross_file_scoped_members_inside_matching_package() {
     let root = temp_project_dir("cross_file_scoped_members_matching_package");
     write_project_file(
@@ -1492,6 +1846,95 @@ Api.Answer
     assert_eq!(
         run_project_file(&entry).expect("project should run"),
         Value::Int(42)
+    );
+}
+
+#[test]
+fn evaluates_cross_file_scoped_member_inside_absolute_module_path_scope() {
+    let root = temp_project_dir("cross_file_scoped_member_absolute_module_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /Demo/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{/Demo/Package/Friend}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Friend<public> := module:
+    Child<public> := module:
+        Read<public>():int = Api.Answer
+
+Friend.Child.Read()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("project should run"),
+        Value::Int(42)
+    );
+}
+
+#[test]
+fn rejects_cross_file_scoped_member_from_unlisted_absolute_module_path_scope() {
+    let root = temp_project_dir("cross_file_scoped_member_unlisted_absolute_module_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /Demo/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<public> := module:
+    Answer<scoped{/Demo/Package/Friend}>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Other<public> := module:
+    Child<public> := module:
+        Read<public>():int = Api.Answer
+
+Other.Child.Read()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("member `Answer` is scoped to `Api`")
     );
 }
 
@@ -2208,6 +2651,45 @@ Answer
 }
 
 #[test]
+fn checks_using_scoped_module_inside_absolute_module_path_scope() {
+    let root = temp_project_dir("using_scoped_module_absolute_module_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /Demo/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{/Demo/Package/Friend}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Friend<public> := module:
+    Child<public> := module:
+        using { Api }
+        Read<public>():int = Answer
+
+Friend.Child.Read()
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    assert_eq!(
+        check_project_file(&entry).expect("project should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_using_scoped_module_from_unlisted_package() {
     let root = temp_project_dir("using_scoped_module_unlisted_package");
     write_project_file(
@@ -2232,6 +2714,54 @@ Api<scoped{DemoPackage}> := module:
         r#"
 using { Api }
 0
+"#,
+    );
+
+    let entry = root.join("main.verse");
+    let error = check_project_file(&entry).expect_err("project should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Api` is scoped to `Api`")
+    );
+
+    let error = run_project_file(&entry).expect_err("project run should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("module `Api` is scoped to `Api`")
+    );
+}
+
+#[test]
+fn rejects_using_scoped_module_from_unlisted_absolute_module_path_scope() {
+    let root = temp_project_dir("using_scoped_module_unlisted_absolute_module_path_scope");
+    write_project_file(
+        &root,
+        "Demo.vproject",
+        r#"
+package = /Demo/Package
+entry = main.verse
+"#,
+    );
+    write_project_file(
+        &root,
+        "Api.verse",
+        r#"
+Api<scoped{/Demo/Package/Friend}> := module:
+    Answer<public>:int = 42
+"#,
+    );
+    write_project_file(
+        &root,
+        "main.verse",
+        r#"
+Other<public> := module:
+    Child<public> := module:
+        using { Api }
+        Read<public>():int = 0
+
+Other.Child.Read()
 "#,
     );
 

@@ -1002,6 +1002,64 @@ point := struct<computes><computes>:
 }
 
 #[test]
+fn checks_official_predicts_native_struct_specifiers() {
+    let source = r#"
+vector3<native><public> := struct<concrete><computes><persistable><uht_comparable><predicts>:
+    @editable
+    @doc("The Left component.")
+    Left<native><public>:float = 0.0
+    @editable
+    @doc("The Up component.")
+    Up<native><public>:float = 0.0
+    @editable
+    @doc("The Forward component.")
+    Forward<native><public>:float = 0.0
+
+vector3{}
+"#;
+
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Struct("vector3".to_string())
+    );
+}
+
+#[test]
+fn rejects_duplicate_struct_predicts_specifier() {
+    let error = parse_source(
+        r#"
+point := struct<predicts><predicts>:
+    X:int = 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate struct specifier `predicts`")
+    );
+}
+
+#[test]
+fn rejects_predicts_struct_field() {
+    let error = check_source(
+        r#"
+point := struct:
+    X<predicts>:int = 0
+"#,
+    )
+    .expect_err("source should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`predicts` field specifier can only be used on class fields"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_computes_struct_field_mutation_through_immutable_class_field() {
     let error = check_source(
         r#"

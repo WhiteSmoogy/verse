@@ -116,6 +116,9 @@ pub enum ExprKind {
         annotation: TypeAnnotation,
         expr: Box<Expr>,
     },
+    TypeLiteral {
+        expr: Box<Expr>,
+    },
     External,
     Loop {
         body: Box<Expr>,
@@ -394,6 +397,7 @@ pub enum TypeName {
     None,
     Any,
     Comparable,
+    Type,
     IntRange {
         min: i64,
         max: i64,
@@ -433,6 +437,7 @@ impl TypeName {
             "void" => Self::None,
             "any" => Self::Any,
             "comparable" => Self::Comparable,
+            "type" => Self::Type,
             "logic" => Self::Bool,
             "array" => Self::Array(None),
             "function" => Self::Function,

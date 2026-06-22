@@ -12,6 +12,14 @@ use super::{
     validate_event_signal_args,
 };
 
+pub(crate) fn bytecode_struct_type_value(name: String, computes: bool) -> Value {
+    Value::StructType {
+        name,
+        computes,
+        fields: Vec::new(),
+    }
+}
+
 pub(crate) fn bytecode_class_type_value(name: String, unique: bool) -> Value {
     Value::ClassType {
         name,
@@ -26,6 +34,15 @@ pub(crate) fn bytecode_class_type_value(name: String, unique: bool) -> Value {
         fields: Vec::new(),
         methods: Vec::new(),
         blocks: Vec::new(),
+    }
+}
+
+pub(crate) fn bytecode_interface_type_value(name: String) -> Value {
+    Value::InterfaceType {
+        name,
+        parents: Vec::new(),
+        fields: Vec::new(),
+        methods: Vec::new(),
     }
 }
 
@@ -107,11 +124,22 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
             let _ = args;
             Value::ClassifiableSubset(Rc::new(RefCell::new(Vec::new())))
         }
+        TypeName::Applied { name, args } if name == "subtype" && args.len() == 1 => {
+            Value::Subtype(args[0].clone())
+        }
         TypeName::Applied { name, args } if name == "castable_subtype" && args.len() == 1 => {
             Value::CastableSubtype(args[0].clone())
         }
         TypeName::Applied { name, args } if name == "concrete_subtype" && args.len() == 1 => {
             Value::ConcreteSubtype(args[0].clone())
+        }
+        TypeName::Applied { name, args }
+            if name == "castable_concrete_subtype" && args.len() == 1 =>
+        {
+            Value::ConcreteSubtype(TypeName::Applied {
+                name: "castable_subtype".to_string(),
+                args: vec![args[0].clone()],
+            })
         }
         _ => Value::External,
     }
@@ -215,6 +243,10 @@ pub(crate) fn bytecode_native_member_value(object: &Value, name: &str) -> Option
         Value::Task(task) => match name {
             "Await" => Some(Value::NativeTaskMethod {
                 name: "Await",
+                task: task.clone(),
+            }),
+            "Cancel" => Some(Value::NativeTaskMethod {
+                name: "Cancel",
                 task: task.clone(),
             }),
             _ => None,

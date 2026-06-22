@@ -13,15 +13,16 @@ use crate::eval::{
     bytecode_class_instance_value, bytecode_class_type_value, bytecode_color_add_values,
     bytecode_color_divide_values, bytecode_color_multiply_or_scale_values,
     bytecode_color_subtract_values, bytecode_event_signal_payload, bytecode_external_value,
-    bytecode_load_field_value, bytecode_modifier_stack_add,
+    bytecode_interface_type_value, bytecode_load_field_value, bytecode_modifier_stack_add,
     bytecode_modifier_stack_ordered_modifiers, bytecode_native_array_method_value,
     bytecode_native_function_value, bytecode_native_member_value, bytecode_new_running_task,
-    rational_or_int, replace_string_byte_failable,
+    bytecode_struct_type_value, rational_or_int, replace_string_byte_failable,
 };
 use crate::ir::bytecode::{
     BytecodeChunk, BytecodeProgram, ClassMethodDescriptor, Constant, Instruction, ObjectKind,
     RegisterIndex, ValueOperand,
 };
+use crate::runtime::host::{Host, MockHost, PendingToken};
 use crate::token::{CharacterKind, Span};
 
 #[derive(Clone)]
@@ -135,11 +136,6 @@ struct VmTaskState<'program> {
     phase: TaskPhase,
     result: Option<Value>,
     yield_pc: Option<usize>,
-    yield_frame: Option<Frame<'program>>,
-    yield_task: Option<usize>,
-    resume_pc: Option<usize>,
-    resume_frame: Option<Frame<'program>>,
-    resume_slot: Option<RegisterIndex>,
     root_frame: Option<Frame<'program>>,
     parent: Option<usize>,
     children: Vec<usize>,
@@ -148,11 +144,10 @@ struct VmTaskState<'program> {
     joins: Vec<usize>,
     native_defers: Vec<VmFunction>,
     native_defer_scopes: Vec<usize>,
-    native_awaits: Vec<VmFunction>,
     task_group: Option<usize>,
-    await_pc: Option<usize>,
     suspension: Option<BytecodeSuspension<'program>>,
     result_placeholder: usize,
+    pending_token: Option<PendingToken>,
 }
 
 impl<'program> VmTaskState<'program> {
@@ -163,11 +158,6 @@ impl<'program> VmTaskState<'program> {
             phase: TaskPhase::Active,
             result: None,
             yield_pc: None,
-            yield_frame: None,
-            yield_task: parent,
-            resume_pc: None,
-            resume_frame: None,
-            resume_slot: None,
             root_frame: None,
             parent,
             children: Vec::new(),
@@ -176,11 +166,10 @@ impl<'program> VmTaskState<'program> {
             joins: Vec::new(),
             native_defers: Vec::new(),
             native_defer_scopes: Vec::new(),
-            native_awaits: Vec::new(),
             task_group: None,
-            await_pc: None,
             suspension: None,
             result_placeholder,
+            pending_token: None,
         }
     }
 
@@ -208,12 +197,21 @@ struct VmJoin {
     completed: bool,
 }
 
+#[derive(Clone)]
+struct VmSubscriptionCallback {
+    id: u64,
+    arity: usize,
+    callback: VmValue,
+}
+
+enum HostWake {
+    Task(usize),
+    Subscribers(Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>),
+}
+
 enum OpResult<'program> {
-    Return,
     Block(VmValue),
     Yield(BytecodeSuspension<'program>),
-    Fail,
-    Error(VerseError),
 }
 
 enum VmRef {
@@ -522,8 +520,9 @@ impl VmTransactionCollector {
     }
 }
 
-pub(crate) struct BytecodeExecutor<'program> {
+pub(crate) struct BytecodeExecutor<'program, H: Host = MockHost> {
     program: &'program BytecodeProgram,
+    host: H,
     globals: RefCell<HashMap<String, Rc<RefCell<VmValue>>>>,
     tasks: HashMap<usize, VmTaskState<'program>>,
     task_groups: Vec<VmTaskGroup>,
@@ -533,13 +532,28 @@ pub(crate) struct BytecodeExecutor<'program> {
     placeholders: HashMap<usize, VmPlaceholder>,
     next_placeholder: usize,
     ready_tasks: VecDeque<(usize, Value)>,
-    delayed_tasks: VecDeque<(usize, Value)>,
+    pending_wakes: HashMap<PendingToken, HostWake>,
+    subscription_callbacks: HashMap<usize, Vec<VmSubscriptionCallback>>,
+    subscription_signal_tokens: HashMap<usize, PendingToken>,
+    next_pending_token: u64,
 }
 
-impl<'program> BytecodeExecutor<'program> {
+impl<'program> BytecodeExecutor<'program, MockHost> {
     pub(crate) fn new(program: &'program BytecodeProgram) -> Self {
+        Self::with_host(program, MockHost::default())
+    }
+
+    #[cfg(test)]
+    fn host_poll_count(&self) -> usize {
+        self.host.poll_count()
+    }
+}
+
+impl<'program, H: Host> BytecodeExecutor<'program, H> {
+    pub(crate) fn with_host(program: &'program BytecodeProgram, host: H) -> Self {
         Self {
             program,
+            host,
             globals: RefCell::new(HashMap::new()),
             tasks: HashMap::new(),
             task_groups: Vec::new(),
@@ -549,11 +563,14 @@ impl<'program> BytecodeExecutor<'program> {
             placeholders: HashMap::new(),
             next_placeholder: 0,
             ready_tasks: VecDeque::new(),
-            delayed_tasks: VecDeque::new(),
+            pending_wakes: HashMap::new(),
+            subscription_callbacks: HashMap::new(),
+            subscription_signal_tokens: HashMap::new(),
+            next_pending_token: 0,
         }
     }
 
-    pub(crate) fn run(mut self) -> Result<Value, VerseError> {
+    pub(crate) fn run(&mut self) -> Result<Value, VerseError> {
         match self.run_chunk(
             self.program.entry(),
             Vec::new(),
@@ -571,6 +588,11 @@ impl<'program> BytecodeExecutor<'program> {
                 Span::new(0, 0, 1, 1),
             )),
         }
+    }
+
+    #[cfg(test)]
+    fn host_now(&self) -> f64 {
+        self.host.now()
     }
 
     fn run_chunk(
@@ -1167,6 +1189,9 @@ impl<'program> BytecodeExecutor<'program> {
                 }
                 Instruction::Return { value, span }
                 | Instruction::ReturnTrailed { value, span } => {
+                    if current_task.is_none() {
+                        self.drive_scheduler_until_idle(span)?;
+                    }
                     return self
                         .get_operand(&frame, value, span)
                         .map(ChunkOutcome::Value);
@@ -1517,11 +1542,8 @@ impl<'program> BytecodeExecutor<'program> {
         result: OpResult<'program>,
     ) -> Result<ChunkOutcome<'program>, VerseError> {
         match result {
-            OpResult::Return => Ok(ChunkOutcome::Failure),
             OpResult::Block(_) => Ok(ChunkOutcome::Failure),
             OpResult::Yield(suspension) => Ok(ChunkOutcome::Suspended(suspension)),
-            OpResult::Fail => Ok(ChunkOutcome::Failure),
-            OpResult::Error(error) => Err(error),
         }
     }
 
@@ -1744,10 +1766,176 @@ impl<'program> BytecodeExecutor<'program> {
     }
 
     fn run_ready_tasks_to_quiescence(&mut self, span: Span) -> Result<(), VerseError> {
-        while let Some((id, value)) = self.ready_tasks.pop_front() {
-            self.run_ready_task(id, value, span)?;
+        self.run_ready_tasks(span)
+    }
+
+    fn poll_host_ready_tasks(&mut self, span: Span) -> Result<bool, VerseError> {
+        let ready = self.host.poll_ready();
+        let mut woke_any = false;
+        for (token, value) in ready {
+            let Some(wake) = self.pending_wakes.remove(&token) else {
+                continue;
+            };
+            match wake {
+                HostWake::Task(id) => {
+                    let Some(task) = self.tasks.get_mut(&id) else {
+                        continue;
+                    };
+                    if task.pending_token == Some(token) {
+                        task.pending_token = None;
+                    }
+                    if task.active() {
+                        self.ready_tasks.push_back((id, value));
+                        woke_any = true;
+                    }
+                }
+                HostWake::Subscribers(subscribers) => {
+                    let key = subscription_key(&subscribers);
+                    self.subscription_signal_tokens.remove(&key);
+                    if self.run_subscription_callbacks(subscribers.clone(), value, span)? {
+                        woke_any = true;
+                    }
+                    if !subscribers.borrow().is_empty() {
+                        self.arm_subscription_signal_future(subscribers);
+                    }
+                }
+            }
         }
-        Ok(())
+        Ok(woke_any)
+    }
+
+    fn next_pending_token(&mut self) -> PendingToken {
+        let token = PendingToken(self.next_pending_token);
+        self.next_pending_token += 1;
+        token
+    }
+
+    fn arm_task_timer(&mut self, id: usize, seconds: f64) {
+        let token = self.next_pending_token();
+        self.pending_wakes.insert(token, HostWake::Task(id));
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.pending_token = Some(token);
+        }
+        self.host.arm_timer(seconds, token);
+    }
+
+    fn arm_task_future(
+        &mut self,
+        id: usize,
+        future: std::pin::Pin<Box<dyn std::future::Future<Output = Value>>>,
+    ) {
+        let token = self.next_pending_token();
+        self.pending_wakes.insert(token, HostWake::Task(id));
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.pending_token = Some(token);
+        }
+        self.host.arm_future(future, token);
+    }
+
+    fn arm_subscription_signal_future(
+        &mut self,
+        subscribers: Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+    ) {
+        let key = subscription_key(&subscribers);
+        if self.subscription_signal_tokens.contains_key(&key) {
+            return;
+        }
+        let token = self.next_pending_token();
+        self.pending_wakes
+            .insert(token, HostWake::Subscribers(subscribers));
+        self.subscription_signal_tokens.insert(key, token);
+        self.host
+            .arm_future(Box::pin(std::future::pending::<Value>()), token);
+    }
+
+    fn register_subscription_callback(
+        &mut self,
+        subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+        id: u64,
+        arity: usize,
+        callback: VmValue,
+    ) {
+        let key = subscription_key(subscribers);
+        self.subscription_callbacks
+            .entry(key)
+            .or_default()
+            .push(VmSubscriptionCallback {
+                id,
+                arity,
+                callback,
+            });
+    }
+
+    fn remove_subscription_callback(
+        &mut self,
+        subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+        subscriber_id: u64,
+    ) {
+        let key = subscription_key(subscribers);
+        if let Some(callbacks) = self.subscription_callbacks.get_mut(&key) {
+            callbacks.retain(|entry| entry.id != subscriber_id);
+        }
+    }
+
+    fn clear_subscription_signal_token(
+        &mut self,
+        subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+    ) {
+        let key = subscription_key(subscribers);
+        if let Some(token) = self.subscription_signal_tokens.remove(&key) {
+            self.pending_wakes.remove(&token);
+        }
+    }
+
+    fn run_subscription_callbacks(
+        &mut self,
+        subscribers: Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>,
+        payload: Value,
+        span: Span,
+    ) -> Result<bool, VerseError> {
+        let key = subscription_key(&subscribers);
+        let Some(callbacks) = self.subscription_callbacks.get(&key).cloned() else {
+            return Ok(false);
+        };
+        let active_ids = subscribers
+            .borrow()
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let mut ran_any = false;
+        for id in active_ids {
+            let Some(callback) = callbacks.iter().find(|entry| entry.id == id).cloned() else {
+                continue;
+            };
+            let args = if callback.arity == 0 {
+                Vec::new()
+            } else {
+                vec![VmValue::Runtime(copy_runtime_value(&payload))]
+            };
+            match self.call(callback.callback, args, Vec::new(), span, None)? {
+                CallOutcome::Value(_) => ran_any = true,
+                CallOutcome::Failure => {
+                    return Err(VerseError::runtime_at("subscription callback failed", span));
+                }
+                CallOutcome::Yield | CallOutcome::Block(_) | CallOutcome::Suspended(_) => {
+                    return Err(VerseError::runtime_at(
+                        "subscription callback suspended during host signal",
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(ran_any)
+    }
+
+    fn clear_task_pending_token(&mut self, id: usize) {
+        if let Some(token) = self
+            .tasks
+            .get_mut(&id)
+            .and_then(|task| task.pending_token.take())
+        {
+            self.pending_wakes.remove(&token);
+        }
     }
 
     fn run_ready_tasks_until_first_completed(
@@ -1819,27 +2007,27 @@ impl<'program> BytecodeExecutor<'program> {
         Ok(())
     }
 
-    fn promote_delayed_tasks(&mut self) {
-        while let Some(task) = self.delayed_tasks.pop_front() {
-            self.ready_tasks.push_back(task);
-        }
-    }
-
     fn drive_scheduler_until_idle(&mut self, span: Span) -> Result<(), VerseError> {
-        while !self.ready_tasks.is_empty() || !self.delayed_tasks.is_empty() {
-            if self.ready_tasks.is_empty() {
-                self.promote_delayed_tasks();
+        loop {
+            self.run_ready_tasks_to_quiescence(span)?;
+            if !self.host.has_pending() {
+                return Ok(());
             }
-            self.run_ready_tasks(span)?;
+            if !self.poll_host_ready_tasks(span)? {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     fn tick_entry_scheduler(&mut self, span: Span) -> Result<(), VerseError> {
-        if self.ready_tasks.is_empty() {
-            self.promote_delayed_tasks();
+        self.run_ready_tasks_tick(span)?;
+        if self.ready_tasks.is_empty()
+            && self.host.has_pending()
+            && self.poll_host_ready_tasks(span)?
+        {
+            self.run_ready_tasks_tick(span)?;
         }
-        self.run_ready_tasks_tick(span)
+        Ok(())
     }
 
     fn create_join(&mut self, kind: VmJoinKind, tasks: &[(usize, Rc<RuntimeTask>)]) -> usize {
@@ -2082,6 +2270,15 @@ impl<'program> BytecodeExecutor<'program> {
     }
 
     fn cancel_bytecode_task(&mut self, id: usize, span: Span) -> Result<(), VerseError> {
+        let Some(task) = self.tasks.get(&id) else {
+            return Ok(());
+        };
+        if !task.active() {
+            return Ok(());
+        }
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.phase = TaskPhase::CancelRequested;
+        }
         self.detach_task_from_parent(id);
         let children = self
             .tasks
@@ -2092,27 +2289,52 @@ impl<'program> BytecodeExecutor<'program> {
             self.cancel_bytecode_task(child, span)?;
         }
         self.ready_tasks.retain(|(queued, _)| *queued != id);
-        self.delayed_tasks.retain(|(queued, _)| *queued != id);
-        let (defers, task_handle) = if let Some(task) = self.tasks.get_mut(&id) {
-            task.phase = TaskPhase::Canceled;
-            task.running = false;
-            task.result = Some(Value::Bool(false));
-            task.suspension = None;
-            task.children.clear();
-            let task_handle = task.handle.clone();
-            task.awaits.clear();
-            task.cancels.clear();
-            if let Some(group) = task.task_group
-                && let Some(group) = self.task_groups.get_mut(group)
-            {
-                group.active_tasks.remove(&id);
-            }
-            (std::mem::take(&mut task.native_defers), Some(task_handle))
-        } else {
-            (Vec::new(), None)
-        };
+        self.clear_task_pending_token(id);
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.phase = TaskPhase::CancelStarted;
+        }
+        let (defers, awaiters, result_placeholder, task_handle) =
+            if let Some(task) = self.tasks.get_mut(&id) {
+                task.phase = TaskPhase::CancelUnwind;
+                task.running = false;
+                task.result = Some(Value::Bool(false));
+                task.suspension = None;
+                task.children.clear();
+                let task_handle = task.handle.clone();
+                let defers = std::mem::take(&mut task.native_defers);
+                let awaiters = std::mem::take(&mut task.awaits);
+                let result_placeholder = task.result_placeholder;
+                task.cancels.clear();
+                if let Some(group) = task.task_group
+                    && let Some(group) = self.task_groups.get_mut(group)
+                {
+                    group.active_tasks.remove(&id);
+                }
+                (
+                    defers,
+                    awaiters,
+                    Some(result_placeholder),
+                    Some(task_handle),
+                )
+            } else {
+                (Vec::new(), Vec::new(), None, None)
+            };
+        if let Some(result_placeholder) = result_placeholder {
+            self.define_placeholder(
+                result_placeholder,
+                VmValue::Runtime(Value::Bool(false)),
+                span,
+            )?;
+        }
         for function in defers.into_iter().rev() {
             self.run_defer_function(function, span, task_handle.clone())?;
+        }
+        self.notify_task_joins(id, span)?;
+        for awaiter in awaiters {
+            self.ready_tasks.push_back((awaiter, Value::Bool(false)));
+        }
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.phase = TaskPhase::Canceled;
         }
         Ok(())
     }
@@ -2251,23 +2473,32 @@ impl<'program> BytecodeExecutor<'program> {
         let Some(current_task) = current_task else {
             return Ok(CallOutcome::Value(VmValue::Runtime(Value::Pending)));
         };
-        let mut registered = false;
+        let mut pending = Vec::new();
         for (_, task) in tasks {
             if self.task_result(task, span)?.is_none() {
-                if let Some(awaited) = self.tasks.get_mut(&task_id(task)) {
-                    let current_id = task_id(&current_task);
-                    if !awaited.awaits.contains(&current_id) {
-                        awaited.awaits.push(current_id);
-                    }
-                }
-                registered = true;
+                pending.push(task_id(task));
             }
         }
-        Ok(if registered {
-            CallOutcome::Yield
-        } else {
-            CallOutcome::Value(VmValue::Runtime(Value::None))
-        })
+        if pending.is_empty() {
+            return Ok(CallOutcome::Value(VmValue::Runtime(Value::None)));
+        }
+        if pending.len() == 1
+            && let Some(placeholder) = self
+                .tasks
+                .get(&pending[0])
+                .map(|task| task.result_placeholder)
+        {
+            return Ok(CallOutcome::Block(placeholder));
+        }
+        let current_id = task_id(&current_task);
+        for id in pending {
+            if let Some(awaited) = self.tasks.get_mut(&id)
+                && !awaited.awaits.contains(&current_id)
+            {
+                awaited.awaits.push(current_id);
+            }
+        }
+        Ok(CallOutcome::Yield)
     }
 
     fn call_structured_concurrency(
@@ -2395,6 +2626,10 @@ impl<'program> BytecodeExecutor<'program> {
                     }
                 }
                 if let Some((_, value)) = winner {
+                    return Ok(CallOutcome::Value(VmValue::Runtime(value)));
+                }
+                self.run_ready_tasks_until_first_completed(&tasks, span)?;
+                if let Some((_, value)) = self.first_completed_task(&tasks, span)? {
                     return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                 }
                 let placeholder = self.create_join(VmJoinKind::Rush, &tasks);
@@ -2937,6 +3172,26 @@ impl<'program> BytecodeExecutor<'program> {
                         self.push_native_defer(function, current_task.clone(), span)?;
                         return Ok(CallOutcome::Value(VmValue::Runtime(Value::None)));
                     }
+                    if name == "GetSimulationElapsedTime" {
+                        if !named_args.is_empty() {
+                            return Err(VerseError::runtime_at(
+                                "`GetSimulationElapsedTime` does not accept named arguments in bytecode VM",
+                                span,
+                            ));
+                        }
+                        if !args.is_empty() {
+                            return Err(VerseError::runtime_at(
+                                format!(
+                                    "`GetSimulationElapsedTime` expected 0 arguments, got {}",
+                                    args.len()
+                                ),
+                                span,
+                            ));
+                        }
+                        return Ok(CallOutcome::Value(VmValue::Runtime(Value::Float(
+                            self.host.now(),
+                        ))));
+                    }
                     if name == "Sleep" {
                         if !named_args.is_empty() {
                             return Err(VerseError::runtime_at(
@@ -2955,14 +3210,12 @@ impl<'program> BytecodeExecutor<'program> {
                         if seconds < 0.0 {
                             return Ok(CallOutcome::Value(VmValue::Runtime(Value::None)));
                         }
-                        if let Some(task) = current_task.clone()
-                            && seconds.is_finite()
-                        {
+                        if let Some(task) = current_task.clone() {
                             let id = task_id(&task);
                             if seconds == 0.0 {
                                 self.ready_tasks.push_back((id, Value::None));
-                            } else {
-                                self.delayed_tasks.push_back((id, Value::None));
+                            } else if seconds.is_finite() {
+                                self.arm_task_timer(id, seconds);
                             }
                         }
                         return Ok(CallOutcome::Yield);
@@ -3021,6 +3274,15 @@ impl<'program> BytecodeExecutor<'program> {
                             waiters.borrow_mut().push(task);
                             return Ok(CallOutcome::Yield);
                         }
+                        if matches!(value, Value::Pending)
+                            && let Some(task) = current_task.clone()
+                        {
+                            self.arm_task_future(
+                                task_id(&task),
+                                Box::pin(std::future::pending::<Value>()),
+                            );
+                            return Ok(CallOutcome::Yield);
+                        }
                         return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                     }
                     if name == "Signal" {
@@ -3074,17 +3336,30 @@ impl<'program> BytecodeExecutor<'program> {
                         Some(VmValue::Runtime(value)) => Some(value.clone()),
                         _ => None,
                     };
-                    return bytecode_call_native_subscribable_method(
+                    let callback_value = args.first().cloned();
+                    let expected_arity = usize::from(payload.is_some());
+                    let value = bytecode_call_native_subscribable_method(
                         name,
                         payload,
-                        subscribers,
+                        subscribers.clone(),
                         next_subscriber_id,
                         callback_accepts_arity,
                         callback,
                         args.len(),
                         span,
-                    )
-                    .map(|value| CallOutcome::Value(VmValue::Runtime(value)));
+                    )?;
+                    if let Value::SubscriptionCancelHandle { subscriber_id, .. } = &value
+                        && let Some(callback) = callback_value
+                    {
+                        self.register_subscription_callback(
+                            &subscribers,
+                            *subscriber_id,
+                            expected_arity,
+                            callback,
+                        );
+                        self.arm_subscription_signal_future(subscribers);
+                    }
+                    return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                 }
                 if let Value::NativeSubscriptionCancelMethod {
                     name,
@@ -3098,14 +3373,18 @@ impl<'program> BytecodeExecutor<'program> {
                             span,
                         ));
                     }
-                    return bytecode_call_native_subscription_cancel_method(
+                    let value = bytecode_call_native_subscription_cancel_method(
                         name,
-                        subscribers,
+                        subscribers.clone(),
                         subscriber_id,
                         args.len(),
                         span,
-                    )
-                    .map(|value| CallOutcome::Value(VmValue::Runtime(value)));
+                    )?;
+                    self.remove_subscription_callback(&subscribers, subscriber_id);
+                    if subscribers.borrow().is_empty() {
+                        self.clear_subscription_signal_token(&subscribers);
+                    }
+                    return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                 }
                 if let Value::NativeTaskMethod { name, task } = value {
                     if !named_args.is_empty() {
@@ -3114,34 +3393,36 @@ impl<'program> BytecodeExecutor<'program> {
                             span,
                         ));
                     }
-                    if name != "Await" {
-                        return Err(VerseError::runtime_at(
-                            format!("unknown task method `{name}`"),
-                            span,
-                        ));
-                    }
-                    if !args.is_empty() {
-                        return Err(VerseError::runtime_at(
-                            format!("`Await` expected 0 arguments, got {}", args.len()),
-                            span,
-                        ));
-                    }
-                    if let Some(value) = self.task_result(&task, span)? {
-                        return Ok(CallOutcome::Value(VmValue::Runtime(value)));
-                    }
-                    if let Some(current_task) = current_task.clone() {
-                        self.promote_delayed_tasks();
-                        self.run_ready_tasks(span)?;
-                        if let Some(value) = self.task_result(&task, span)? {
-                            return Ok(CallOutcome::Value(VmValue::Runtime(value)));
+                    match name {
+                        "Await" => {
+                            if !args.is_empty() {
+                                return Err(VerseError::runtime_at(
+                                    format!("`Await` expected 0 arguments, got {}", args.len()),
+                                    span,
+                                ));
+                            }
+                            if let Some(value) = self.task_result(&task, span)? {
+                                return Ok(CallOutcome::Value(VmValue::Runtime(value)));
+                            }
+                            return self.wait_for_pending_tasks(&[(0, task)], current_task, span);
                         }
-                        if let Some(awaited) = self.tasks.get(&task_id(&task)) {
-                            return Ok(CallOutcome::Block(awaited.result_placeholder));
+                        "Cancel" => {
+                            if !args.is_empty() {
+                                return Err(VerseError::runtime_at(
+                                    format!("`Cancel` expected 0 arguments, got {}", args.len()),
+                                    span,
+                                ));
+                            }
+                            self.cancel_bytecode_task(task_id(&task), span)?;
+                            return Ok(CallOutcome::Value(VmValue::Runtime(Value::None)));
                         }
-                        let _ = current_task;
-                        return Ok(CallOutcome::Yield);
+                        _ => {
+                            return Err(VerseError::runtime_at(
+                                format!("unknown task method `{name}`"),
+                                span,
+                            ));
+                        }
                     }
-                    return Ok(CallOutcome::Value(VmValue::Runtime(Value::Pending)));
                 }
                 if let Value::NativeCancelMethod {
                     name,
@@ -3613,6 +3894,18 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
         TypeName::Char32 => matches!(value, Value::Char32(_)),
         TypeName::None => matches!(value, Value::None),
         TypeName::Any | TypeName::Comparable => true,
+        TypeName::Type => matches!(
+            value,
+            Value::StructType { .. }
+                | Value::ClassType { .. }
+                | Value::InterfaceType { .. }
+                | Value::ParametricType { .. }
+                | Value::Subtype(_)
+                | Value::CastableSubtype(_)
+                | Value::ConcreteSubtype(_)
+                | Value::Type(_)
+                | Value::External
+        ),
         TypeName::Named(name) => matches!(
             value,
             Value::ClassInstance { class_name, .. } if class_name == name
@@ -3808,6 +4101,7 @@ fn value_from_constant(constant: &Constant) -> VmValue {
         Constant::Bool(value) => VmValue::Runtime(Value::Bool(*value)),
         Constant::String(value) => VmValue::Runtime(Value::String(value.clone())),
         Constant::None => VmValue::Runtime(Value::None),
+        Constant::Type(type_name) => VmValue::Runtime(Value::Type(type_name.clone())),
         Constant::Option(value) => VmValue::Runtime(Value::Option(value.as_ref().map(|value| {
             Box::new(
                 into_runtime(value_from_constant(value), Span::new(0, 0, 1, 1))
@@ -3836,8 +4130,14 @@ fn value_from_constant(constant: &Constant) -> VmValue {
         Constant::NativeFunction(name) => VmValue::Runtime(
             bytecode_native_function_value(name).expect("known native function constant"),
         ),
+        Constant::StructType { name, computes } => {
+            VmValue::Runtime(bytecode_struct_type_value(name.clone(), *computes))
+        }
         Constant::ClassType { name, unique } => {
             VmValue::Runtime(bytecode_class_type_value(name.clone(), *unique))
+        }
+        Constant::InterfaceType { name } => {
+            VmValue::Runtime(bytecode_interface_type_value(name.clone()))
         }
         Constant::External(type_name) => VmValue::Runtime(bytecode_external_value(type_name)),
         Constant::GlobalRef(name) => {
@@ -3848,6 +4148,10 @@ fn value_from_constant(constant: &Constant) -> VmValue {
 
 fn task_id(task: &Rc<RuntimeTask>) -> usize {
     Rc::as_ptr(task) as usize
+}
+
+fn subscription_key(subscribers: &Rc<RefCell<Vec<RuntimeSubscriptionEntry>>>) -> usize {
+    Rc::as_ptr(subscribers) as usize
 }
 
 fn sleep_seconds(value: Value, span: Span) -> Result<f64, VerseError> {
@@ -4202,8 +4506,10 @@ fn copy_runtime_value(value: &Value) -> Value {
         | Value::Modifier { .. }
         | Value::ModifierStack { .. }
         | Value::ModifierCancelHandle { .. }
+        | Value::Subtype(_)
         | Value::CastableSubtype(_)
         | Value::ConcreteSubtype(_)
+        | Value::Type(_)
         | Value::NativeFunction { .. }
         | Value::NativeArrayMethod { .. }
         | Value::NativeResultMethod { .. }
@@ -4564,16 +4870,102 @@ fn checked_mul(left: i64, right: i64) -> Option<i64> {
     left.checked_mul(right)
 }
 
-fn checked_div(left: i64, right: i64) -> Option<i64> {
-    left.checked_div(right)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn span() -> Span {
         Span::new(0, 0, 1, 1)
+    }
+
+    #[test]
+    fn task_await_does_not_drain_unrelated_host_timers() {
+        let source = r#"
+var Trace:int = 0
+var Result:int = 0
+A()<suspends><transacts>:int =
+    Sleep(1.0)
+    set Trace = Trace * 10 + 1
+    1
+B()<suspends><transacts>:int =
+    Sleep(2.0)
+    set Trace = Trace * 10 + 2
+    2
+Run()<suspends><transacts>:void =
+    TaskA := spawn{A()}
+    TaskB := spawn{B()}
+    TaskA.Await()
+    set Result = Trace
+    set Result = Result + (TaskB.Await() * 0)
+spawn{Run()}
+Result
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let mut executor = BytecodeExecutor::new(ir.bytecode_program());
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(1));
+        assert_eq!(executor.host_now(), 2.0);
+    }
+
+    #[test]
+    fn host_future_resumes_external_awaitable_with_payload() {
+        let source = r#"
+var Result:int = 0
+Source:awaitable(int) = external {}
+Run()<suspends><transacts>:void =
+    set Result = Source.Await()
+spawn{Run()}
+Result
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let host = MockHost::with_scripted_future_completion(1, Value::Int(42));
+        let mut executor = BytecodeExecutor::with_host(ir.bytecode_program(), host);
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn pending_host_future_stops_without_busy_polling() {
+        let source = r#"
+var Result:int = 0
+Source:awaitable(int) = external {}
+Run()<suspends><transacts>:void =
+    set Result = Source.Await()
+spawn{Run()}
+Result
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let mut executor = BytecodeExecutor::new(ir.bytecode_program());
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(0));
+        assert!(executor.host_poll_count() <= 2);
+    }
+
+    #[test]
+    fn host_signal_invokes_listenable_subscribers_fifo() {
+        let source = r#"
+var Trace:int = 0
+First(Value:int)<transacts>:void =
+    set Trace = Trace * 10 + Value
+Second(Value:int)<transacts>:void =
+    set Trace = Trace * 10 + Value + 1
+Source:listenable(int) = external {}
+Run()<suspends><transacts>:void =
+    Source.Subscribe(First)
+    Source.Subscribe(Second)
+    Sleep(0.0)
+spawn{Run()}
+Trace
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let host = MockHost::with_scripted_future_completion(1, Value::Int(4));
+        let mut executor = BytecodeExecutor::with_host(ir.bytecode_program(), host);
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(45));
     }
 
     #[test]
