@@ -1220,6 +1220,30 @@ Value
 }
 
 #[test]
+fn evaluates_public_module_type_function_with_local_constraint_supplier() {
+    let source = r#"
+DataTypes<public> := module:
+    base<public> := class:
+        Value<public>:int = 1
+
+    child<public> := class(base):
+        ChildValue:int = 2
+
+    SubtypeOfBase<public>():type = subtype(base)
+    Pick<public>(Kind:SubtypeOfBase()):type = Kind
+
+Value:DataTypes.Pick(DataTypes.child) = DataTypes.child{}
+Value.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(1));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_internal_module_type_function_as_type_annotation() {
     let source = r#"
 DataTypes<public> := module:

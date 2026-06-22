@@ -1628,6 +1628,119 @@ array{40, 2}.Second()
 }
 
 #[test]
+fn evaluates_type_function_call_in_parametric_class_surface() {
+    let source = r#"
+ListOf(Kind:type):type = []Kind
+
+box(t:type) := class:
+    Values:t
+
+child_box(t:type) := class(box(ListOf(t))):
+    Label:int = 1
+
+Box:child_box(int) = child_box(int){Values := array{40, 2}}
+if (Value := Box.Values[1]). Value else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(2));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_call_in_parametric_interface_surface() {
+    let source = r#"
+ListOf(Kind:type):type = []Kind
+
+reader(t:type) := interface:
+    Read():t
+
+array_reader(t:type) := interface(reader(ListOf(t))):
+    Marker():int = 1
+
+int_reader := class(array_reader(int)):
+    Values:[]int = array{40, 2}
+    Read<override>():[]int = Values
+
+Use(Reader:reader(ListOf(int))):int =
+    Values := Reader.Read()
+    if (Value := Values[1]). Value else. 0
+
+Use(int_reader{})
+"#;
+
+    assert_eq!(eval(source), Value::Int(2));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_call_in_official_parametric_surface() {
+    let source = r#"
+Payload():type = int
+
+Use(Event:event(Payload())):int = 42
+
+Use(event(int){})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_parametric_class_result_type_value_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    Read():t = Value
+
+BoxOf(Kind:type):type = box(Kind)
+Pick(Kind:type, Item:Kind):Kind = Item
+
+Picked := Pick(BoxOf(int), box(int){Value := 42})
+Picked.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_parametric_interface_result_type_value_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+ReaderOf(Kind:type):type = reader(Kind)
+Pick(Kind:type, Item:Kind):Kind = Item
+
+Picked := Pick(ReaderOf(int), box(int){Value := 42})
+Picked.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_type_literal_primitive_result_annotation() {
     let source = r#"
 Pick():type = type{1}

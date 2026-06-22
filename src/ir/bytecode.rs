@@ -3261,6 +3261,9 @@ impl<'semantic> Lowerer<'semantic> {
         expr: &Expr,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
+        if let Some(value) = self.lower_aggregate_type_value(expr, state) {
+            return Ok(value);
+        }
         if let Some((name, params)) = self.lower_parametric_type_value(expr) {
             return Ok(state.constant(Constant::ParametricType { name, params }));
         }
@@ -3514,6 +3517,57 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
+    fn lower_aggregate_type_value(
+        &self,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Option<ValueOperand> {
+        match self.facts.expression_type(expr.span)? {
+            Type::StructType(name) => Some(
+                state.constant(
+                    self.resolve_class_layout(name, state)
+                        .map(|layout| match layout.object_kind {
+                            ObjectKind::Struct { computes } => Constant::StructType {
+                                name: layout.runtime_name.clone(),
+                                computes,
+                            },
+                            ObjectKind::Class => layout.class_type_constant(),
+                        })
+                        .unwrap_or_else(|| Constant::StructType {
+                            name: name.clone(),
+                            computes: false,
+                        }),
+                ),
+            ),
+            Type::ClassType(name) => Some(
+                state.constant(
+                    self.resolve_class_layout(name, state)
+                        .map(ClassLayout::class_type_constant)
+                        .unwrap_or_else(|| Constant::ClassType {
+                            name: name.clone(),
+                            base: None,
+                            interfaces: Vec::new(),
+                            unique: false,
+                            abstract_class: false,
+                            epic_internal_class: false,
+                            final_class: false,
+                            final_super: false,
+                            concrete: false,
+                            castable: false,
+                        }),
+                ),
+            ),
+            Type::InterfaceType(name) => Some(
+                state.constant(Constant::InterfaceType {
+                    name: self
+                        .resolve_interface_layout(name)
+                        .map_or_else(|| name.clone(), |layout| layout.runtime_name.clone()),
+                }),
+            ),
+            _ => None,
+        }
+    }
+
     fn lower_alias_type_value(&self, expr: &Expr, state: &ChunkState) -> Option<TypeName> {
         let Type::TypeValueOf(item) = self.facts.expression_type(expr.span)? else {
             return None;
@@ -3549,8 +3603,18 @@ impl<'semantic> Lowerer<'semantic> {
                 }
             }
             ExprKind::Call { callee, .. } => {
-                if !self.facts.is_static_type_function_call(expr.span) {
-                    let name = callable_lookup_name(callee)?;
+                let callee_name = callable_lookup_name(callee);
+                let callee_is_parametric_type = self
+                    .facts
+                    .expression_type(callee.span)
+                    .is_some_and(|value_type| matches!(value_type, Type::ParametricType { .. }))
+                    || callee_name.as_ref().is_some_and(|name| {
+                        self.class_layouts.contains_key(name)
+                            || self.interface_layouts.contains_key(name)
+                    });
+                if !self.facts.is_static_type_function_call(expr.span) && !callee_is_parametric_type
+                {
+                    let name = callee_name?;
                     if self.runtime_identifier_exists(&name, state) {
                         return None;
                     }

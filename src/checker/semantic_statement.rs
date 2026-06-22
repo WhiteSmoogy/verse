@@ -1103,7 +1103,6 @@ impl Checker {
         let result = (|| {
             self.predeclare_using_imports(statements)?;
             self.predeclare_aggregate_values_in_current_scope(statements)?;
-            self.predeclare_type_functions_in_current_scope(statements)?;
             self.predeclare_extension_methods_in_current_scope(statements)?;
             self.predeclare_functions_in_current_scope(statements)?;
             self.validate_public_module_surface_access(statements)?;

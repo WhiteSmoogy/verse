@@ -1782,7 +1782,30 @@ impl Checker {
         &mut self,
         program: &Program,
     ) -> Result<(), VerseError> {
-        self.predeclare_type_functions_in_current_scope(&program.statements)
+        self.predeclare_type_functions_recursive(&program.statements)
+    }
+
+    fn predeclare_type_functions_recursive(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<(), VerseError> {
+        self.predeclare_type_functions_in_current_scope(statements)?;
+        for statement in statements {
+            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                continue;
+            };
+            let ExprKind::ModuleDefinition {
+                statements: module_statements,
+                ..
+            } = &expr.kind
+            else {
+                continue;
+            };
+            self.module_path.push(name.clone());
+            self.predeclare_type_functions_recursive(module_statements)?;
+            self.module_path.pop();
+        }
+        Ok(())
     }
 
     pub(super) fn predeclare_type_functions_in_current_scope(
