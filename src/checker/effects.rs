@@ -91,7 +91,7 @@ impl EffectSet {
     }
 
     pub fn contains(&self, effect: Effect) -> bool {
-        self.effects.iter().any(|existing| *existing == effect)
+        self.effects.contains(&effect)
     }
 
     pub fn has_explicit_call_effect(&self) -> bool {
@@ -312,7 +312,7 @@ pub(super) fn function_effects_are_assignable(expected: &[String], actual: &[Str
 }
 
 fn push_effect(effects: &mut Vec<Effect>, effect: Effect) {
-    if !effects.iter().any(|existing| *existing == effect) {
+    if !effects.contains(&effect) {
         effects.push(effect);
     }
 }
@@ -329,7 +329,7 @@ pub(super) fn validate_function_effect_combination(
         if !effect.is_declared_function_effect() {
             continue;
         }
-        if seen.iter().any(|seen_effect| *seen_effect == effect) {
+        if seen.contains(&effect) {
             return Err(VerseError::check_at(
                 format!("duplicate function effect `<{}>`", effect.name()),
                 span,

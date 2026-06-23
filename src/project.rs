@@ -39,6 +39,13 @@ pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
     run_source_in_package(&source, project.package.as_deref())
 }
 
+#[cfg(feature = "tokio-host")]
+pub fn run_project_file_with_tokio_host(path: impl AsRef<Path>) -> Result<Value, VerseError> {
+    let project = SourceProject::from_path(path.as_ref())?;
+    let source = project.load_source()?;
+    crate::pipeline::run_source_with_tokio_host_in_package(&source, project.package.as_deref())
+}
+
 #[derive(Debug, Clone)]
 pub struct SourceProject {
     pub root: PathBuf,
@@ -596,9 +603,13 @@ fn strip_package_prefix(path: &str, package: Option<&str>) -> String {
 fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> {
     let mut dir = entry
         .parent()
+        .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     loop {
+        if dir.as_os_str().is_empty() {
+            return Ok(None);
+        }
         let manifests = read_dir_entries(&dir)?
             .into_iter()
             .filter(|path| {
@@ -617,7 +628,7 @@ fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> 
         if let Some(manifest) = manifests.into_iter().next() {
             return Ok(Some(manifest));
         }
-        if !dir.pop() {
+        if !dir.pop() || dir.as_os_str().is_empty() {
             return Ok(None);
         }
     }

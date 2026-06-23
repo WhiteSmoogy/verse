@@ -57,5 +57,5 @@ set Head.Next = option{Tail}
 print(Hero.Label())
 print(Champion.RankedLabel())
 print(Champion.ParentLabel())
-print("unique=" + str(if (FirstToken <> SecondToken). TokenScores[FirstToken] + TokenScores[SecondToken] else. 0))
+print("unique=" + str(if (First := TokenScores[FirstToken], Second := TokenScores[SecondToken], FirstToken <> SecondToken). First + Second else. 0))
 print("override=" + str(Head.Data + if (Next := Head.Next?). Next.Data else. 0))

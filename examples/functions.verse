@@ -33,19 +33,19 @@ print("offset=" + str(Offset(10) + Offset(10, ?Amount := 5)))
 print("apply=" + str(Apply(Double, 21)))
 print("public=" + str(PublicDouble(21)))
 print("effect=" + str(PureDouble(21)))
-print("pick=" + str(Pick[42]))
+print("pick=" + str(if (Value := Pick[42]). Value else. 0))
 print("pick-fail=" + str(if (Value := PickIndex[1]). Value else. 0))
 set Handler = option{FortyTwo}
-print("handler=" + str(Handler?()))
+print("handler=" + str(if (Function := Handler?). Function() else. 0))
 print("adder=" + str(MakeAdder(40)(2)))
 BlockValue:int = block:
     Base:int = 40
     Base + 2
 print("block=" + str(BlockValue))
-Remainder:int = Mod[-1, 3]
-Quot:int = Quotient[10, -3]
+Remainder:int = if (Value := Mod[-1, 3]). Value else. 0
+Quot:int = if (Value := Quotient[10, -3]). Value else. 0
 print("math=" + str(Remainder) + ":" + str(Quot) + ":" + str(Clamp(12, 10, 0)) + ":" + str(Lerp(10, 20, 0.25)))
-print("rounding=" + str(Abs(-5) + Min(10, 3) + Max(7, 9) + Ceil[1.2] + Floor[1.8] + Round[2.5] + Int[-3.7]))
-print("float-math=" + str(Round[Sqrt(81)] + Round[Pow(2, 5)] + Round[Log(2, 8)] + Sgn(-3)))
+print("rounding=" + str(if (CeilValue := Ceil[1.2], FloorValue := Floor[1.8], RoundValue := Round[2.5], IntValue := Int[-3.7]). Abs(-5) + Min(10, 3) + Max(7, 9) + CeilValue + FloorValue + RoundValue + IntValue else. 0))
+print("float-math=" + str(if (SqrtValue := Sqrt(81), PowValue := Pow(2, 5), LogValue := Log(2, 8), RoundedSqrt := Round[SqrtValue], RoundedPow := Round[PowValue], RoundedLog := Round[LogValue]). RoundedSqrt + RoundedPow + RoundedLog + Sgn(-3) else. 0))
 print("finite=" + str(if (Value := Inf.IsFinite[]). Value else. 42))
 print("almost=" + str(if (IsAlmostEqual[1.0, 1.01, 0.02]). 42 else. 0))

@@ -41,6 +41,10 @@ pub use pipeline::{
     analyze_source, analyze_source_in_package, analyze_vst, compile_source,
     compile_source_in_package, desugar_vst, parse_vst_source, run_source_in_package,
 };
+#[cfg(feature = "tokio-host")]
+pub use pipeline::{run_source_with_tokio_host, run_source_with_tokio_host_in_package};
+#[cfg(feature = "tokio-host")]
+pub use project::run_project_file_with_tokio_host;
 pub use project::{SourceProject, check_project_file, load_project_source, run_project_file};
 pub use runtime::{Value, VerseVm};
 pub use semantic_analyzer::SemanticAnalyzer;

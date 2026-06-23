@@ -1,13 +1,41 @@
 use std::env;
 use std::io::{self, Write};
 use std::process;
+use std::thread;
 
-use verse_rs::{Value, load_project_source, parse_source, run_source};
+use verse_rs::{Value, check_project_file, load_project_source, parse_source};
+#[cfg(not(feature = "tokio-host"))]
+use verse_rs::{run_project_file as run_project_file_for_cli, run_source as run_source_for_cli};
+#[cfg(feature = "tokio-host")]
+use verse_rs::{
+    run_project_file_with_tokio_host as run_project_file_for_cli,
+    run_source_with_tokio_host as run_source_for_cli,
+};
 
 fn main() {
-    if let Err(message) = run_cli() {
+    let result = thread::Builder::new()
+        .name("verse-cli".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_cli)
+        .map_err(|err| format!("failed to start CLI thread: {err}"))
+        .and_then(|handle| match handle.join() {
+            Ok(result) => result,
+            Err(payload) => Err(panic_message(payload)),
+        });
+
+    if let Err(message) = result {
         eprintln!("{message}");
         process::exit(1);
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        format!("internal error: {message}")
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        format!("internal error: {message}")
+    } else {
+        "internal error: CLI thread panicked".to_string()
     }
 }
 
@@ -51,11 +79,11 @@ fn run_file(file: &str, mode: Mode) -> Result<(), String> {
             Ok(())
         }
         Mode::Check => {
-            let value_type = verse_rs::check_source(&source).map_err(|err| err.pretty(&source))?;
+            let value_type = check_project_file(file).map_err(|err| err.pretty(&source))?;
             println!("check ok: {value_type}");
             Ok(())
         }
-        Mode::Run => run_source(&source)
+        Mode::Run => run_project_file_for_cli(file)
             .map(|_| ())
             .map_err(|err| err.pretty(&source)),
     }
@@ -92,7 +120,7 @@ fn repl() -> Result<(), String> {
             _ => {}
         }
 
-        match run_source(input) {
+        match run_source_for_cli(input) {
             Ok(value) if value != Value::None => println!("{value}"),
             Ok(_) => {}
             Err(err) => eprintln!("{}", err.pretty(input)),

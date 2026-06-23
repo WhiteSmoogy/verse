@@ -59,3 +59,17 @@ pub fn run_source_in_package(
     let ir = compile_source_in_package(source, package_name)?;
     VerseVm::new().run_ir_program(&ir)
 }
+
+#[cfg(feature = "tokio-host")]
+pub fn run_source_with_tokio_host(source: &str) -> Result<Value, VerseError> {
+    run_source_with_tokio_host_in_package(source, None)
+}
+
+#[cfg(feature = "tokio-host")]
+pub fn run_source_with_tokio_host_in_package(
+    source: &str,
+    package_name: Option<&str>,
+) -> Result<Value, VerseError> {
+    let ir = compile_source_in_package(source, package_name)?;
+    VerseVm::new().run_ir_program_with_tokio_host(&ir)
+}

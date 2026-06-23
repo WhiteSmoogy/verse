@@ -1425,7 +1425,7 @@ fn access_level_from_specifiers(
     let Some(first) = access_specifiers.next() else {
         return Ok(AccessLevel::Internal);
     };
-    for access in access_specifiers {
+    if let Some(access) = access_specifiers.next() {
         if access == first {
             return Err(VerseError::check_at(
                 "Duplicate access levels: [access levels]. Only one access level may be used or omit for default access.",

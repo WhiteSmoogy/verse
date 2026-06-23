@@ -3627,7 +3627,7 @@ impl Parser {
                 return Err(self.error_at_current("expected comparison after `where`"));
             }
 
-            let (op, bound, bound_span) = self.consume_int_where_clause(&variable)?;
+            let (op, bound, bound_span) = self.consume_int_where_clause(variable)?;
             Self::update_int_where_bounds(&mut min, &mut max, op, bound, bound_span)?;
 
             self.skip_separators();
@@ -3662,7 +3662,7 @@ impl Parser {
                 return Err(self.error_at_current("expected comparison after `where`"));
             }
 
-            let (op, bound, bound_span) = self.consume_float_where_clause(&variable)?;
+            let (op, bound, bound_span) = self.consume_float_where_clause(variable)?;
             Self::update_float_where_bounds(&mut min, &mut max, op, bound, bound_span)?;
 
             self.skip_separators();

@@ -13,10 +13,10 @@ loop {
 }
 
 var xs:[]int = array{total, total + 1, total + 2}
-set xs[0] *= 2
-set xs[0] = Quotient[xs[0], 2]
-set xs[0] -= 0
-set xs[1] = 99
+Update0 := if (set xs[0] *= 2). 0 else. 0
+Update1 := if (set xs[0] = Quotient[xs[0], 2]). 0 else. 0
+Update2 := if (set xs[0] -= 0). 0 else. 0
+Update3 := if (set xs[1] = 99). 0 else. 0
 labels := for (Letter : "ab") {
     Letter
 }
@@ -33,8 +33,8 @@ do:
 
 print(xs)
 print("len=" + str(xs.Length))
-print("labels=" + ToString(labels[0]) + ToString(labels[1]) + str(labels.Length))
-print("doubled=" + str(doubled[0] + doubled[1] + doubled[2]))
-print("dotted=" + str(dotted[0] + dotted[1] + dotted[2]))
-print("filtered=" + str(filtered.Length + filtered[2]))
-print("blocked=" + str(blocked[0] + blocked[1] + blocked[2]))
+print("labels=" + (if (A := labels[0]). ToString(A) else. "") + (if (B := labels[1]). ToString(B) else. "") + str(labels.Length))
+print("doubled=" + str(if (A := doubled[0], B := doubled[1], C := doubled[2]). A + B + C else. 0))
+print("dotted=" + str(if (A := dotted[0], B := dotted[1], C := dotted[2]). A + B + C else. 0))
+print("filtered=" + str(filtered.Length + if (Value := filtered[2]). Value else. 0))
+print("blocked=" + str(if (A := blocked[0], B := blocked[1], C := blocked[2]). A + B + C else. 0))

@@ -1382,7 +1382,7 @@ impl Checker {
             self.function_effects.push(effects.to_vec());
             let body_type = (|| {
                 for (param, param_type) in params.iter().zip(&body_param_types) {
-                    self.define_param_pattern(param, &param_type)?;
+                    self.define_param_pattern(param, param_type)?;
                 }
 
                 if let Some(static_type_body_type) = &static_type_body_type {
@@ -1718,11 +1718,11 @@ impl Checker {
                 }
             }
 
-            if require_rollback {
-                if let Err(error) = ensure_callable_in_failure_context(effects, span) {
-                    saw_rollback_mismatch.get_or_insert(error);
-                    continue;
-                }
+            if require_rollback
+                && let Err(error) = ensure_callable_in_failure_context(effects, span)
+            {
+                saw_rollback_mismatch.get_or_insert(error);
+                continue;
             }
 
             if let Err(error) = self.ensure_current_function_allows_call_effects(effects, span) {
@@ -6314,12 +6314,11 @@ impl Checker {
         let methods = methods.clone();
         let mut candidates = Vec::new();
         for method in methods.iter() {
-            if self.extension_method_is_visible(method, name, span)? {
-                if let Some(method_type) =
+            if self.extension_method_is_visible(method, name, span)?
+                && let Some(method_type) =
                     self.extension_method_type_for_receiver(method, object_type, span)?
-                {
-                    candidates.push(method_type);
-                }
+            {
+                candidates.push(method_type);
             }
         }
 
@@ -6350,12 +6349,11 @@ impl Checker {
             .iter()
             .filter(|method| extension_method_has_qualifier(method, qualifier))
         {
-            if self.extension_method_is_visible(method, name, span)? {
-                if let Some(method_type) =
+            if self.extension_method_is_visible(method, name, span)?
+                && let Some(method_type) =
                     self.extension_method_type_for_receiver(method, object_type, span)?
-                {
-                    candidates.push(method_type);
-                }
+            {
+                candidates.push(method_type);
             }
         }
 

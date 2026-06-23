@@ -19,7 +19,7 @@ StateID:[state]int = map{
     state.Paused => 2,
 }
 
-IsPlaying(Value:state):logic = Value = state.Playing
+IsPlaying(Value:state):logic = if (Value = state.Playing). true else. false
 StateName(Value:state):string =
     case (Value):
         state.Menu => "menu"
@@ -31,6 +31,6 @@ StateName(Value:state):string =
 print("current=" + str(Current))
 print("is-playing=" + str(IsPlaying(Current)))
 print("state-name=" + StateName(Current))
-print("paused-id=" + str(StateID[state.Paused]))
+print("paused-id=" + str(if (ID := StateID[state.Paused]). ID else. -1))
 print("weapon=" + str(weapon.Sword))
-print("keyword=" + str(if (keyword_enum.for = keyword_enum.for) { 1 } else { 0 }))
+print("keyword=" + str(if (keyword_enum.for = keyword_enum.for). 1 else. 0))

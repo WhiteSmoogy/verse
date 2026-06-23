@@ -18,8 +18,8 @@ Blocked:?logic = option{false?}
 
 set Bob = option{7}
 
-print("alice=" + str(Alice?))
-print("bob=" + str(Bob?))
+print("alice=" + str(if (Score := Alice?). Score else. 0))
+print("bob=" + str(if (Score := Bob?). Score else. 0))
 print("missing=" + str(if (Missing := FindScore("bob")?). Missing else. 0))
 print("profile=" + if (Name := MaybeProfile?.Name). Name else. "none")
 print("none=" + if (Name := NoProfile?.Name). Name else. "none")

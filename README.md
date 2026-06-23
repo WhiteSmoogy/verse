@@ -4,7 +4,7 @@ A small Rust bytecode VM for a Verse-aligned language subset.
 
 This is not a full implementation of Epic Games Verse yet. It is a practical
 compiler and VM foundation: lexer, parser, AST, semantic checks, bytecode IR,
-VM runtime, CLI, REPL, tests,
+VM runtime, Tokio-backed CLI/REPL, tests,
 and examples. New language work should track documented Verse syntax instead of
 adding project-specific syntax.
 
@@ -86,6 +86,11 @@ cargo run -- ast examples/factorial.verse
 cargo run
 ```
 
+The default build enables the `tokio-host` feature, so the CLI and REPL run
+through the Tokio-backed host. Library users can choose `run_source(...)` for
+the deterministic in-process mock host or `run_source_with_tokio_host(...)` /
+`run_project_file_with_tokio_host(...)` for Tokio-backed timers and futures.
+
 The REPL keeps bindings between inputs:
 
 ```text
@@ -104,5 +109,7 @@ The next useful layers are:
 
 1. Add full effect/capability propagation beyond current function type compatibility checks, plus the remaining failure-context forms.
 2. Fill the remaining failure-style control flow only where the official Verse syntax is documented; do not add record-like syntax unless Epic documents it.
-3. Expand bytecode VM coverage for the remaining modeled host/runtime surfaces.
+3. Expand bytecode VM coverage for the remaining modeled host/runtime surfaces,
+   including the few checker-accepted call-packing forms that are not yet fully
+   lowered in bytecode.
 4. Track Epic's public Verse documentation before aiming for compatibility.

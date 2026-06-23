@@ -101,11 +101,13 @@ impl Ord for TimerEntry {
     }
 }
 
+type PendingFuture = (PendingToken, Pin<Box<dyn Future<Output = Value>>>);
+
 pub(crate) struct MockHost {
     now: Duration,
     next_timer_sequence: u64,
     timers: BinaryHeap<TimerEntry>,
-    futures: Vec<(PendingToken, Pin<Box<dyn Future<Output = Value>>>)>,
+    futures: Vec<PendingFuture>,
     scripted_future_completions: VecDeque<ScriptedFutureCompletion>,
     prediction_values: HashMap<PredictionKey, Value>,
     prediction_defaults: HashMap<PredictionDefaultKey, Value>,

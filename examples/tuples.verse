@@ -6,8 +6,8 @@ Grid:[tuple(int, int)]string = map{
     East => "east",
 }
 
-print(Grid[Origin])
-print(Grid[East])
+print(if (Value := Grid[Origin]). Value else. "missing")
+print(if (Value := Grid[East]). Value else. "missing")
 print("east-x=" + str(East(0)))
 
 Add(A:int, B:int):int = A + B
@@ -24,5 +24,5 @@ Sum(Values:[]int)<transacts>:int = {
     Total
 }
 
-print("values=" + str(Sum(1, 2, 3)))
-print("tuple-values=" + str(Sum((4, 5))))
+print("values=" + str(Sum(array{1, 2, 3})))
+print("tuple-values=" + str(Sum(array{4, 5})))

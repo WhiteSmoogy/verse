@@ -2,11 +2,14 @@
 name = "verse-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust compiler and bytecode VM for a Verse-aligned language subset."
+license = "MIT"
+repository = "https://github.com/WhiteSmoogy/verse"
 
 [dependencies]
 rand = "0.8"
 tokio = { version = "1", optional = true, features = ["rt", "time"] }
 
 [features]
-default = []
+default = ["tokio-host"]
 tokio-host = ["dep:tokio"]

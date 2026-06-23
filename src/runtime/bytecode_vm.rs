@@ -1739,12 +1739,11 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 VmTaskState::new(task.clone(), parent, result_placeholder),
             );
         }
-        if let Some(parent) = parent {
-            if let Some(parent_state) = self.tasks.get_mut(&parent)
-                && !parent_state.children.contains(&id)
-            {
-                parent_state.children.push(id);
-            }
+        if let Some(parent) = parent
+            && let Some(parent_state) = self.tasks.get_mut(&parent)
+            && !parent_state.children.contains(&id)
+        {
+            parent_state.children.push(id);
         }
     }
 
@@ -5578,7 +5577,7 @@ fn value_from_constant(constant: &Constant) -> VmValue {
                     })
                     .collect(),
                 body: Box::new(Expr::new(ExprKind::External, span)),
-                closure: Env::default(),
+                closure: Env,
             })
         }
         Constant::External(type_name) => VmValue::Runtime(bytecode_external_value(type_name)),
@@ -5790,7 +5789,7 @@ fn index_value_failable(
 
 enum CallSetEffect {
     Updated,
-    Replace(VmValue),
+    Replace(Box<VmValue>),
     Failed,
 }
 
@@ -5822,7 +5821,7 @@ fn call_set_owned_value(
             let current = ref_value.borrow().clone();
             match call_set_owned_value(current, index, value, span)? {
                 CallSetEffect::Replace(value) => {
-                    *ref_value.borrow_mut() = value;
+                    *ref_value.borrow_mut() = *value;
                     Ok(CallSetEffect::Updated)
                 }
                 effect => Ok(effect),
@@ -5833,7 +5832,7 @@ fn call_set_owned_value(
             let current = field_ref.get(span)?;
             match call_set_owned_value(current, index, value, span)? {
                 CallSetEffect::Replace(value) => {
-                    field_ref.set(value, span)?;
+                    field_ref.set(*value, span)?;
                     Ok(CallSetEffect::Updated)
                 }
                 effect => Ok(effect),
@@ -5879,7 +5878,9 @@ fn call_set_runtime_value(
         }
         Value::String(text) => Ok(
             match replace_string_byte_failable(text, &index, value, span)? {
-                Some(value) => CallSetEffect::Replace(VmValue::Runtime(Value::String(value))),
+                Some(value) => {
+                    CallSetEffect::Replace(Box::new(VmValue::Runtime(Value::String(value))))
+                }
                 None => CallSetEffect::Failed,
             },
         ),

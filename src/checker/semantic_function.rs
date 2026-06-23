@@ -264,12 +264,7 @@ pub(super) fn param_specs_overlap(
     struct_types: &HashMap<String, StructInfo>,
     include_type_value_family_overlap: bool,
 ) -> bool {
-    if param_specs_overlap_direct(
-        left,
-        right,
-        struct_types,
-        include_type_value_family_overlap,
-    ) {
+    if param_specs_overlap_direct(left, right, struct_types, include_type_value_family_overlap) {
         return true;
     }
 
@@ -416,17 +411,14 @@ pub(super) fn param_type_slices_overlap(
     include_type_value_family_overlap: bool,
 ) -> bool {
     if left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| {
-                overload_param_types_overlap(
-                    left,
-                    right,
-                    struct_types,
-                    include_type_value_family_overlap,
-                )
-            })
+        && left.iter().zip(right).all(|(left, right)| {
+            overload_param_types_overlap(
+                left,
+                right,
+                struct_types,
+                include_type_value_family_overlap,
+            )
+        })
     {
         return true;
     }
@@ -461,17 +453,16 @@ pub(super) fn single_param_overlaps_sequence(
     include_type_value_family_overlap: bool,
 ) -> bool {
     match single {
-        Type::Tuple(items) if items.len() == sequence.len() => items
-            .iter()
-            .zip(sequence)
-            .all(|(item, sequence_type)| {
+        Type::Tuple(items) if items.len() == sequence.len() => {
+            items.iter().zip(sequence).all(|(item, sequence_type)| {
                 overload_param_types_overlap(
                     item,
                     sequence_type,
                     struct_types,
                     include_type_value_family_overlap,
                 )
-            }),
+            })
+        }
         _ => false,
     }
 }
@@ -587,7 +578,10 @@ fn numeric_types_overlap(left: &Type, right: &Type) -> bool {
     match (left, right) {
         (Type::Number, other) | (other, Type::Number) => numeric_domain(other).is_some(),
         (Type::Rational, other) | (other, Type::Rational) => {
-            matches!(numeric_domain(other), Some(NumericDomain::Int | NumericDomain::Rational))
+            matches!(
+                numeric_domain(other),
+                Some(NumericDomain::Int | NumericDomain::Rational)
+            )
         }
         (Type::Int, other) | (other, Type::Int) => {
             matches!(
@@ -1784,6 +1778,7 @@ enum TypeFunctionParamConstraintMatch {
 }
 
 impl Checker {
+    #[allow(clippy::type_complexity)]
     pub(super) fn type_function_params(
         &mut self,
         params: &[Param],

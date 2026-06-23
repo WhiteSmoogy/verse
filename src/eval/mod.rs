@@ -1927,8 +1927,8 @@ fn modifier_stack_position(stack: &Value, first: bool) -> Value {
 }
 
 fn compare_rational(left: RationalValue, right: RationalValue) -> std::cmp::Ordering {
-    let left_scaled = left.numerator as i128 * right.denominator as i128;
-    let right_scaled = right.numerator as i128 * left.denominator as i128;
+    let left_scaled = left.numerator * right.denominator;
+    let right_scaled = right.numerator * left.denominator;
     left_scaled.cmp(&right_scaled)
 }
 

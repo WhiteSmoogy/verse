@@ -3751,6 +3751,7 @@ impl Checker {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     pub(super) fn dependent_type_value_param_signature(
         &mut self,
         params: &[Param],
@@ -3805,10 +3806,10 @@ impl Checker {
         else {
             return Ok(value_type.clone());
         };
-        if let Some(existing) = self.resolve_type_param(&param.name) {
-            if existing == type_param {
-                return Ok(signature_type);
-            }
+        if let Some(existing) = self.resolve_type_param(&param.name)
+            && existing == type_param
+        {
+            return Ok(signature_type);
         }
         self.define_type_param(&param.name, type_param, param.span)?;
         Ok(signature_type)

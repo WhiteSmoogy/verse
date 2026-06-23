@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
@@ -1422,7 +1424,7 @@ impl ChunkState {
         if receiver
             .annotation
             .as_ref()
-            .map(|annotation| bytecode_type_from_annotation(annotation))
+            .map(bytecode_type_from_annotation)
             .as_ref()
             .is_some_and(bytecode_type_is_callable)
         {
@@ -3229,7 +3231,7 @@ impl<'semantic> Lowerer<'semantic> {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut method_descriptors = if let Some(base_name) = base_class_name.as_ref() {
-            self.resolve_class_descriptor(&base_name)
+            self.resolve_class_descriptor(base_name)
                 .map(|class| class.methods.clone())
                 .ok_or(UnsupportedBytecode)?
         } else {
@@ -3297,7 +3299,7 @@ impl<'semantic> Lowerer<'semantic> {
             }
         }
         let mut block_descriptors = if let Some(base_name) = base_class_name.as_ref() {
-            self.resolve_class_descriptor(&base_name)
+            self.resolve_class_descriptor(base_name)
                 .map(|class| class.blocks.clone())
                 .ok_or(UnsupportedBytecode)?
         } else {
@@ -3526,13 +3528,12 @@ impl<'semantic> Lowerer<'semantic> {
                         .collect(),
                 })
             }
-            TypeName::Array(item) => Some(TypeName::Array(match item.as_ref() {
-                Some(item) => Some(Box::new(
+            TypeName::Array(item) => Some(TypeName::Array(item.as_ref().map(|item| {
+                Box::new(
                     self.resolve_static_type_function_type_name(item, type_params, depth + 1)
                         .unwrap_or_else(|| item.as_ref().clone()),
-                )),
-                None => None,
-            })),
+                )
+            }))),
             TypeName::Map(key, value) => Some(TypeName::Map(
                 Box::new(
                     self.resolve_static_type_function_type_name(key, type_params, depth + 1)
@@ -3745,7 +3746,7 @@ impl<'semantic> Lowerer<'semantic> {
                 let actuals = self.bytecode_type_arg_runtime_heads(arg, type_params);
                 actuals
                     .into_iter()
-                    .filter(|actual| self.runtime_type_head_satisfies(&actual, &expected))
+                    .filter(|actual| self.runtime_type_head_satisfies(actual, &expected))
                     .map(|actual| {
                         if runtime_names_match(&actual, &expected) {
                             1
@@ -3910,9 +3911,7 @@ impl<'semantic> Lowerer<'semantic> {
             .resolve_static_type_function_type_name(&annotation.name, type_params, 0)
             .unwrap_or_else(|| annotation.name.clone());
         let (name, args) = aggregate_type_name_parts(&type_name)?;
-        if self.resolve_interface_layout(&name).is_none() {
-            return None;
-        }
+        self.resolve_interface_layout(&name)?;
         if args.is_empty() {
             return Some(name);
         }
@@ -4229,7 +4228,7 @@ impl<'semantic> Lowerer<'semantic> {
                     .expression_type(expr.span)
                     .and_then(|value_type| match value_type {
                         Type::TypeValueOf(item) => type_to_runtime_type_name(item.as_ref()),
-                        other => type_to_runtime_type_name(&other),
+                        other => type_to_runtime_type_name(other),
                     })
                     .unwrap_or(TypeName::Any);
                 Ok(state.constant(Constant::Type(type_name)))
@@ -4786,7 +4785,7 @@ impl<'semantic> Lowerer<'semantic> {
         let Some(value_type) = self.facts.expression_type(expr.span) else {
             return value;
         };
-        if !type_needs_binding_freeze(&value_type) {
+        if !type_needs_binding_freeze(value_type) {
             return value;
         }
         let dest = state.allocate_register(expr.span);
@@ -9182,15 +9181,7 @@ impl<'semantic> Lowerer<'semantic> {
             .select_function_descriptor_for_call(&call.name, &call.args)
             .or_else(|| self.function_descriptor_index(&call.name))
             .ok_or(UnsupportedBytecode)?;
-        let has_named_args = call
-            .args
-            .iter()
-            .any(|arg| matches!(arg, CallArg::Named { .. }));
-        let arguments = if has_named_args {
-            self.lower_function_call_arguments(function, &call.args, state)?
-        } else {
-            self.lower_function_call_arguments(function, &call.args, state)?
-        };
+        let arguments = self.lower_function_call_arguments(function, &call.args, state)?;
         let dest = state.allocate_register(call.span);
         let callee = state.constant(Constant::Function(function));
         state.chunk.emit(Instruction::Call {
@@ -9528,6 +9519,7 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn lower_native_call_arguments(
         &mut self,
         args: &[CallArg],
