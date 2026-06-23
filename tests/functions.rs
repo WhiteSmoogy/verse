@@ -1683,6 +1683,22 @@ if (Value := Updated.First[]). Value else. 0
 }
 
 #[test]
+fn evaluates_extension_method_overloads_by_receiver_runtime() {
+    let source = r#"
+(Value:string).Score():int = 42
+(Value:int).Score():int = 0
+
+"ready".Score()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_parameter_inference_from_parametric_class_argument() {
     let source = r#"
 box(t:type) := class:

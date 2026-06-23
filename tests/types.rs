@@ -1687,6 +1687,29 @@ array{40, 2}.Second()
 }
 
 #[test]
+fn evaluates_type_function_extension_receiver_overload_runtime() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+BoxOf(Kind:type):type = box(Kind)
+
+(Item:BoxOf(int)).Score():int =
+    Item.Value
+(Text:string).Score():int =
+    0
+
+box(int){Value := 42}.Score()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_call_in_parametric_class_surface() {
     let source = r#"
 ListOf(Kind:type):type = []Kind

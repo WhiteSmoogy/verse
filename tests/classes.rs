@@ -255,6 +255,28 @@ manager{}.Use()
 }
 
 #[test]
+fn evaluates_class_scope_extension_method_overloads_by_receiver_runtime() {
+    let source = r#"
+manager := class:
+    (Value:string).Score():int =
+        42
+    (Value:int).Score():int =
+        0
+
+    Use():int =
+        "ready".Score()
+
+manager{}.Use()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_class_scope_extension_method_outside_class_scope() {
     let error = check_source(
         r#"

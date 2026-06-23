@@ -1209,7 +1209,11 @@ struct ExtensionBinding {
     name: String,
     module: Option<String>,
     function: usize,
+    receiver_type: Option<Type>,
     params: Vec<String>,
+    param_types: Vec<Option<Type>>,
+    param_defaults: Vec<Option<Expr>>,
+    source_params: Vec<Param>,
     fields: Vec<String>,
     captures_self: bool,
 }
@@ -1421,11 +1425,11 @@ impl ChunkState {
         self.extensions.push(extension);
     }
 
-    fn lookup_extension(&self, name: &str) -> Option<ExtensionBinding> {
+    fn lookup_extensions(&self, name: &str) -> Vec<ExtensionBinding> {
         self.extensions
             .iter()
             .rev()
-            .find(|extension| {
+            .filter(|extension| {
                 extension.name == name
                     && (extension.module.is_none()
                         || extension.module.as_ref().is_some_and(|module| {
@@ -1433,13 +1437,14 @@ impl ChunkState {
                         }))
             })
             .cloned()
+            .collect()
     }
 
-    fn lookup_qualified_extension(&self, qualifier: &str, name: &str) -> Option<ExtensionBinding> {
+    fn lookup_qualified_extensions(&self, qualifier: &str, name: &str) -> Vec<ExtensionBinding> {
         self.extensions
             .iter()
             .rev()
-            .find(|extension| {
+            .filter(|extension| {
                 extension.name == name
                     && extension.module.as_ref().is_some_and(|module| {
                         module == qualifier
@@ -1449,6 +1454,7 @@ impl ChunkState {
                     })
             })
             .cloned()
+            .collect()
     }
 
     fn enter_scope(&mut self) {
@@ -2757,7 +2763,11 @@ impl<'semantic> Lowerer<'semantic> {
             name: extension.method.name.clone(),
             module: module.map(str::to_string),
             function,
+            receiver_type: param_binding_type(&extension.receiver, self.facts),
             params: lower_param_names(&extension.method.params)?,
+            param_types: lower_param_types(&extension.method.params, self.facts),
+            param_defaults: lower_param_defaults(&extension.method.params),
+            source_params: extension.method.params.clone(),
             fields: Vec::new(),
             captures_self: false,
         });
@@ -3086,7 +3096,11 @@ impl<'semantic> Lowerer<'semantic> {
             name: extension.method.name.clone(),
             module: None,
             function,
+            receiver_type: param_binding_type(&extension.receiver, self.facts),
             params: lower_param_names(&extension.method.params)?,
+            param_types: lower_param_types(&extension.method.params, self.facts),
+            param_defaults: lower_param_defaults(&extension.method.params),
+            source_params: extension.method.params.clone(),
             fields: fields.iter().map(|field| field.name.clone()).collect(),
             captures_self: true,
         })
@@ -3426,7 +3440,11 @@ impl<'semantic> Lowerer<'semantic> {
                     return self.lower_call(callee, &call_args, state, expr.span);
                 }
                 if let ExprKind::Member { object, name } = &callee.kind
-                    && let Some(extension) = state.lookup_extension(name)
+                    && let Some(extension) = self.select_extension_for_call(
+                        object,
+                        &call_args,
+                        state.lookup_extensions(name),
+                    )
                 {
                     return self
                         .lower_extension_call(object, &call_args, extension, state, expr.span);
@@ -3469,7 +3487,8 @@ impl<'semantic> Lowerer<'semantic> {
                     .facts
                     .expression_type(object.span)
                     .is_some_and(type_is_type_value_for_extension_accessor)
-                    && let Some(extension) = state.lookup_extension(name)
+                    && let Some(extension) =
+                        self.select_extension_for_call(object, &[], state.lookup_extensions(name))
                 {
                     return self.lower_extension_call(object, &[], extension, state, expr.span);
                 }
@@ -3492,7 +3511,11 @@ impl<'semantic> Lowerer<'semantic> {
                     .facts
                     .expression_type(object.span)
                     .is_some_and(type_is_type_value_for_extension_accessor)
-                    && let Some(extension) = state.lookup_qualified_extension(qualifier, name)
+                    && let Some(extension) = self.select_extension_for_call(
+                        object,
+                        &[],
+                        state.lookup_qualified_extensions(qualifier, name),
+                    )
                 {
                     return self.lower_extension_call(object, &[], extension, state, expr.span);
                 }
@@ -6894,7 +6917,8 @@ impl<'semantic> Lowerer<'semantic> {
         }
 
         if let ExprKind::Member { object, name } = &callee.kind
-            && let Some(extension) = state.lookup_extension(name)
+            && let Some(extension) =
+                self.select_extension_for_call(object, args, state.lookup_extensions(name))
         {
             return self.lower_extension_call(object, args, extension, state, span);
         }
@@ -6904,7 +6928,11 @@ impl<'semantic> Lowerer<'semantic> {
             qualifier,
             name,
         } = &callee.kind
-            && let Some(extension) = state.lookup_qualified_extension(qualifier, name)
+            && let Some(extension) = self.select_extension_for_call(
+                object,
+                args,
+                state.lookup_qualified_extensions(qualifier, name),
+            )
         {
             return self.lower_extension_call(object, args, extension, state, span);
         }
@@ -7047,14 +7075,232 @@ impl<'semantic> Lowerer<'semantic> {
         descriptor: &FunctionDescriptor,
         args: &[CallArg],
     ) -> Option<usize> {
-        let param_count = descriptor.params().len();
+        self.call_argument_type_match_score(
+            descriptor.params(),
+            descriptor.source_params(),
+            descriptor.param_types(),
+            descriptor.param_defaults(),
+            args,
+            true,
+        )
+    }
+
+    fn select_extension_for_call(
+        &self,
+        object: &Expr,
+        args: &[CallArg],
+        extensions: Vec<ExtensionBinding>,
+    ) -> Option<ExtensionBinding> {
+        extensions
+            .into_iter()
+            .filter_map(|extension| {
+                self.extension_call_score(&extension, object, args)
+                    .map(|score| (extension, score))
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(extension, _)| extension)
+    }
+
+    fn extension_call_score(
+        &self,
+        extension: &ExtensionBinding,
+        object: &Expr,
+        args: &[CallArg],
+    ) -> Option<usize> {
+        let mut score = 0usize;
+        if let Some(expected) = extension.receiver_type.as_ref()
+            && let Some(actual) = self.facts.expression_type(object.span)
+        {
+            score += self.extension_receiver_type_match_score(expected, actual)?;
+        }
+        score += self.call_argument_type_match_score(
+            &extension.params,
+            &extension.source_params,
+            &extension.param_types,
+            &extension.param_defaults,
+            args,
+            false,
+        )?;
+        Some(score)
+    }
+
+    fn extension_receiver_type_match_score(&self, expected: &Type, actual: &Type) -> Option<usize> {
+        if bytecode_type_matches(expected, actual) {
+            return Some(bytecode_argument_match_score(expected, actual));
+        }
+        let expected_name = aggregate_runtime_type_name(expected)?;
+        self.receiver_runtime_type_names(actual)
+            .into_iter()
+            .any(|actual_name| {
+                self.parametric_type_name_pattern_matches(expected_name, &actual_name)
+            })
+            .then_some(2)
+            .or_else(|| {
+                self.receiver_type_is_parametric_pattern(expected)
+                    .then_some(8)
+            })
+    }
+
+    fn receiver_runtime_type_names(&self, actual: &Type) -> Vec<String> {
+        if let Type::Param(_, constraint) = actual {
+            return self.receiver_runtime_type_names_from_constraint(constraint);
+        }
+        let Some(name) = aggregate_runtime_type_name(actual) else {
+            return Vec::new();
+        };
+        self.receiver_runtime_type_names_from_name(name)
+    }
+
+    fn receiver_runtime_type_names_from_constraint(
+        &self,
+        constraint: &TypeParamConstraint,
+    ) -> Vec<String> {
+        match constraint {
+            TypeParamConstraint::Type => Vec::new(),
+            TypeParamConstraint::Subtype(parent) => {
+                self.receiver_runtime_type_names_from_type_name(parent)
+            }
+            TypeParamConstraint::TypeBounds { upper, .. } => {
+                self.receiver_runtime_type_names_from_type_name(upper)
+            }
+        }
+    }
+
+    fn receiver_runtime_type_names_from_type_name(&self, name: &TypeName) -> Vec<String> {
+        if let Some(inner) = official_subtype_type_name_payload(name) {
+            return self.receiver_runtime_type_names_from_type_name(inner);
+        }
+        if let Some(runtime_name) = render_aggregate_runtime_type_name_from_type_name(name) {
+            return self.receiver_runtime_type_names_from_name(&runtime_name);
+        }
+        let value_type = bytecode_type_from_type_name(name);
+        if let Some(runtime_name) = aggregate_runtime_type_name(&value_type) {
+            return self.receiver_runtime_type_names_from_name(runtime_name);
+        }
+        Vec::new()
+    }
+
+    fn receiver_runtime_type_names_from_name(&self, name: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_receiver_runtime_type_names(name, &mut seen, &mut names);
+        names
+    }
+
+    fn collect_receiver_runtime_type_names(
+        &self,
+        name: &str,
+        seen: &mut HashSet<String>,
+        names: &mut Vec<String>,
+    ) {
+        if !seen.insert(name.to_string()) {
+            return;
+        }
+        names.push(name.to_string());
+        if let Some(layout) = self.class_layouts.get(name) {
+            for interface in &layout.interfaces {
+                self.collect_receiver_runtime_type_names(interface, seen, names);
+            }
+            if let Some(base) = &layout.base_class {
+                self.collect_receiver_runtime_type_names(base, seen, names);
+            }
+        }
+    }
+
+    fn parametric_type_name_pattern_matches(&self, pattern: &str, actual: &str) -> bool {
+        let mut inferred = HashMap::new();
+        self.parametric_type_name_pattern_matches_inner(pattern, actual, &mut inferred)
+    }
+
+    fn parametric_type_name_pattern_matches_inner(
+        &self,
+        pattern: &str,
+        actual: &str,
+        inferred: &mut HashMap<String, String>,
+    ) -> bool {
+        if runtime_names_match(pattern, actual) {
+            return true;
+        }
+        if self.is_type_param_pattern_atom(pattern) {
+            return match inferred.get(pattern) {
+                Some(existing) => runtime_names_match(existing, actual),
+                None => {
+                    inferred.insert(pattern.to_string(), actual.to_string());
+                    true
+                }
+            };
+        }
+        let Some((pattern_head, pattern_args)) = parse_parametric_instance_name(pattern) else {
+            return false;
+        };
+        let Some((actual_head, actual_args)) = parse_parametric_instance_name(actual) else {
+            return false;
+        };
+        runtime_names_match(&pattern_head, &actual_head)
+            && pattern_args.len() == actual_args.len()
+            && pattern_args
+                .iter()
+                .zip(actual_args.iter())
+                .all(|(pattern, actual)| {
+                    self.parametric_type_name_pattern_matches_inner(pattern, actual, inferred)
+                })
+    }
+
+    fn is_type_param_pattern_atom(&self, name: &str) -> bool {
+        !name.contains('.')
+            && !name.contains('(')
+            && !is_builtin_type_atom(name)
+            && !self.class_layouts.contains_key(name)
+            && !self.interface_layouts.contains_key(name)
+    }
+
+    fn receiver_type_is_parametric_pattern(&self, value_type: &Type) -> bool {
+        match value_type {
+            Type::Param(_, _) => true,
+            Type::Class(name) | Type::Interface(name) | Type::Struct(name) => {
+                self.parametric_name_contains_type_param_atom(name)
+            }
+            Type::Array(item)
+            | Type::Option(item)
+            | Type::Subtype(item)
+            | Type::CastableSubtype(item)
+            | Type::ConcreteSubtype(item)
+            | Type::ClassifiableSubset(item)
+            | Type::ClassifiableSubsetKey(item)
+            | Type::ClassifiableSubsetVar(item)
+            | Type::Modifier(item)
+            | Type::ModifierStack(item)
+            | Type::Signalable(item) => self.receiver_type_is_parametric_pattern(item),
+            _ => false,
+        }
+    }
+
+    fn parametric_name_contains_type_param_atom(&self, name: &str) -> bool {
+        let Some((_, args)) = parse_parametric_instance_name(name) else {
+            return false;
+        };
+        args.iter().any(|arg| {
+            self.is_type_param_pattern_atom(arg)
+                || self.parametric_name_contains_type_param_atom(arg)
+        })
+    }
+
+    fn call_argument_type_match_score(
+        &self,
+        param_names: &[String],
+        source_params: &[Param],
+        param_types: &[Option<Type>],
+        param_defaults: &[Option<Expr>],
+        args: &[CallArg],
+        enforce_types: bool,
+    ) -> Option<usize> {
+        let param_count = param_names.len();
         let mut assigned = vec![false; param_count];
         let mut actuals = vec![None; param_count];
         let mut score = 0usize;
         let mut positional_index = 0usize;
 
-        if let Some(items) =
-            single_tuple_binding_param_items(descriptor.source_params(), param_count)
+        if let Some(items) = single_tuple_binding_param_items(source_params, param_count)
             && args.len() == items.len()
             && args.iter().all(|arg| matches!(arg, CallArg::Positional(_)))
         {
@@ -7068,16 +7314,16 @@ impl<'semantic> Lowerer<'semantic> {
                     })
                     .collect::<Option<Vec<_>>>()?,
             ));
-        } else if !descriptor.source_params().is_empty()
+        } else if !source_params.is_empty()
             && let [CallArg::Positional(expr)] = args
-            && self.expr_is_tuple_with_len(expr, descriptor.source_params().len())
-            && descriptor.source_params().len() > 1
+            && self.expr_is_tuple_with_len(expr, source_params.len())
+            && source_params.len() > 1
         {
             let Type::Tuple(items) = self.facts.expression_type(expr.span)? else {
                 return None;
             };
             let mut flat_index = 0usize;
-            for (param, item_type) in descriptor.source_params().iter().zip(items) {
+            for (param, item_type) in source_params.iter().zip(items) {
                 self.assign_param_pattern_type(
                     param,
                     item_type,
@@ -7097,7 +7343,7 @@ impl<'semantic> Lowerer<'semantic> {
                             return None;
                         }
                         if let Some((param, start, end)) =
-                            find_param_for_flat_index(descriptor.source_params(), positional_index)
+                            find_param_for_flat_index(source_params, positional_index)
                             && start == positional_index
                             && self.expr_is_tuple_param_value(expr, param)
                         {
@@ -7121,8 +7367,7 @@ impl<'semantic> Lowerer<'semantic> {
                         }
                     }
                     CallArg::Named { name, expr, .. } => {
-                        let param_index =
-                            descriptor.params().iter().position(|param| param == name)?;
+                        let param_index = param_names.iter().position(|param| param == name)?;
                         if assigned[param_index] {
                             return None;
                         }
@@ -7137,12 +7382,13 @@ impl<'semantic> Lowerer<'semantic> {
             if !assigned[param_index] {
                 continue;
             }
-            let expected = descriptor
-                .param_types()
-                .get(param_index)
-                .and_then(Option::as_ref);
+            let expected = param_types.get(param_index).and_then(Option::as_ref);
             if !bytecode_argument_type_matches(expected, actual.as_ref()) {
-                return None;
+                if enforce_types {
+                    return None;
+                }
+                score += 8;
+                continue;
             }
             if let (Some(expected), Some(actual)) = (expected, actual.as_ref()) {
                 score += bytecode_argument_match_score(expected, actual);
@@ -7150,12 +7396,7 @@ impl<'semantic> Lowerer<'semantic> {
         }
 
         for (index, assigned) in assigned.iter().enumerate() {
-            if !assigned
-                && descriptor
-                    .param_defaults()
-                    .get(index)
-                    .is_none_or(Option::is_none)
-            {
+            if !assigned && param_defaults.get(index).is_none_or(Option::is_none) {
                 return None;
             }
         }
@@ -7271,7 +7512,7 @@ impl<'semantic> Lowerer<'semantic> {
             arguments.extend(self.lower_call_arguments_for_params(
                 &extension.params,
                 &[],
-                &vec![None; extension.params.len()],
+                &extension.param_defaults,
                 args,
                 state,
             )?);
@@ -8879,6 +9120,13 @@ fn lower_param_types(params: &[Param], facts: &SemanticFacts) -> Vec<Option<Type
     types
 }
 
+fn param_binding_type(param: &Param, facts: &SemanticFacts) -> Option<Type> {
+    facts
+        .binding_type(param.span)
+        .cloned()
+        .or_else(|| param.annotation.as_ref().map(bytecode_type_from_annotation))
+}
+
 fn lower_param_defaults(params: &[Param]) -> Vec<Option<Expr>> {
     let mut defaults = Vec::new();
     for param in params {
@@ -8902,12 +9150,7 @@ fn lower_param_pattern_names(param: &Param, names: &mut Vec<String>) {
 fn lower_param_pattern_types(param: &Param, facts: &SemanticFacts, types: &mut Vec<Option<Type>>) {
     match &param.pattern {
         ParamPattern::Binding | ParamPattern::Anonymous => {
-            types.push(
-                facts
-                    .binding_type(param.span)
-                    .cloned()
-                    .or_else(|| param.annotation.as_ref().map(bytecode_type_from_annotation)),
-            );
+            types.push(param_binding_type(param, facts));
         }
         ParamPattern::Tuple(items) => {
             for item in items {
@@ -9385,6 +9628,176 @@ fn runtime_names_match(left: &str, right: &str) -> bool {
     left == right
         || left.rsplit('.').next().is_some_and(|name| name == right)
         || right.rsplit('.').next().is_some_and(|name| name == left)
+}
+
+fn aggregate_runtime_type_name(value_type: &Type) -> Option<&str> {
+    match value_type {
+        Type::Class(name) | Type::Interface(name) | Type::Struct(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn official_subtype_type_name_payload(name: &TypeName) -> Option<&TypeName> {
+    match name {
+        TypeName::Applied { name, args }
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1 =>
+        {
+            args.first()
+        }
+        _ => None,
+    }
+}
+
+fn render_aggregate_runtime_type_name_from_type_name(name: &TypeName) -> Option<String> {
+    match name {
+        TypeName::Named(name) => Some(name.clone()),
+        TypeName::Applied { name, args } => {
+            let args = args
+                .iter()
+                .map(render_runtime_type_name_from_type_name)
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{name}({})", args.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+fn render_runtime_type_name_from_type_name(name: &TypeName) -> Option<String> {
+    Some(match name {
+        TypeName::Int => "int".to_string(),
+        TypeName::Float => "float".to_string(),
+        TypeName::Rational => "rational".to_string(),
+        TypeName::Number => "number".to_string(),
+        TypeName::Bool => "bool".to_string(),
+        TypeName::String => "string".to_string(),
+        TypeName::Message => "message".to_string(),
+        TypeName::Char => "char".to_string(),
+        TypeName::Char8 => "char8".to_string(),
+        TypeName::Char32 => "char32".to_string(),
+        TypeName::None => "none".to_string(),
+        TypeName::Any => "any".to_string(),
+        TypeName::Comparable => "comparable".to_string(),
+        TypeName::Type => "type".to_string(),
+        TypeName::TypeBounds { lower, upper } => format!(
+            "type({}, {})",
+            render_runtime_type_name_from_type_name(lower)?,
+            render_runtime_type_name_from_type_name(upper)?
+        ),
+        TypeName::IntRange { min, max } => format!("type{{_X:int where {min} <= _X, _X <= {max}}}"),
+        TypeName::FloatRange(range) => format!(
+            "type{{_X:float where {} <= _X, _X <= {}}}",
+            range.min.render(),
+            range.max.render()
+        ),
+        TypeName::Array(Some(item)) => {
+            format!("array<{}>", render_runtime_type_name_from_type_name(item)?)
+        }
+        TypeName::Array(None) => "array<unknown>".to_string(),
+        TypeName::Map(key, value) => format!(
+            "map<{}, {}>",
+            render_runtime_type_name_from_type_name(key)?,
+            render_runtime_type_name_from_type_name(value)?
+        ),
+        TypeName::WeakMap(key, value) => format!(
+            "weak_map<{}, {}>",
+            render_runtime_type_name_from_type_name(key)?,
+            render_runtime_type_name_from_type_name(value)?
+        ),
+        TypeName::Tuple(items) => {
+            let items = items
+                .iter()
+                .map(render_runtime_type_name_from_type_name)
+                .collect::<Option<Vec<_>>>()?;
+            format!("tuple({})", items.join(", "))
+        }
+        TypeName::Option(item) => format!("?{}", render_runtime_type_name_from_type_name(item)?),
+        TypeName::Function => "function".to_string(),
+        TypeName::FunctionSignature { .. } => return None,
+        TypeName::Applied { name, args } => {
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1
+            {
+                render_runtime_type_name_from_type_name(&args[0])?
+            } else {
+                let args = args
+                    .iter()
+                    .map(render_runtime_type_name_from_type_name)
+                    .collect::<Option<Vec<_>>>()?;
+                format!("{name}({})", args.join(", "))
+            }
+        }
+        TypeName::Named(name) => name.clone(),
+    })
+}
+
+fn parse_parametric_instance_name(name: &str) -> Option<(String, Vec<String>)> {
+    let (head, rest) = name.split_once('(')?;
+    let args = rest.strip_suffix(')')?;
+    Some((
+        head.to_string(),
+        split_parametric_instance_args(args)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
+fn split_parametric_instance_args(args: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in args.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(args[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = args[start..].trim();
+    if !tail.is_empty() {
+        items.push(tail);
+    }
+    items
+}
+
+fn is_builtin_type_atom(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "nat"
+            | "nat8"
+            | "nat16"
+            | "nat32"
+            | "nat64"
+            | "float"
+            | "rational"
+            | "number"
+            | "logic"
+            | "void"
+            | "false"
+            | "string"
+            | "message"
+            | "char"
+            | "char8"
+            | "char32"
+            | "any"
+            | "comparable"
+            | "type"
+            | "function"
+    )
 }
 
 fn erase_parametric_instance_name(name: &str) -> &str {
