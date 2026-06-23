@@ -2263,15 +2263,7 @@ impl<'semantic> Lowerer<'semantic> {
                     )?
                 } else if matches!(expr.kind, ExprKind::External) {
                     self.emit_external(
-                        annotation
-                            .as_ref()
-                            .map(|annotation| annotation.name.clone())
-                            .or_else(|| {
-                                self.facts
-                                    .expression_type(expr.span)
-                                    .and_then(type_to_runtime_type_name)
-                            })
-                            .unwrap_or(TypeName::Any),
+                        self.external_runtime_type_name(annotation.as_ref(), expr),
                         state,
                         expr.span,
                     )
@@ -2315,15 +2307,7 @@ impl<'semantic> Lowerer<'semantic> {
                     .or_else(|| self.iterable_kind_for_expr(expr, state));
                 let value = if matches!(expr.kind, ExprKind::External) {
                     self.emit_external(
-                        annotation
-                            .as_ref()
-                            .map(|annotation| annotation.name.clone())
-                            .or_else(|| {
-                                self.facts
-                                    .expression_type(expr.span)
-                                    .and_then(type_to_runtime_type_name)
-                            })
-                            .unwrap_or(TypeName::Any),
+                        self.external_runtime_type_name(annotation.as_ref(), expr),
                         state,
                         expr.span,
                     )
@@ -2727,15 +2711,7 @@ impl<'semantic> Lowerer<'semantic> {
                     )?
                 } else if matches!(expr.kind, ExprKind::External) {
                     self.emit_external(
-                        annotation
-                            .as_ref()
-                            .map(|annotation| annotation.name.clone())
-                            .or_else(|| {
-                                self.facts
-                                    .expression_type(expr.span)
-                                    .and_then(type_to_runtime_type_name)
-                            })
-                            .unwrap_or(TypeName::Any),
+                        self.external_runtime_type_name(annotation.as_ref(), expr),
                         state,
                         expr.span,
                     )
@@ -2780,15 +2756,7 @@ impl<'semantic> Lowerer<'semantic> {
                     .or_else(|| self.iterable_kind_for_expr(expr, state));
                 let value = if matches!(expr.kind, ExprKind::External) {
                     self.emit_external(
-                        annotation
-                            .as_ref()
-                            .map(|annotation| annotation.name.clone())
-                            .or_else(|| {
-                                self.facts
-                                    .expression_type(expr.span)
-                                    .and_then(type_to_runtime_type_name)
-                            })
-                            .unwrap_or(TypeName::Any),
+                        self.external_runtime_type_name(annotation.as_ref(), expr),
                         state,
                         expr.span,
                     )
@@ -4230,12 +4198,26 @@ impl<'semantic> Lowerer<'semantic> {
         expr: &Expr,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
-        let value_type = self
-            .facts
-            .expression_type(expr.span)
-            .and_then(type_to_runtime_type_name)
-            .unwrap_or(TypeName::Any);
+        let value_type = self.external_runtime_type_name(None, expr);
         Ok(self.emit_external(value_type, state, expr.span))
+    }
+
+    fn external_runtime_type_name(
+        &self,
+        annotation: Option<&TypeAnnotation>,
+        expr: &Expr,
+    ) -> TypeName {
+        annotation
+            .and_then(|annotation| {
+                self.resolve_static_type_function_type_name(&annotation.name, &[], 0)
+                    .or_else(|| Some(annotation.name.clone()))
+            })
+            .or_else(|| {
+                self.facts
+                    .expression_type(expr.span)
+                    .and_then(type_to_runtime_type_name)
+            })
+            .unwrap_or(TypeName::Any)
     }
 
     fn emit_external(

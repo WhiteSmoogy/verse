@@ -1567,6 +1567,30 @@ if (Value := Outcome.GetSuccess[]). Value else. 0
 }
 
 #[test]
+fn evaluates_type_function_official_modifier_stack_result_runtime_surface() {
+    let source = r#"
+DataTypes<public> := module:
+    ModifierOf<public>(Item:type):type = modifier(Item)
+    StackOf<public>(Item:type):type = modifier_stack(Item)
+
+add := class(DataTypes.ModifierOf(int)):
+    Amount:int
+    Evaluate<override>(InValue:int):int =
+        InValue + Amount
+
+Stack:DataTypes.StackOf(int) = external {}
+Stack.AddModifier(add{Amount := 40}, 0)
+Stack.Evaluate(2)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_official_event_result_archetype_surface() {
     let source = r#"
 EventOf(Payload:type):type = event(Payload)
