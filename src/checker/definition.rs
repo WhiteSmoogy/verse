@@ -299,7 +299,7 @@ impl Checker {
         globals.insert(
             "Concatenate".to_string(),
             Symbol::immutable(native_function_type(
-                &[],
+                &["computes"],
                 vec![(
                     "Arrays",
                     Type::Array(Box::new(Type::Array(Box::new(Type::Unknown)))),

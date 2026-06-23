@@ -882,12 +882,12 @@ else:
 }
 
 #[test]
-fn rejects_no_rollback_special_call_in_failure_context() {
+fn rejects_no_rollback_native_call_in_failure_context() {
     let error = check_source(
         r#"
 if:
-    Values := Concatenate(array{array{1}, array{2}})
-    Values[0] = 1
+    Values := ConcatenateMaps(map{1 => 1}, map{2 => 2})
+    Values[1] = 1
 then:
     42
 else:

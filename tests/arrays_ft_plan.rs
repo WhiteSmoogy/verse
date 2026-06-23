@@ -109,8 +109,7 @@ else:
 }
 
 #[test]
-#[ignore = "planned Arrays FT column: Concatenate computes effect metadata"]
-fn planned_arrays_column_concatenate_computes_effect_metadata() {
+fn evaluates_concatenate_computes_effect_metadata() {
     assert_runtime_cases(&[(
         "concatenate can be called from computes failure context",
         r#"
