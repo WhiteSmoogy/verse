@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ast::{Expr, ExprKind, TypeName, TypeParam, TypeParamConstraint};
+use crate::ast::{Expr, ExprKind, Param, TypeName, TypeParam, TypeParamConstraint};
 use crate::error::VerseError;
 use crate::eval::{
     Env, RationalValue, RuntimeClassInstanceField, RuntimeClassTypeInfo, RuntimeModifierEntry,
@@ -3112,14 +3112,23 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         span,
                     ));
                 }
-                match self.run_chunk(
-                    descriptor.chunk(),
-                    args,
-                    span,
-                    current_task,
-                    function.captures.clone(),
-                )? {
-                    ChunkOutcome::Value(value) => Ok(CallOutcome::Value(value)),
+                let chunk = descriptor.chunk();
+                let external_return_type = descriptor.external_return_type().cloned();
+                let source_params = if external_return_type.is_some() {
+                    descriptor.source_params().to_vec()
+                } else {
+                    Vec::new()
+                };
+                let return_args = external_return_type.is_some().then(|| args.clone());
+                match self.run_chunk(chunk, args, span, current_task, function.captures.clone())? {
+                    ChunkOutcome::Value(value) => Ok(CallOutcome::Value(
+                        self.materialize_external_function_return(
+                            external_return_type.as_ref(),
+                            &source_params,
+                            return_args.as_deref(),
+                            value,
+                        ),
+                    )),
                     ChunkOutcome::Failure => Ok(CallOutcome::Failure),
                     ChunkOutcome::Suspended(suspension) => Ok(CallOutcome::Suspended(suspension)),
                 }
@@ -3825,6 +3834,104 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             .unwrap_or_else(|| return_type.clone());
         let mut visiting = Vec::new();
         VmValue::Runtime(self.program_external_return_value(&return_type, &mut visiting))
+    }
+
+    fn materialize_external_function_return(
+        &self,
+        external_return_type: Option<&TypeName>,
+        source_params: &[Param],
+        args: Option<&[VmValue]>,
+        value: VmValue,
+    ) -> VmValue {
+        let Some(return_type) = external_return_type else {
+            return value;
+        };
+        if !matches!(value, VmValue::Runtime(_)) {
+            return value;
+        }
+        let return_type = args
+            .and_then(|args| self.function_return_substitutions(source_params, args))
+            .map(|substitutions| substitute_runtime_type_name_params(return_type, &substitutions))
+            .unwrap_or_else(|| return_type.clone());
+        let mut visiting = Vec::new();
+        VmValue::Runtime(self.program_external_return_value(&return_type, &mut visiting))
+    }
+
+    fn function_return_substitutions(
+        &self,
+        source_params: &[Param],
+        args: &[VmValue],
+    ) -> Option<HashMap<String, TypeName>> {
+        if source_params.len() != args.len() {
+            return None;
+        }
+        let mut substitutions = HashMap::new();
+        for (param, arg) in source_params.iter().zip(args) {
+            let Some(annotation) = param.annotation.as_ref() else {
+                continue;
+            };
+            let capture_names = param
+                .type_params
+                .iter()
+                .map(|type_param| type_param.name.as_str())
+                .collect::<HashSet<_>>();
+            if capture_names.is_empty() {
+                continue;
+            }
+            if let VmValue::Runtime(value) = arg {
+                self.infer_runtime_type_name_substitutions(
+                    &annotation.name,
+                    value,
+                    &capture_names,
+                    &mut substitutions,
+                );
+            }
+        }
+        (!substitutions.is_empty()).then_some(substitutions)
+    }
+
+    fn infer_runtime_type_name_substitutions(
+        &self,
+        expected: &TypeName,
+        actual_value: &Value,
+        capture_names: &HashSet<&str>,
+        substitutions: &mut HashMap<String, TypeName>,
+    ) {
+        let Some(actual_type) = runtime_value_type_name(actual_value) else {
+            return;
+        };
+        infer_type_name_substitutions(expected, &actual_type, false, capture_names, substitutions);
+
+        let Value::ClassInstance { class_name, .. } = actual_value else {
+            return;
+        };
+        let Some((actual_name, actual_args)) =
+            runtime_aggregate_type_name_parts(&parse_runtime_type_name(class_name))
+        else {
+            return;
+        };
+        let Some(class) = self.program_class_by_runtime_name(&actual_name) else {
+            return;
+        };
+        let owner_substitutions = class
+            .type_params()
+            .iter()
+            .cloned()
+            .zip(actual_args)
+            .collect::<HashMap<_, _>>();
+        for interface in class.interfaces() {
+            let interface_type = substitute_runtime_type_name_params(
+                &parse_runtime_type_name(interface),
+                &owner_substitutions,
+            );
+            infer_type_name_substitutions(
+                expected,
+                &interface_type,
+                false,
+                capture_names,
+                substitutions,
+            );
+        }
     }
 
     fn bound_method_return_substitutions(
@@ -4580,6 +4687,208 @@ fn substitute_runtime_type_name_params(
 
 fn runtime_local_type_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn runtime_value_type_name(value: &Value) -> Option<TypeName> {
+    match value {
+        Value::Int(_) => Some(TypeName::Int),
+        Value::Float(_) => Some(TypeName::Float),
+        Value::Rational(_) => Some(TypeName::Rational),
+        Value::Bool(_) => Some(TypeName::Bool),
+        Value::String(_) => Some(TypeName::String),
+        Value::Char(_) => Some(TypeName::Char),
+        Value::Char32(_) => Some(TypeName::Char32),
+        Value::None => Some(TypeName::None),
+        Value::Array(items) => {
+            let items = items.borrow();
+            items
+                .first()
+                .and_then(runtime_value_type_name)
+                .map(|item| TypeName::Array(Some(Box::new(item))))
+                .or(Some(TypeName::Array(None)))
+        }
+        Value::Map(entries) => {
+            let entries = entries.borrow();
+            entries.first().and_then(|(key, value)| {
+                Some(TypeName::Map(
+                    Box::new(runtime_value_type_name(key)?),
+                    Box::new(runtime_value_type_name(value)?),
+                ))
+            })
+        }
+        Value::Tuple(items) => Some(TypeName::Tuple(
+            items
+                .iter()
+                .map(runtime_value_type_name)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Value::Option(Some(item)) => {
+            runtime_value_type_name(item).map(|item| TypeName::Option(Box::new(item)))
+        }
+        Value::Option(None) => None,
+        Value::Result { succeeded, value } => {
+            let name = if *succeeded {
+                "success_result"
+            } else {
+                "error_result"
+            };
+            Some(TypeName::Applied {
+                name: name.to_string(),
+                args: vec![runtime_value_type_name(value)?],
+            })
+        }
+        Value::EnumValue { enum_name, .. } => Some(parse_runtime_type_name(enum_name)),
+        Value::StructInstance { struct_name, .. } => Some(parse_runtime_type_name(struct_name)),
+        Value::ClassInstance { class_name, .. } => Some(parse_runtime_type_name(class_name)),
+        Value::StructType { name, .. }
+        | Value::ClassType { name, .. }
+        | Value::InterfaceType { name, .. }
+        | Value::Module { name, .. } => Some(parse_runtime_type_name(name)),
+        Value::Type(type_name) => Some(type_name.clone()),
+        Value::NativeFunction { .. } | Value::ExternalFunction { .. } => Some(TypeName::Function),
+        _ => None,
+    }
+}
+
+fn infer_type_name_substitutions(
+    expected: &TypeName,
+    actual: &TypeName,
+    allow_named_capture: bool,
+    capture_names: &HashSet<&str>,
+    substitutions: &mut HashMap<String, TypeName>,
+) {
+    if let TypeName::Named(name) = expected
+        && allow_named_capture
+        && capture_names.contains(name.as_str())
+    {
+        record_type_name_substitution(name, actual, substitutions);
+        return;
+    }
+
+    if let Some((expected_name, expected_args)) = runtime_aggregate_type_name_parts(expected)
+        && !expected_args.is_empty()
+        && let Some((actual_name, actual_args)) = runtime_aggregate_type_name_parts(actual)
+        && runtime_type_names_match(&expected_name, &actual_name)
+        && expected_args.len() == actual_args.len()
+    {
+        for (expected_arg, actual_arg) in expected_args.iter().zip(actual_args.iter()) {
+            infer_type_name_substitutions(
+                expected_arg,
+                actual_arg,
+                true,
+                capture_names,
+                substitutions,
+            );
+        }
+        return;
+    }
+
+    match (expected, actual) {
+        (TypeName::Array(Some(expected_item)), TypeName::Array(Some(actual_item)))
+        | (TypeName::Option(expected_item), TypeName::Option(actual_item)) => {
+            infer_type_name_substitutions(
+                expected_item,
+                actual_item,
+                true,
+                capture_names,
+                substitutions,
+            );
+        }
+        (TypeName::Map(expected_key, expected_value), TypeName::Map(actual_key, actual_value))
+        | (
+            TypeName::WeakMap(expected_key, expected_value),
+            TypeName::WeakMap(actual_key, actual_value),
+        ) => {
+            infer_type_name_substitutions(
+                expected_key,
+                actual_key,
+                true,
+                capture_names,
+                substitutions,
+            );
+            infer_type_name_substitutions(
+                expected_value,
+                actual_value,
+                true,
+                capture_names,
+                substitutions,
+            );
+        }
+        (TypeName::Tuple(expected_items), TypeName::Tuple(actual_items))
+            if expected_items.len() == actual_items.len() =>
+        {
+            for (expected_item, actual_item) in expected_items.iter().zip(actual_items.iter()) {
+                infer_type_name_substitutions(
+                    expected_item,
+                    actual_item,
+                    true,
+                    capture_names,
+                    substitutions,
+                );
+            }
+        }
+        (
+            TypeName::FunctionSignature {
+                params: expected_params,
+                return_type: expected_return,
+                ..
+            },
+            TypeName::FunctionSignature {
+                params: actual_params,
+                return_type: actual_return,
+                ..
+            },
+        ) if expected_params.len() == actual_params.len() => {
+            for (expected_param, actual_param) in expected_params.iter().zip(actual_params.iter()) {
+                infer_type_name_substitutions(
+                    expected_param,
+                    actual_param,
+                    true,
+                    capture_names,
+                    substitutions,
+                );
+            }
+            infer_type_name_substitutions(
+                expected_return,
+                actual_return,
+                true,
+                capture_names,
+                substitutions,
+            );
+        }
+        (TypeName::Applied { name, args }, _) if type_wrapper_for_inference(name) => {
+            if let [inner] = args.as_slice() {
+                infer_type_name_substitutions(
+                    inner,
+                    actual,
+                    allow_named_capture,
+                    capture_names,
+                    substitutions,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn type_wrapper_for_inference(name: &str) -> bool {
+    matches!(
+        name,
+        "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+    )
+}
+
+fn record_type_name_substitution(
+    name: &str,
+    actual: &TypeName,
+    substitutions: &mut HashMap<String, TypeName>,
+) {
+    match substitutions.get(name) {
+        Some(existing) if existing != actual => {}
+        _ => {
+            substitutions.insert(name.to_string(), actual.clone());
+        }
+    }
 }
 
 fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {

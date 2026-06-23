@@ -296,6 +296,7 @@ pub struct FunctionDescriptor {
     source_params: Vec<Param>,
     param_types: Vec<Option<Type>>,
     param_defaults: Vec<Option<Expr>>,
+    external_return_type: Option<TypeName>,
     chunk: usize,
     decides: bool,
 }
@@ -319,6 +320,10 @@ impl FunctionDescriptor {
 
     pub fn param_defaults(&self) -> &[Option<Expr>] {
         &self.param_defaults
+    }
+
+    pub fn external_return_type(&self) -> Option<&TypeName> {
+        self.external_return_type.as_ref()
     }
 
     pub fn chunk(&self) -> usize {
@@ -2916,11 +2921,15 @@ impl<'semantic> Lowerer<'semantic> {
             || extension.method.name.clone(),
             |module| format!("{module}.{}", extension.method.name),
         );
-        let function = self.lower_function(
+        let function = self.lower_function_with_context(
             Some(function_name),
             &params,
             &extension.method.effects,
+            extension.method.return_type.as_ref(),
             body,
+            &[],
+            &[],
+            &[],
         )?;
         state.define_extension(ExtensionBinding {
             name: extension.method.name.clone(),
@@ -3338,19 +3347,36 @@ impl<'semantic> Lowerer<'semantic> {
             self.facts,
         );
         self.install_global_bindings(&mut state);
-        let value = self.lower_expr(body, &mut state)?;
+        let value = if matches!(body.kind, ExprKind::External) {
+            self.emit_external_raw_return(
+                self.external_runtime_type_name(extension.method.return_type.as_ref(), body),
+                &mut state,
+                body.span,
+            )
+        } else {
+            self.lower_annotated_return_value(
+                extension.method.return_type.as_ref(),
+                body,
+                &mut state,
+            )?
+        };
         state.chunk.emit(Instruction::Return {
             value,
             span: body.span,
         });
         let register_params =
             class_extension_register_params(fields, &extension.receiver, &extension.method.params)?;
+        let source_params =
+            class_extension_source_params(fields, &extension.receiver, &extension.method.params);
         let function = self.push_function_descriptor(
             Some(format!("{class_name}.{}", extension.method.name)),
             register_params.clone(),
-            extension.method.params.clone(),
+            source_params,
             vec![None; register_params.len()],
             vec![None; register_params.len()],
+            matches!(body.kind, ExprKind::External).then(|| {
+                self.external_runtime_type_name(extension.method.return_type.as_ref(), body)
+            }),
             state,
             extension
                 .method
@@ -3829,21 +3855,33 @@ impl<'semantic> Lowerer<'semantic> {
         type_params: &[TypeParam],
     ) -> Vec<String> {
         let mut names = Vec::new();
-        if let Some(base_name) =
-            base.and_then(|annotation| self.type_annotation_aggregate_name(annotation, type_params))
-            && self.resolve_interface_layout(&base_name).is_some()
-        {
+        if let Some(base_name) = base.and_then(|annotation| {
+            self.type_annotation_interface_runtime_name(annotation, type_params)
+        }) {
             names.push(base_name);
         }
-        names.extend(
-            interfaces
-                .iter()
-                .filter_map(|annotation| {
-                    self.type_annotation_aggregate_name(annotation, type_params)
-                })
-                .filter(|name| self.resolve_interface_layout(name).is_some()),
-        );
+        names.extend(interfaces.iter().filter_map(|annotation| {
+            self.type_annotation_interface_runtime_name(annotation, type_params)
+        }));
         names
+    }
+
+    fn type_annotation_interface_runtime_name(
+        &self,
+        annotation: &TypeAnnotation,
+        type_params: &[TypeParam],
+    ) -> Option<String> {
+        let type_name = self
+            .resolve_static_type_function_type_name(&annotation.name, type_params, 0)
+            .unwrap_or_else(|| annotation.name.clone());
+        let (name, args) = aggregate_type_name_parts(&type_name)?;
+        if self.resolve_interface_layout(&name).is_none() {
+            return None;
+        }
+        if args.is_empty() {
+            return Some(name);
+        }
+        render_runtime_type_name_from_type_name(&TypeName::Applied { name, args })
     }
 
     fn lower_class_method(
@@ -3916,6 +3954,7 @@ impl<'semantic> Lowerer<'semantic> {
             Vec::new(),
             vec![None; register_params.len()],
             vec![None; register_params.len()],
+            None,
             state,
             false,
         )?;
@@ -3978,6 +4017,7 @@ impl<'semantic> Lowerer<'semantic> {
                 method.params.clone(),
                 vec![None; register_params.len()],
                 vec![None; register_params.len()],
+                None,
                 state,
                 decides,
             );
@@ -4003,6 +4043,7 @@ impl<'semantic> Lowerer<'semantic> {
             method.params.clone(),
             vec![None; register_params.len()],
             vec![None; register_params.len()],
+            None,
             state,
             decides,
         )
@@ -9486,16 +9527,6 @@ impl<'semantic> Lowerer<'semantic> {
             || self.interface_layouts.contains_key(name)
     }
 
-    fn lower_function(
-        &mut self,
-        name: Option<String>,
-        params: &[Param],
-        effects: &[String],
-        body: &Expr,
-    ) -> Result<usize, UnsupportedBytecode> {
-        self.lower_function_with_context(name, params, effects, None, body, &[], &[], &[])
-    }
-
     fn lower_task_function_with_context(
         &mut self,
         name: Option<String>,
@@ -9563,6 +9594,7 @@ impl<'semantic> Lowerer<'semantic> {
             params.to_vec(),
             param_types,
             param_defaults,
+            None,
             state,
             decides,
         )
@@ -9657,6 +9689,7 @@ impl<'semantic> Lowerer<'semantic> {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
             state,
             false,
         )
@@ -9675,6 +9708,8 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> Result<usize, UnsupportedBytecode> {
         let param_names = lower_param_names(params)?;
         let decides = effects.iter().any(|effect| effect == "decides");
+        let external_return_type = matches!(body.kind, ExprKind::External)
+            .then(|| self.external_runtime_type_name(return_type, body));
         let mut state = ChunkState::with_params(
             name.as_ref()
                 .map_or_else(|| "<anonymous>".to_string(), |name| name.clone()),
@@ -9707,6 +9742,7 @@ impl<'semantic> Lowerer<'semantic> {
                 params.to_vec(),
                 param_types,
                 param_defaults,
+                external_return_type.clone(),
                 state,
                 decides,
             );
@@ -9727,6 +9763,7 @@ impl<'semantic> Lowerer<'semantic> {
             params.to_vec(),
             param_types,
             param_defaults,
+            external_return_type,
             state,
             decides,
         )
@@ -9739,6 +9776,7 @@ impl<'semantic> Lowerer<'semantic> {
         source_params: Vec<Param>,
         param_types: Vec<Option<Type>>,
         param_defaults: Vec<Option<Expr>>,
+        external_return_type: Option<TypeName>,
         state: ChunkState,
         decides: bool,
     ) -> Result<usize, UnsupportedBytecode> {
@@ -9750,6 +9788,7 @@ impl<'semantic> Lowerer<'semantic> {
             source_params,
             param_types,
             param_defaults,
+            external_return_type,
             chunk: chunk_index,
             decides,
         });
@@ -10583,6 +10622,35 @@ fn class_extension_register_params(
     names.push(receiver.name.clone());
     names.extend(lower_param_names(params)?);
     Ok(names)
+}
+
+fn class_extension_source_params(
+    fields: &[StructField],
+    receiver: &Param,
+    params: &[Param],
+) -> Vec<Param> {
+    let mut source_params = Vec::with_capacity(1 + fields.len() + 1 + params.len());
+    source_params.push(descriptor_placeholder_param("Self", receiver.span));
+    source_params.extend(
+        fields
+            .iter()
+            .map(|field| descriptor_placeholder_param(&field.name, field.span)),
+    );
+    source_params.push(receiver.clone());
+    source_params.extend(params.iter().cloned());
+    source_params
+}
+
+fn descriptor_placeholder_param(name: &str, span: Span) -> Param {
+    Param {
+        name: name.to_string(),
+        annotation: None,
+        type_params: Vec::new(),
+        named: false,
+        default: None,
+        pattern: ParamPattern::Binding,
+        span,
+    }
 }
 
 fn lower_failable_index_parts(expr: &Expr) -> Result<(&Expr, &Expr, Span), UnsupportedBytecode> {

@@ -1990,6 +1990,25 @@ Value.Use()
 }
 
 #[test]
+fn evaluates_external_parametric_extension_method_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+(Item:box(t) where t:type).Read():t = external {}
+
+Item:box(int) = external {}
+Item.Read() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_parameter_inference_from_parametric_extension_receiver() {
     let source = r#"
 box(t:type) := class:
@@ -2044,6 +2063,29 @@ box(t:type) := class(reader(t)):
     Item.Read()
 
 box(int){Value := 42}.ReadValue()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_extension_interface_receiver_return_runtime_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = external {}
+
+(Item:reader(t) where t:type).ReadValue():t = external {}
+
+Item:box(int) = external {}
+Item.ReadValue() + 42
 "#;
 
     assert_eq!(eval(source), Value::Int(42));
