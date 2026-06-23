@@ -12,7 +12,6 @@ fn assert_runtime_cases(cases: &[(&str, &str, Value)]) {
 }
 
 #[test]
-#[ignore = "planned column: nested failable subexpression surfaces"]
 fn evaluates_failure_context_nested_expression_surfaces() {
     assert_runtime_cases(&[
         (

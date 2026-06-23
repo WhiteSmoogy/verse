@@ -533,19 +533,33 @@ fn case_arms_have_wildcard(arms: &[CaseArm]) -> bool {
 
 fn is_failable_condition_expr(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::UnwrapOption(_) | ExprKind::BracketCall { .. } => true,
+        ExprKind::UnwrapOption(_) | ExprKind::BracketCall { .. } | ExprKind::Index { .. } => true,
         ExprKind::Unary {
             op: UnaryOp::Not, ..
         } => true,
+        ExprKind::Unary { expr, .. } => is_failable_condition_expr(expr),
         ExprKind::Binary { left, op, right } => {
             is_failure_binary_op(*op)
                 || is_failable_condition_expr(left)
                 || is_failable_condition_expr(right)
         }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            failure_condition_has_failable_expr(condition)
+                || is_failable_condition_expr(then_branch)
+                || else_branch
+                    .as_deref()
+                    .is_some_and(is_failable_condition_expr)
+        }
         ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => {
             failure_statements_have_failable_expr(statements)
         }
-        ExprKind::Profile { body, .. } => is_failable_condition_expr(body),
+        ExprKind::Profile { description, body } => {
+            is_failable_condition_expr(description) || is_failable_condition_expr(body)
+        }
         ExprKind::Spawn { .. } => false,
         ExprKind::Concurrent { .. } => false,
         ExprKind::Case { subject, arms } => {
@@ -558,14 +572,62 @@ fn is_failable_condition_expr(expr: &Expr) -> bool {
                     }) || is_failable_condition_expr(&arm.expr)
                 })
         }
-        ExprKind::For { body, .. } => is_failable_condition_expr(body),
+        ExprKind::For { clauses, body } => {
+            clauses.iter().any(|clause| match clause {
+                ForClause::Generator { iterable, .. }
+                | ForClause::Let { expr: iterable, .. }
+                | ForClause::RangeOrLet { expr: iterable, .. }
+                | ForClause::Filter(iterable) => failure_condition_has_failable_expr(iterable),
+            }) || is_failable_condition_expr(body)
+        }
         ExprKind::Member { object, .. } | ExprKind::QualifiedMember { object, .. } => {
             is_failable_condition_expr(object)
         }
-        ExprKind::Call { callee, .. } => is_failable_condition_expr(callee),
+        ExprKind::Call { callee, args } => {
+            is_failable_condition_expr(callee)
+                || args.iter().any(|arg| match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                        is_failable_condition_expr(expr)
+                    }
+                })
+        }
+        ExprKind::Array(items) | ExprKind::Tuple(items) => {
+            items.iter().any(is_failable_condition_expr)
+        }
+        ExprKind::Map(entries) => entries.iter().any(|(key, value)| {
+            is_failable_condition_expr(key) || is_failable_condition_expr(value)
+        }),
         ExprKind::Var { expr, .. } => is_failable_condition_expr(expr),
         ExprKind::Set { target, expr, .. } => {
             assignment_target_has_failable_expr(target) || is_failable_condition_expr(expr)
+        }
+        ExprKind::TypeLiteral { expr } => is_failable_condition_expr(expr),
+        ExprKind::Archetype {
+            callee, entries, ..
+        } => {
+            is_failable_condition_expr(callee)
+                || entries.iter().any(|entry| match entry {
+                    ArchetypeEntry::Field(field) => is_failable_condition_expr(&field.expr),
+                    ArchetypeEntry::Let(binding) => is_failable_condition_expr(&binding.expr),
+                    ArchetypeEntry::Block(block) => is_failable_condition_expr(block),
+                    ArchetypeEntry::ConstructorCall(call) => call
+                        .args
+                        .iter()
+                        .any(|arg| is_failable_condition_expr(call_arg_expr(arg))),
+                })
+        }
+        ExprKind::Option(Some(value)) => is_failable_condition_expr(value),
+        ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match part {
+            InterpolatedStringPart::Text(_) => false,
+            InterpolatedStringPart::Expr(expr) => is_failable_condition_expr(expr),
+        }),
+        ExprKind::StructDefinition { fields, .. } | ExprKind::ClassDefinition { fields, .. } => {
+            fields.iter().any(|field| {
+                field
+                    .default
+                    .as_ref()
+                    .is_some_and(is_failable_condition_expr)
+            })
         }
         _ => false,
     }
