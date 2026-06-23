@@ -1787,6 +1787,43 @@ if (Casted := ReaderOf(int)[Item]). Casted.Read() else. 0
 }
 
 #[test]
+fn evaluates_type_function_parametric_class_result_archetype_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    Read():t = Value
+
+BoxOf(Kind:type):type = box(Kind)
+Box := BoxOf(int){Value := 42}
+Box.Read()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_parametric_struct_result_archetype_surface() {
+    let source = r#"
+point(t:type) := struct:
+    Value:t
+
+PointOf(Kind:type):type = point(Kind)
+Point := PointOf(int){Value := 42}
+Point.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_type_literal_primitive_result_annotation() {
     let source = r#"
 Pick():type = type{1}

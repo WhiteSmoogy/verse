@@ -2135,6 +2135,26 @@ impl Checker {
                 AggregateKind::Class,
                 "class",
             ),
+            Type::TypeValueOf(item) => match *item {
+                Type::Struct(name) => (
+                    name.clone(),
+                    Type::Struct(name),
+                    AggregateKind::Struct,
+                    "struct",
+                ),
+                Type::Class(name) => (
+                    name.clone(),
+                    Type::Class(name),
+                    AggregateKind::Class,
+                    "class",
+                ),
+                other => {
+                    return Err(VerseError::check_at(
+                        format!("cannot construct value from type `{other}`"),
+                        callee.span,
+                    ));
+                }
+            },
             other => {
                 return Err(VerseError::check_at(
                     format!("cannot construct value from type `{other}`"),

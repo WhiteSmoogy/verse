@@ -7455,6 +7455,16 @@ impl<'semantic> Lowerer<'semantic> {
             };
             class_name
         };
+        let class_name = if self.resolve_class_layout(&class_name, state).is_some()
+            || matches!(
+                class_name.as_str(),
+                "event" | "generator" | "sticky_event" | "color" | "color_alpha"
+            ) {
+            class_name
+        } else {
+            self.archetype_type_value_layout_name(callee, state)
+                .unwrap_or(class_name)
+        };
         if matches!(class_name.as_str(), "event" | "generator" | "sticky_event") {
             if !entries.is_empty() {
                 return Err(UnsupportedBytecode);
@@ -7572,6 +7582,33 @@ impl<'semantic> Lowerer<'semantic> {
             span,
         });
         Ok(ValueOperand::Register(dest))
+    }
+
+    fn archetype_type_value_layout_name(
+        &self,
+        callee: &Expr,
+        state: &ChunkState,
+    ) -> Option<String> {
+        let target_name = match self.facts.expression_type(callee.span)? {
+            Type::StructType(name)
+            | Type::ClassType(name)
+            | Type::Struct(name)
+            | Type::Class(name) => name.clone(),
+            Type::TypeValueOf(item) => match item.as_ref() {
+                Type::Struct(name) | Type::Class(name) => name.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        if self.resolve_class_layout(&target_name, state).is_some() {
+            return Some(target_name);
+        }
+        let erased = erase_parametric_instance_name(&target_name);
+        if erased != target_name && self.resolve_class_layout(erased, state).is_some() {
+            return Some(erased.to_string());
+        }
+        Some(target_name)
     }
 
     fn lower_color_archetype(
@@ -9332,6 +9369,12 @@ fn runtime_names_match(left: &str, right: &str) -> bool {
     left == right
         || left.rsplit('.').next().is_some_and(|name| name == right)
         || right.rsplit('.').next().is_some_and(|name| name == left)
+}
+
+fn erase_parametric_instance_name(name: &str) -> &str {
+    name.split_once('(')
+        .map(|(generic, _)| generic)
+        .unwrap_or(name)
 }
 
 fn runtime_param_type(
