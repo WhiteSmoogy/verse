@@ -1399,6 +1399,24 @@ if (Value := Filled.Peek[]). Value else. 0
 }
 
 #[test]
+fn evaluates_external_parametric_class_method_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    Read():t = external {}
+
+Item:box(int) = external {}
+Item.Read() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_shared_constraint_parametric_class_instance_methods() {
     let source = r#"
 pair_box(t&u:type) := class:

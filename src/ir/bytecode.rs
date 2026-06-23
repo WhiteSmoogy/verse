@@ -86,6 +86,7 @@ impl BytecodeProgram {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDescriptor {
     name: String,
+    type_params: Vec<String>,
     unique: bool,
     base_class: Option<String>,
     interfaces: Vec<String>,
@@ -109,6 +110,10 @@ pub enum ObjectKind {
 impl ClassDescriptor {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn type_params(&self) -> &[String] {
+        &self.type_params
     }
 
     pub fn unique(&self) -> bool {
@@ -166,6 +171,7 @@ pub struct ClassMethodDescriptor {
     name: String,
     params: Vec<String>,
     param_types: Vec<Option<TypeName>>,
+    external_return_type: Option<TypeName>,
     function: usize,
     field_count: usize,
     decides: bool,
@@ -186,6 +192,10 @@ impl ClassMethodDescriptor {
 
     pub fn param_types(&self) -> &[Option<TypeName>] {
         &self.param_types
+    }
+
+    pub fn external_return_type(&self) -> Option<&TypeName> {
+        self.external_return_type.as_ref()
     }
 
     pub fn function(&self) -> usize {
@@ -1636,6 +1646,7 @@ fn builtin_class_layout(name: &str) -> ClassLayout {
 fn builtin_class_descriptor(name: &str) -> ClassDescriptor {
     ClassDescriptor {
         name: name.to_string(),
+        type_params: Vec::new(),
         unique: false,
         base_class: None,
         interfaces: Vec::new(),
@@ -3170,6 +3181,7 @@ impl<'semantic> Lowerer<'semantic> {
         }
         let class_descriptor = ClassDescriptor {
             name: runtime_name.clone(),
+            type_params: type_param_names.clone(),
             unique: specifiers.iter().any(|specifier| specifier == "unique"),
             base_class: base_class_name.clone(),
             interfaces: interface_names.clone(),
@@ -3740,6 +3752,14 @@ impl<'semantic> Lowerer<'semantic> {
             name: method.name.clone(),
             params: lower_param_names(&method.params)?,
             param_types: lower_runtime_param_types(&method.params, type_params, self.facts),
+            external_return_type: matches!(body.kind, ExprKind::External)
+                .then(|| {
+                    method
+                        .return_type
+                        .as_ref()
+                        .map(|return_type| self.external_runtime_type_name(Some(return_type), body))
+                })
+                .flatten(),
             function,
             field_count: fields.len(),
             decides: method.effects.iter().any(|effect| effect == "decides"),
@@ -4445,8 +4465,17 @@ impl<'semantic> Lowerer<'semantic> {
                 (field.name.clone(), field.mutable, field_type)
             })
             .collect();
+        let class_name = if args.is_empty() {
+            layout.runtime_name.clone()
+        } else {
+            let rendered_args = args
+                .iter()
+                .map(render_runtime_type_name_from_type_name)
+                .collect::<Option<Vec<_>>>()?;
+            format!("{}({})", layout.runtime_name, rendered_args.join(", "))
+        };
         Some(Constant::ExternalAggregate {
-            class_name: layout.runtime_name.clone(),
+            class_name,
             unique: layout.unique,
             object_kind: layout.object_kind,
             fields,

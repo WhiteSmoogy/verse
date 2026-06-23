@@ -63,9 +63,11 @@ struct VmBoundMethod {
 
 #[derive(Clone)]
 struct VmBoundMethodCandidate {
+    owner_type_params: Vec<String>,
     function: usize,
     params: Vec<String>,
     param_types: Vec<Option<TypeName>>,
+    external_return_type: Option<TypeName>,
     field_count: usize,
     decides: bool,
 }
@@ -2770,7 +2772,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         else {
             return None;
         };
-        let class = self.program.class(class_name)?;
+        let class = self.program_class_by_runtime_name(class_name)?;
         let mut candidates = class
             .methods()
             .iter()
@@ -2778,14 +2780,14 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 method.name() == name
                     && qualifier.is_none_or(|qualifier| method.qualifier() == Some(qualifier))
             })
-            .map(bytecode_method_candidate)
+            .map(|method| bytecode_method_candidate(method, class.type_params()))
             .collect::<Vec<_>>();
         if candidates.is_empty() && qualifier.is_some() {
             candidates = class
                 .methods()
                 .iter()
                 .filter(|method| method.name() == name)
-                .map(bytecode_method_candidate)
+                .map(|method| bytecode_method_candidate(method, class.type_params()))
                 .collect::<Vec<_>>();
         }
         if candidates.is_empty() {
@@ -2820,7 +2822,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             .methods()
             .iter()
             .filter(|method| method.name() == name)
-            .map(bytecode_method_candidate)
+            .map(|method| bytecode_method_candidate(method, class.type_params()))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Err(VerseError::runtime_at(
@@ -3078,7 +3080,13 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         VerseError::runtime_at("bytecode method index out of range", span)
                     })?;
                 match self.run_chunk(descriptor.chunk(), call_args, span, current_task, None)? {
-                    ChunkOutcome::Value(value) => Ok(CallOutcome::Value(value)),
+                    ChunkOutcome::Value(value) => Ok(CallOutcome::Value(
+                        materialize_external_bound_method_return(
+                            &method.self_value,
+                            candidate,
+                            value,
+                        ),
+                    )),
                     ChunkOutcome::Failure => Ok(CallOutcome::Failure),
                     ChunkOutcome::Suspended(suspension) => Ok(CallOutcome::Suspended(suspension)),
                 }
@@ -3866,14 +3874,49 @@ enum ChunkOutcome<'program> {
     Suspended(BytecodeSuspension<'program>),
 }
 
-fn bytecode_method_candidate(method: &ClassMethodDescriptor) -> VmBoundMethodCandidate {
+fn bytecode_method_candidate(
+    method: &ClassMethodDescriptor,
+    owner_type_params: &[String],
+) -> VmBoundMethodCandidate {
     VmBoundMethodCandidate {
+        owner_type_params: owner_type_params.to_vec(),
         function: method.function(),
         params: method.params().to_vec(),
         param_types: method.param_types().to_vec(),
+        external_return_type: method.external_return_type().cloned(),
         field_count: method.field_count(),
         decides: method.decides(),
     }
+}
+
+fn materialize_external_bound_method_return(
+    self_value: &Value,
+    candidate: &VmBoundMethodCandidate,
+    value: VmValue,
+) -> VmValue {
+    if !matches!(value, VmValue::Runtime(Value::External)) {
+        return value;
+    }
+    let Some(return_type) = candidate.external_return_type.as_ref() else {
+        return value;
+    };
+    let Value::ClassInstance { class_name, .. } = self_value else {
+        return value;
+    };
+    let Some(args) = runtime_type_args(class_name) else {
+        return value;
+    };
+    let substitutions = candidate
+        .owner_type_params
+        .iter()
+        .cloned()
+        .zip(args)
+        .collect::<HashMap<_, _>>();
+    if substitutions.is_empty() {
+        return value;
+    }
+    let return_type = substitute_runtime_type_name_params(return_type, &substitutions);
+    VmValue::Runtime(bytecode_external_return_value(&return_type))
 }
 
 fn parse_qualified_member_name(name: &str) -> (Option<&str>, &str) {
@@ -4062,6 +4105,171 @@ fn runtime_erased_type_name(name: &str) -> &str {
     name.split_once('(')
         .map(|(generic, _)| generic)
         .unwrap_or(name)
+}
+
+fn runtime_type_args(name: &str) -> Option<Vec<TypeName>> {
+    let (_, rest) = name.split_once('(')?;
+    let args = rest.strip_suffix(')')?;
+    Some(
+        split_runtime_type_args(args)
+            .into_iter()
+            .map(parse_runtime_type_name)
+            .collect(),
+    )
+}
+
+fn split_runtime_type_args(args: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut paren_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in args.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && angle_depth == 0 && brace_depth == 0 => {
+                items.push(args[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = args[start..].trim();
+    if !tail.is_empty() {
+        items.push(tail);
+    }
+    items
+}
+
+fn parse_runtime_type_name(name: &str) -> TypeName {
+    let name = name.trim();
+    if let Some(item) = name.strip_prefix('?').filter(|item| !item.is_empty()) {
+        return TypeName::Option(Box::new(parse_runtime_type_name(item)));
+    }
+    if let Some(item) = angle_wrapped_runtime_type(name, "array") {
+        return if item == "unknown" {
+            TypeName::Array(None)
+        } else {
+            TypeName::Array(Some(Box::new(parse_runtime_type_name(item))))
+        };
+    }
+    if let Some(items) = angle_wrapped_runtime_type(name, "map") {
+        let items = split_runtime_type_args(items);
+        if let [key, value] = items.as_slice() {
+            return TypeName::Map(
+                Box::new(parse_runtime_type_name(key)),
+                Box::new(parse_runtime_type_name(value)),
+            );
+        }
+    }
+    if let Some(items) = angle_wrapped_runtime_type(name, "weak_map") {
+        let items = split_runtime_type_args(items);
+        if let [key, value] = items.as_slice() {
+            return TypeName::WeakMap(
+                Box::new(parse_runtime_type_name(key)),
+                Box::new(parse_runtime_type_name(value)),
+            );
+        }
+    }
+    if let Some(items) = paren_wrapped_runtime_type(name, "tuple") {
+        return TypeName::Tuple(
+            split_runtime_type_args(items)
+                .into_iter()
+                .map(parse_runtime_type_name)
+                .collect(),
+        );
+    }
+    if let Some((head, args)) = parse_runtime_parametric_name(name) {
+        return TypeName::Applied {
+            name: head,
+            args: args.into_iter().map(parse_runtime_type_name).collect(),
+        };
+    }
+    TypeName::parse(name.to_string())
+}
+
+fn angle_wrapped_runtime_type<'a>(name: &'a str, head: &str) -> Option<&'a str> {
+    name.strip_prefix(head)
+        .and_then(|rest| rest.strip_prefix('<'))
+        .and_then(|rest| rest.strip_suffix('>'))
+}
+
+fn paren_wrapped_runtime_type<'a>(name: &'a str, head: &str) -> Option<&'a str> {
+    name.strip_prefix(head)
+        .and_then(|rest| rest.strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'))
+}
+
+fn parse_runtime_parametric_name(name: &str) -> Option<(String, Vec<&str>)> {
+    let (head, rest) = name.split_once('(')?;
+    let args = rest.strip_suffix(')')?;
+    Some((head.to_string(), split_runtime_type_args(args)))
+}
+
+fn substitute_runtime_type_name_params(
+    type_name: &TypeName,
+    substitutions: &HashMap<String, TypeName>,
+) -> TypeName {
+    match type_name {
+        TypeName::TypeBounds { lower, upper } => TypeName::TypeBounds {
+            lower: Box::new(substitute_runtime_type_name_params(lower, substitutions)),
+            upper: Box::new(substitute_runtime_type_name_params(upper, substitutions)),
+        },
+        TypeName::Array(item) => TypeName::Array(
+            item.as_ref()
+                .map(|item| Box::new(substitute_runtime_type_name_params(item, substitutions))),
+        ),
+        TypeName::Map(key, value) => TypeName::Map(
+            Box::new(substitute_runtime_type_name_params(key, substitutions)),
+            Box::new(substitute_runtime_type_name_params(value, substitutions)),
+        ),
+        TypeName::WeakMap(key, value) => TypeName::WeakMap(
+            Box::new(substitute_runtime_type_name_params(key, substitutions)),
+            Box::new(substitute_runtime_type_name_params(value, substitutions)),
+        ),
+        TypeName::Tuple(items) => TypeName::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_runtime_type_name_params(item, substitutions))
+                .collect(),
+        ),
+        TypeName::Option(item) => TypeName::Option(Box::new(substitute_runtime_type_name_params(
+            item,
+            substitutions,
+        ))),
+        TypeName::FunctionSignature {
+            params,
+            effects,
+            return_type,
+        } => TypeName::FunctionSignature {
+            params: params
+                .iter()
+                .map(|param| substitute_runtime_type_name_params(param, substitutions))
+                .collect(),
+            effects: effects.clone(),
+            return_type: Box::new(substitute_runtime_type_name_params(
+                return_type,
+                substitutions,
+            )),
+        },
+        TypeName::Applied { name, args } => TypeName::Applied {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_runtime_type_name_params(arg, substitutions))
+                .collect(),
+        },
+        TypeName::Named(name) => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| TypeName::Named(name.clone())),
+        other => other.clone(),
+    }
 }
 
 fn runtime_local_type_name(name: &str) -> &str {
