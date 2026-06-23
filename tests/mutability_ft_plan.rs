@@ -71,7 +71,6 @@ Run()
 }
 
 #[test]
-#[ignore = "planned Mutability FT column: captured aggregate mutation and rollback"]
 fn evaluates_mutability_column_captured_aggregate_mutation_and_rollback() {
     assert_runtime_cases(&[
         (
@@ -117,7 +116,7 @@ MakeMover()()
             "failed failure context rolls back captured aggregate mutations",
             r#"
 Run()<transacts>:int =
-    var Values:[]int = array{1}
+    var Values:[]int = array{2}
     var Total:int = 0
     Bump()<transacts>:int =
         if:
