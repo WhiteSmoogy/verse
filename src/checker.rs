@@ -769,6 +769,7 @@ fn is_reserved_type_alias_name(name: &str) -> bool {
             | "subscribable_event"
             | "subscribable_event_intrnl"
             | "sticky_event"
+            | "option"
             | "task"
             | "generator"
             | "subtype"
@@ -2150,6 +2151,7 @@ fn is_official_parametric_type_name(name: &str) -> bool {
             | "subscribable_event"
             | "subscribable_event_intrnl"
             | "sticky_event"
+            | "option"
             | "task"
             | "generator"
             | "subtype"
@@ -2190,6 +2192,10 @@ fn official_parametric_type(name: &str, args: &[Type], span: Span) -> Result<Typ
         "sticky_event" => {
             ensure_parametric_type_arity(name, args, &[0, 1], span)?;
             Ok(Type::StickyEvent(args.first().cloned().map(Box::new)))
+        }
+        "option" => {
+            ensure_parametric_type_arity(name, args, &[1], span)?;
+            Ok(Type::Option(Box::new(args[0].clone())))
         }
         "result" => {
             ensure_parametric_type_arity(name, args, &[2], span)?;

@@ -22,8 +22,7 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Options FT column: official option type former"]
-fn planned_options_column_official_option_type_former() {
+fn evaluates_official_option_type_former() {
     assert_runtime_cases(&[
         (
             "option type former in annotations and containers",
@@ -50,9 +49,9 @@ if (Actual := Value?). Actual else. 0
         (
             "type value parameter flows through option type former",
             r#"
-Use(Kind:type, Value:option(Kind))<computes>:int =
-    if (Actual := Value?). Actual else. 0
-Use(int, option{42})
+Pick(Kind:type, Value:option(Kind))<computes>:option(Kind) = Value
+Value := Pick(int, option{42})
+if (Actual := Value?). Actual else. 0
 "#,
             Value::Int(42),
         ),
@@ -60,8 +59,14 @@ Use(int, option{42})
             "static type literal option source can be used as option type value",
             r#"
 Pick():type = type{option{1}}
-Value:option(Pick()) = option{42}
-if (Actual := Value?). Actual else. 0
+Nested:option(Pick()) = option{option{42}}
+if:
+    Outer := Nested?
+    Inner := Outer?
+then:
+    Inner
+else:
+    0
 "#,
             Value::Int(42),
         ),
@@ -71,17 +76,17 @@ if (Actual := Value?). Actual else. 0
         (
             "option type former rejects missing item type",
             "Value:option() = false",
-            "option type expects 1 type argument",
+            "parametric type `option` expected 1 type arguments, got 0",
         ),
         (
             "option type former rejects extra item type",
             "Value:option(int, string) = false",
-            "option type expects 1 type argument",
+            "parametric type `option` expected 1 type arguments, got 2",
         ),
         (
             "option type former enforces item type",
             r#"Value:option(int) = option{"bad"}"#,
-            "option<int>",
+            "binding `Value` is annotated as `?int` but expression has type `?string`",
         ),
     ]);
 }

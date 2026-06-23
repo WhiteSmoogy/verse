@@ -1046,6 +1046,9 @@ fn render_runtime_type_name(type_name: &TypeName) -> String {
         TypeName::Option(item) => format!("?{}", render_runtime_type_name(item)),
         TypeName::Function => "function".to_string(),
         TypeName::FunctionSignature { .. } => "type{...}".to_string(),
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            format!("?{}", render_runtime_type_name(&args[0]))
+        }
         TypeName::Applied { name, args } => render_runtime_parametric_type_name(name, args),
         TypeName::Named(name) => name.clone(),
     }
@@ -2229,6 +2232,9 @@ fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
             Value::Option(None) | Value::Bool(false) => true,
             _ => false,
         },
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            runtime_event_payload_matches(value, &TypeName::Option(Box::new(args[0].clone())))
+        }
         TypeName::Named(name) | TypeName::Applied { name, .. } => {
             runtime_named_value_matches(value, name)
         }

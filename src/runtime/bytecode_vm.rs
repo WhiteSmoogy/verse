@@ -4506,6 +4506,12 @@ fn parse_runtime_type_name(name: &str) -> TypeName {
     if let Some(item) = name.strip_prefix('?').filter(|item| !item.is_empty()) {
         return TypeName::Option(Box::new(parse_runtime_type_name(item)));
     }
+    if let Some(items) = paren_wrapped_runtime_type(name, "option") {
+        let items = split_runtime_type_args(items);
+        if let [item] = items.as_slice() {
+            return TypeName::Option(Box::new(parse_runtime_type_name(item)));
+        }
+    }
     if let Some(item) = angle_wrapped_runtime_type(name, "array") {
         return if item == "unknown" {
             TypeName::Array(None)
@@ -5039,6 +5045,9 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
                 | Value::External
         ),
         TypeName::Named(name) => runtime_named_value_matches_type(value, name),
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            runtime_value_matches_type_name(value, &TypeName::Option(Box::new(args[0].clone())))
+        }
         TypeName::Applied { name, .. } => match value {
             Value::SubscribableEventIntrnl { .. } => matches!(
                 name.as_str(),

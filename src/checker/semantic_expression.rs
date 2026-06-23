@@ -2581,6 +2581,18 @@ impl Checker {
                 }
 
                 match name.as_str() {
+                    "option" => {
+                        if type_args.len() != 1 {
+                            return Err(VerseError::check_at(
+                                format!(
+                                    "option type expects 1 type argument, got {}",
+                                    type_args.len()
+                                ),
+                                expr.span,
+                            ));
+                        }
+                        Ok(TypeName::Option(Box::new(type_args[0].clone())))
+                    }
                     "type" => {
                         if type_args.len() != 2 {
                             return Err(VerseError::check_at(
@@ -6453,6 +6465,7 @@ fn is_static_type_function_body_type_value_former(name: &str) -> bool {
             | "subscribable_event"
             | "subscribable_event_intrnl"
             | "sticky_event"
+            | "option"
             | "task"
             | "generator"
             | "classifiable_subset"

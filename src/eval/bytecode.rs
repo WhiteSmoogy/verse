@@ -210,6 +210,10 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
                 value: Box::new(Value::External),
             }
         }
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            let _ = args;
+            Value::Option(None)
+        }
         TypeName::Array(_) => Value::Array(Rc::new(RefCell::new(Vec::new()))),
         TypeName::Map(_, _) | TypeName::WeakMap(_, _) => {
             Value::Map(Rc::new(RefCell::new(Vec::new())))

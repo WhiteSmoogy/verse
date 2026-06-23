@@ -10465,6 +10465,9 @@ fn bytecode_type_from_type_name(name: &TypeName) -> Type {
             args.first()
                 .map(|arg| Box::new(bytecode_type_from_type_name(arg))),
         ),
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            Type::Option(Box::new(bytecode_type_from_type_name(&args[0])))
+        }
         TypeName::Applied { name, args } if name == "generator" => Type::Generator(
             args.first()
                 .map(|arg| Box::new(bytecode_type_from_type_name(arg))),
@@ -10929,6 +10932,7 @@ fn is_bytecode_official_parametric_type_name(name: &str) -> bool {
             | "subscribable_event"
             | "subscribable_event_intrnl"
             | "sticky_event"
+            | "option"
             | "task"
             | "generator"
             | "subtype"
@@ -10977,6 +10981,7 @@ fn bytecode_expr_to_type_name(expr: &Expr) -> Option<TypeName> {
                 .collect::<Option<Vec<_>>>()?;
             match name.as_str() {
                 "tuple" if args.len() >= 2 => Some(TypeName::Tuple(args)),
+                "option" if args.len() == 1 => Some(TypeName::Option(Box::new(args[0].clone()))),
                 "weak_map" if args.len() == 2 => Some(TypeName::WeakMap(
                     Box::new(args[0].clone()),
                     Box::new(args[1].clone()),
@@ -11216,6 +11221,9 @@ fn render_runtime_type_name_from_type_name(name: &TypeName) -> Option<String> {
         TypeName::Option(item) => format!("?{}", render_runtime_type_name_from_type_name(item)?),
         TypeName::Function => "function".to_string(),
         TypeName::FunctionSignature { .. } => return None,
+        TypeName::Applied { name, args } if name == "option" && args.len() == 1 => {
+            format!("?{}", render_runtime_type_name_from_type_name(&args[0])?)
+        }
         TypeName::Applied { name, args } => {
             if matches!(
                 name.as_str(),
