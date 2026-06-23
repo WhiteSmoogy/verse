@@ -1,5 +1,5 @@
-//! Planned executable inventory for finishing the remaining Types FT.
-//! Each ignored test is one work column; unignore one column, make it pass, then commit.
+//! Executable inventory for finishing the remaining Types FT.
+//! Ignored tests are planned work columns; unignore one column, make it pass, then commit.
 
 mod common;
 use common::*;
@@ -29,7 +29,7 @@ fn planned_types_column_full_type_function_runtime_surfaces() {
             "higher-order type former parameter",
             r#"
 ListOf(Kind:type):type = []Kind
-Use(Former:type{_(type):type}, Kind:type, Item:Former(Kind)):int =
+Use(Former:type{_(:type):type}, Kind:type, Item:Former(Kind)):int =
     Item[0]
 Use(ListOf, int, array{42})
 "#,
@@ -98,8 +98,7 @@ Pick(child_item).Value + 2
 }
 
 #[test]
-#[ignore = "planned Types FT column: generated parametric aggregate member surfaces"]
-fn planned_types_column_generated_parametric_member_surfaces() {
+fn evaluates_types_column_generated_parametric_member_surfaces() {
     assert_runtime_cases(&[
         (
             "constructed parametric class preserves external method return type",
@@ -144,6 +143,7 @@ box(t:type) := class:
 maker(t:type) := interface:
     Make():box(t) = external {}
 item(t:type) := class(maker(t)):
+    Marker:int = 0
 Item:item(int) = item(int){}
 Item.Make().Value + 42
 "#,

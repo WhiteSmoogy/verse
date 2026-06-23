@@ -8145,12 +8145,19 @@ impl<'semantic> Lowerer<'semantic> {
             return;
         }
         names.push(name.to_string());
-        if let Some(layout) = self.class_layouts.get(name) {
+        if let Some(layout) = self
+            .class_layouts
+            .get(name)
+            .or_else(|| self.class_layouts.get(erase_parametric_instance_name(name)))
+        {
+            let substitutions = class_layout_type_arg_substitutions(layout, name);
             for interface in &layout.interfaces {
-                self.collect_receiver_runtime_type_names(interface, seen, names);
+                let interface = substitute_runtime_type_name_params(interface, &substitutions);
+                self.collect_receiver_runtime_type_names(&interface, seen, names);
             }
             if let Some(base) = &layout.base_class {
-                self.collect_receiver_runtime_type_names(base, seen, names);
+                let base = substitute_runtime_type_name_params(base, &substitutions);
+                self.collect_receiver_runtime_type_names(&base, seen, names);
             }
         }
     }
@@ -8686,14 +8693,21 @@ impl<'semantic> Lowerer<'semantic> {
         let runtime_class_name = self
             .archetype_type_value_runtime_name(callee, state)
             .unwrap_or_else(|| layout.runtime_name.clone());
+        let type_arg_substitutions =
+            class_layout_type_arg_substitutions(&layout, &runtime_class_name);
 
         state.enter_scope();
         let mut explicit_fields = HashMap::new();
         for entry in entries {
             match entry {
                 ArchetypeEntry::Field(field) => {
-                    let value =
-                        self.lower_archetype_field_value(&layout, &field.name, &field.expr, state)?;
+                    let value = self.lower_archetype_field_value(
+                        &layout,
+                        &field.name,
+                        &field.expr,
+                        &type_arg_substitutions,
+                        state,
+                    )?;
                     explicit_fields.insert(field.name.clone(), value);
                 }
                 ArchetypeEntry::Let(binding) => {
@@ -8762,7 +8776,7 @@ impl<'semantic> Lowerer<'semantic> {
                 value
             } else {
                 let value_expr = field.default.as_ref().ok_or(UnsupportedBytecode)?;
-                self.lower_default_field_value(field, value_expr, state)?
+                self.lower_default_field_value(field, value_expr, &type_arg_substitutions, state)?
             };
             fields.push((field.name.clone(), field.mutable, value));
         }
@@ -8787,9 +8801,14 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         field: &StructField,
         expr: &Expr,
+        substitutions: &HashMap<String, TypeName>,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
-        self.lower_annotated_value(field.annotation.as_ref(), expr, state)
+        let annotation = field
+            .annotation
+            .as_ref()
+            .map(|annotation| substitute_type_annotation_params(annotation, substitutions));
+        self.lower_annotated_value(annotation.as_ref(), expr, state)
     }
 
     fn lower_archetype_field_value(
@@ -8797,14 +8816,16 @@ impl<'semantic> Lowerer<'semantic> {
         layout: &ClassLayout,
         name: &str,
         expr: &Expr,
+        substitutions: &HashMap<String, TypeName>,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
         let annotation = layout
             .fields
             .iter()
             .find(|field| field.name == name)
-            .and_then(|field| field.annotation.as_ref());
-        self.lower_annotated_value(annotation, expr, state)
+            .and_then(|field| field.annotation.as_ref())
+            .map(|annotation| substitute_type_annotation_params(annotation, substitutions));
+        self.lower_annotated_value(annotation.as_ref(), expr, state)
     }
 
     fn lower_annotated_value(
@@ -10683,6 +10704,37 @@ fn descriptor_placeholder_param(name: &str, span: Span) -> Param {
         pattern: ParamPattern::Binding,
         span,
     }
+}
+
+fn class_layout_type_arg_substitutions(
+    layout: &ClassLayout,
+    runtime_name: &str,
+) -> HashMap<String, TypeName> {
+    let Some((_, args)) = parse_parametric_instance_name(runtime_name) else {
+        return HashMap::new();
+    };
+    if args.len() != layout.type_params.len() {
+        return HashMap::new();
+    }
+    layout
+        .type_params
+        .iter()
+        .cloned()
+        .zip(args.iter().map(|arg| parse_runtime_type_name(arg)))
+        .collect()
+}
+
+fn substitute_runtime_type_name_params(
+    name: &str,
+    substitutions: &HashMap<String, TypeName>,
+) -> String {
+    if substitutions.is_empty() {
+        return name.to_string();
+    }
+    let type_name = parse_runtime_type_name(name);
+    substitute_bytecode_type_name_params(&type_name, substitutions)
+        .and_then(|type_name| render_runtime_type_name_from_type_name(&type_name))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn lower_failable_index_parts(expr: &Expr) -> Result<(&Expr, &Expr, Span), UnsupportedBytecode> {
