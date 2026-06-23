@@ -13,8 +13,8 @@ use crate::eval::{
     bytecode_call_native_subscription_cancel_method, bytecode_class_instance_value,
     bytecode_class_type_value, bytecode_color_add_values, bytecode_color_divide_values,
     bytecode_color_multiply_or_scale_values, bytecode_color_subtract_values,
-    bytecode_event_signal_payload, bytecode_external_value, bytecode_interface_type_value,
-    bytecode_load_field_value, bytecode_modifier_stack_add,
+    bytecode_event_signal_payload, bytecode_external_return_value, bytecode_external_value,
+    bytecode_interface_type_value, bytecode_load_field_value, bytecode_modifier_stack_add,
     bytecode_modifier_stack_ordered_modifiers, bytecode_native_array_method_value,
     bytecode_native_function_value, bytecode_native_member_value, bytecode_new_running_task,
     bytecode_struct_type_value, rational_or_int, register_runtime_class_types,
@@ -3176,11 +3176,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         .into_iter()
                         .map(|arg| into_runtime(arg, span))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let value = if matches!(return_type.as_ref(), TypeName::None) {
-                        Value::None
-                    } else {
-                        bytecode_external_value(&return_type)
-                    };
+                    let value = bytecode_external_return_value(&return_type);
                     return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                 }
                 if let Value::NativeFunction {
@@ -4433,6 +4429,9 @@ fn value_from_constant(constant: &Constant) -> VmValue {
             })
         }
         Constant::External(type_name) => VmValue::Runtime(bytecode_external_value(type_name)),
+        Constant::ExternalReturn(type_name) => {
+            VmValue::Runtime(bytecode_external_return_value(type_name))
+        }
         Constant::GlobalRef(name) => {
             panic!("global ref `{name}` must be resolved by BytecodeExecutor")
         }

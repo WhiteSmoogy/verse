@@ -17,9 +17,10 @@ pub(crate) use bytecode::{
     bytecode_call_native_cancel_method, bytecode_call_native_event_method,
     bytecode_call_native_subscribable_method, bytecode_call_native_subscription_cancel_method,
     bytecode_class_instance_value, bytecode_class_type_value, bytecode_event_signal_payload,
-    bytecode_external_value, bytecode_interface_type_value, bytecode_load_field_value,
-    bytecode_modifier_stack_add, bytecode_modifier_stack_ordered_modifiers,
-    bytecode_native_member_value, bytecode_new_running_task, bytecode_struct_type_value,
+    bytecode_external_return_value, bytecode_external_value, bytecode_interface_type_value,
+    bytecode_load_field_value, bytecode_modifier_stack_add,
+    bytecode_modifier_stack_ordered_modifiers, bytecode_native_member_value,
+    bytecode_new_running_task, bytecode_struct_type_value,
 };
 mod color_ops;
 use color_ops::{

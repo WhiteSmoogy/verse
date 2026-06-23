@@ -2475,6 +2475,56 @@ Handler(21)
 }
 
 #[test]
+fn evaluates_type_function_external_primitive_function_return_runtime_surface() {
+    let source = r#"
+IntOf():type = int
+
+Make():IntOf() = external {}
+Make() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_external_tuple_function_return_runtime_surface() {
+    let source = r#"
+PairOf():type = tuple(int, int)
+
+Make():PairOf() = external {}
+Pair := Make()
+Pair(0) + Pair(1) + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_external_result_function_return_runtime_surface() {
+    let source = r#"
+ResultOf(Success:type, Error:type):type = result(Success, Error)
+
+Make():ResultOf(int, string) = external {}
+Outcome := Make()
+if (Value := Outcome.GetSuccess[]). Value + 42 else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_type_function_type_literal_signed_non_number_result_annotation() {
     let source = r#"
 Pick():type = type{+"ready"}

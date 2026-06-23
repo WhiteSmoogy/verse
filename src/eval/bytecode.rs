@@ -7,10 +7,10 @@ use crate::token::Span;
 
 use super::value_ops::value_copy;
 use super::{
-    CallValue, RuntimeClassInstanceField, RuntimeClassTypeInfo, RuntimeClassifiableSubsetEntry,
-    RuntimeModifierEntry, RuntimeSubscriptionEntry, Value, compare_rational, event_signal_value,
-    expect_runtime_rational, modifier_stack_position, register_runtime_class_type,
-    validate_event_signal_args,
+    CallValue, RationalValue, RuntimeClassInstanceField, RuntimeClassTypeInfo,
+    RuntimeClassifiableSubsetEntry, RuntimeModifierEntry, RuntimeSubscriptionEntry, Value,
+    compare_rational, event_signal_value, expect_runtime_rational, modifier_stack_position,
+    register_runtime_class_type, validate_event_signal_args,
 };
 
 pub(crate) fn bytecode_struct_type_value(name: String, computes: bool) -> Value {
@@ -226,6 +226,66 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
             return_type: return_type.clone(),
         },
         _ => Value::External,
+    }
+}
+
+pub(crate) fn bytecode_external_return_value(type_name: &TypeName) -> Value {
+    match type_name {
+        TypeName::Int => Value::Int(0),
+        TypeName::IntRange { min, .. } => Value::Int(*min),
+        TypeName::Float => Value::Float(0.0),
+        TypeName::FloatRange(range) => {
+            let value = if range.contains(0.0) {
+                0.0
+            } else {
+                range.min.get()
+            };
+            Value::Float(value)
+        }
+        TypeName::Rational => Value::Rational(RationalValue::from_int(0)),
+        TypeName::Number => Value::Int(0),
+        TypeName::Bool => Value::Bool(false),
+        TypeName::String | TypeName::Message => Value::String(String::new()),
+        TypeName::Char | TypeName::Char8 => Value::Char('\0'),
+        TypeName::Char32 => Value::Char32('\0'),
+        TypeName::None => Value::None,
+        TypeName::Array(_) => Value::Array(Rc::new(RefCell::new(Vec::new()))),
+        TypeName::Map(_, _) | TypeName::WeakMap(_, _) => {
+            Value::Map(Rc::new(RefCell::new(Vec::new())))
+        }
+        TypeName::Tuple(items) => Value::Tuple(
+            items
+                .iter()
+                .map(bytecode_external_return_value)
+                .collect::<Vec<_>>(),
+        ),
+        TypeName::Option(_) => Value::Option(None),
+        TypeName::Applied { name, args } if name == "result" && args.len() == 2 => Value::Result {
+            succeeded: true,
+            value: Box::new(bytecode_external_return_value(&args[0])),
+        },
+        TypeName::Applied { name, args } if name == "success_result" && args.len() == 1 => {
+            Value::Result {
+                succeeded: true,
+                value: Box::new(bytecode_external_return_value(&args[0])),
+            }
+        }
+        TypeName::Applied { name, args } if name == "error_result" && args.len() == 1 => {
+            Value::Result {
+                succeeded: false,
+                value: Box::new(bytecode_external_return_value(&args[0])),
+            }
+        }
+        TypeName::FunctionSignature {
+            params,
+            effects,
+            return_type,
+        } => Value::ExternalFunction {
+            params: params.clone(),
+            effects: effects.clone(),
+            return_type: return_type.clone(),
+        },
+        _ => bytecode_external_value(type_name),
     }
 }
 

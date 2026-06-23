@@ -395,6 +395,7 @@ pub enum Constant {
         params: Vec<String>,
     },
     External(TypeName),
+    ExternalReturn(TypeName),
     GlobalRef(String),
 }
 
@@ -4313,6 +4314,18 @@ impl<'semantic> Lowerer<'semantic> {
         span: Span,
     ) -> ValueOperand {
         let source = state.constant(Constant::External(value_type));
+        let dest = state.allocate_register(span);
+        state.chunk.emit(Instruction::Move { dest, source, span });
+        ValueOperand::Register(dest)
+    }
+
+    fn emit_external_return(
+        &mut self,
+        value_type: TypeName,
+        state: &mut ChunkState,
+        span: Span,
+    ) -> ValueOperand {
+        let source = state.constant(Constant::ExternalReturn(value_type));
         let dest = state.allocate_register(span);
         state.chunk.emit(Instruction::Move { dest, source, span });
         ValueOperand::Register(dest)
@@ -8394,6 +8407,23 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
+    fn lower_annotated_return_value(
+        &mut self,
+        annotation: Option<&TypeAnnotation>,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<ValueOperand, UnsupportedBytecode> {
+        if matches!(expr.kind, ExprKind::External) {
+            Ok(self.emit_external_return(
+                self.external_runtime_type_name(annotation, expr),
+                state,
+                expr.span,
+            ))
+        } else {
+            self.lower_expr(expr, state)
+        }
+    }
+
     fn lower_failable_annotated_value(
         &mut self,
         annotation: Option<&TypeAnnotation>,
@@ -8403,6 +8433,26 @@ impl<'semantic> Lowerer<'semantic> {
         if matches!(expr.kind, ExprKind::External) {
             Ok((
                 self.emit_external(
+                    self.external_runtime_type_name(annotation, expr),
+                    state,
+                    expr.span,
+                ),
+                Vec::new(),
+            ))
+        } else {
+            self.lower_failable_expr(expr, state)
+        }
+    }
+
+    fn lower_failable_annotated_return_value(
+        &mut self,
+        annotation: Option<&TypeAnnotation>,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
+        if matches!(expr.kind, ExprKind::External) {
+            Ok((
+                self.emit_external_return(
                     self.external_runtime_type_name(annotation, expr),
                     state,
                     expr.span,
@@ -9258,7 +9308,7 @@ impl<'semantic> Lowerer<'semantic> {
         state.begin_defer_scope(body.span);
         let value = if decides {
             let (value, mut failure_jumps) =
-                self.lower_failable_annotated_value(return_type, body, &mut state)?;
+                self.lower_failable_annotated_return_value(return_type, body, &mut state)?;
             state.end_defer_scope(body.span);
             state.chunk.emit(Instruction::Return {
                 value,
@@ -9281,7 +9331,7 @@ impl<'semantic> Lowerer<'semantic> {
                 decides,
             );
         } else {
-            self.lower_annotated_value(return_type, body, &mut state)?
+            self.lower_annotated_return_value(return_type, body, &mut state)?
         };
         state.end_defer_scope(body.span);
         state.chunk.emit(Instruction::Return {
