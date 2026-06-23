@@ -8648,6 +8648,15 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> Result<Option<ValueOperand>, UnsupportedBytecode> {
+        if let Some(Type::Enum(enum_name)) = self.facts.expression_type(span)
+            && let Some((prefix, variant)) = path.rsplit_once('.')
+            && runtime_names_match(prefix, enum_name)
+        {
+            return Ok(Some(state.constant(Constant::EnumValue {
+                enum_name: enum_name.to_string(),
+                variant: variant.to_string(),
+            })));
+        }
         if let Some((enum_name, variant)) = path.rsplit_once('.')
             && let Some(layout) = self.resolve_enum_layout(enum_name, state)
             && layout.variants.contains(variant)
