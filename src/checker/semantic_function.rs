@@ -403,6 +403,7 @@ pub(super) fn types_not_distinct(
     match (left, right) {
         (Type::Any | Type::Unknown, _) | (_, Type::Any | Type::Unknown) => true,
         (Type::None, _) | (_, Type::None) => true,
+        _ if numeric_types_overlap(left, right) => true,
         (Type::Option(_), Type::Bool) | (Type::Bool, Type::Option(_)) => true,
         (Type::Array(_), Type::Map(_, _) | Type::WeakMap(_, _))
         | (Type::Map(_, _) | Type::WeakMap(_, _), Type::Array(_)) => true,
@@ -428,6 +429,61 @@ pub(super) fn types_not_distinct(
         }
         _ => false,
     }
+}
+
+fn numeric_types_overlap(left: &Type, right: &Type) -> bool {
+    match (left, right) {
+        (Type::Number, other) | (other, Type::Number) => numeric_domain(other).is_some(),
+        (Type::Rational, other) | (other, Type::Rational) => {
+            matches!(numeric_domain(other), Some(NumericDomain::Int | NumericDomain::Rational))
+        }
+        (Type::Int, other) | (other, Type::Int) => {
+            matches!(
+                numeric_domain(other),
+                Some(NumericDomain::Int | NumericDomain::Rational)
+            )
+        }
+        (Type::IntRange(left), Type::IntRange(right)) => int_ranges_overlap(*left, *right),
+        (Type::IntRange(_), other) | (other, Type::IntRange(_)) => {
+            matches!(
+                numeric_domain(other),
+                Some(NumericDomain::Int | NumericDomain::Rational)
+            )
+        }
+        (Type::Float, other) | (other, Type::Float) => {
+            matches!(numeric_domain(other), Some(NumericDomain::Float))
+        }
+        (Type::FloatRange(left), Type::FloatRange(right)) => float_ranges_overlap(*left, *right),
+        (Type::FloatRange(_), other) | (other, Type::FloatRange(_)) => {
+            matches!(numeric_domain(other), Some(NumericDomain::Float))
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NumericDomain {
+    Int,
+    Rational,
+    Float,
+}
+
+fn numeric_domain(value_type: &Type) -> Option<NumericDomain> {
+    match value_type {
+        Type::Int | Type::IntRange(_) => Some(NumericDomain::Int),
+        Type::Rational => Some(NumericDomain::Rational),
+        Type::Float | Type::FloatRange(_) => Some(NumericDomain::Float),
+        Type::Number => None,
+        _ => None,
+    }
+}
+
+fn int_ranges_overlap(left: IntRange, right: IntRange) -> bool {
+    left.min <= right.max && right.min <= left.max
+}
+
+fn float_ranges_overlap(left: FloatRange, right: FloatRange) -> bool {
+    left.min.get() <= right.max.get() && right.min.get() <= left.max.get()
 }
 
 pub(super) fn class_types_not_distinct(

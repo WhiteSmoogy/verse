@@ -22,7 +22,6 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Functions overload FT column: numeric subtype distinctness"]
 fn rejects_functions_overload_column_numeric_subtype_distinctness() {
     assert_check_rejects(&[
         (
