@@ -299,6 +299,7 @@ pub struct FunctionDescriptor {
     external_return_type: Option<TypeName>,
     chunk: usize,
     decides: bool,
+    captures: bool,
 }
 
 impl FunctionDescriptor {
@@ -332,6 +333,10 @@ impl FunctionDescriptor {
 
     pub fn decides(&self) -> bool {
         self.decides
+    }
+
+    pub fn captures(&self) -> bool {
+        self.captures
     }
 }
 
@@ -1502,19 +1507,6 @@ impl ChunkState {
                 .rev()
                 .find_map(|scope| scope.get(&qualified).copied())
             })
-    }
-
-    fn binding_is_global_ref(&self, binding: Binding) -> bool {
-        matches!(
-            binding.operand,
-            ValueOperand::Constant(index)
-                if matches!(self.chunk.constants().get(index), Some(Constant::GlobalRef(_)))
-        )
-    }
-
-    fn callable_name_uses_local_binding(&self, name: &str) -> bool {
-        self.lookup(name)
-            .is_some_and(|binding| !self.binding_is_global_ref(binding))
     }
 
     fn import(&mut self, module: String) {
@@ -3403,6 +3395,7 @@ impl<'semantic> Lowerer<'semantic> {
                 .effects
                 .iter()
                 .any(|effect| effect == "decides"),
+            false,
         )?;
         Ok(ExtensionBinding {
             name: extension.method.name.clone(),
@@ -3977,6 +3970,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             false,
+            false,
         )?;
         Ok(ClassBlockDescriptor {
             function,
@@ -4040,6 +4034,7 @@ impl<'semantic> Lowerer<'semantic> {
                 None,
                 state,
                 decides,
+                false,
             );
         }
 
@@ -4066,6 +4061,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             decides,
+            false,
         )
     }
 
@@ -7998,14 +7994,12 @@ impl<'semantic> Lowerer<'semantic> {
         let await_sequence = call_uses_await_sequence(callee);
         let has_named_args = args.iter().any(|arg| matches!(arg, CallArg::Named { .. }));
         let direct_callee_name = callable_lookup_name(callee);
-        let direct_callee_uses_local_binding = direct_callee_name
-            .as_deref()
-            .is_some_and(|name| state.callable_name_uses_local_binding(name));
         let selected_function = direct_callee_name
             .as_deref()
             .filter(|name| !bytecode_native_function_name(name))
-            .filter(|_| !direct_callee_uses_local_binding)
             .and_then(|name| self.select_function_descriptor_for_call(name, args));
+        let selected_direct_function =
+            selected_function.filter(|function| !self.functions[*function].captures());
 
         let callee = if let Some(name) = implicit_self_member {
             let self_binding = state.lookup("Self").ok_or(UnsupportedBytecode)?;
@@ -8017,7 +8011,7 @@ impl<'semantic> Lowerer<'semantic> {
                 span,
             });
             ValueOperand::Register(dest)
-        } else if let Some(function) = selected_function {
+        } else if let Some(function) = selected_direct_function {
             state.constant(Constant::Function(function))
         } else {
             self.lower_expr(callee, state)?
@@ -9736,6 +9730,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             decides,
+            !captures.is_empty(),
         )
     }
 
@@ -9831,6 +9826,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             false,
+            false,
         )
     }
 
@@ -9884,6 +9880,7 @@ impl<'semantic> Lowerer<'semantic> {
                 external_return_type.clone(),
                 state,
                 decides,
+                !captures.is_empty(),
             );
         } else {
             self.lower_annotated_return_value(return_type, body, &mut state)?
@@ -9905,6 +9902,7 @@ impl<'semantic> Lowerer<'semantic> {
             external_return_type,
             state,
             decides,
+            !captures.is_empty(),
         )
     }
 
@@ -9918,6 +9916,7 @@ impl<'semantic> Lowerer<'semantic> {
         external_return_type: Option<TypeName>,
         state: ChunkState,
         decides: bool,
+        captures: bool,
     ) -> Result<usize, UnsupportedBytecode> {
         let chunk_index = self.chunks.len() + 1;
         let function_index = self.functions.len();
@@ -9930,6 +9929,7 @@ impl<'semantic> Lowerer<'semantic> {
             external_return_type,
             chunk: chunk_index,
             decides,
+            captures,
         });
         self.chunks.push(state.finish());
         Ok(function_index)

@@ -345,6 +345,7 @@ Primary references:
 | Mutation | `<computes>` struct field assignment through mutable paths | `point := struct<computes>:`, `var P:point = point{}`, `set P.X = 1`, `set W.Inner.X = 42`, rejects non-`<computes>` structs and immutable paths | `evaluates_computes_struct_field_mutation`, `evaluates_computes_struct_field_mutation_in_failure_context`, `evaluates_nested_computes_struct_field_mutation`, `evaluates_computes_struct_field_mutation_through_var_class_field`, `rejects_field_mutation_on_non_computes_struct`, `rejects_computes_struct_field_mutation_through_immutable_binding`, `rejects_computes_struct_field_mutation_through_immutable_class_field` |
 | Mutation | Add-assignment and assignment expressions in failure contexts | `set Total += 1`, `if (set TeamSize = TeamSizes["red"]):` | `evaluates_mutable_variables_and_array_slots`, `evaluates_loop_with_break`, `evaluates_set_expression_in_if_condition`, `evaluates_map_slot_set_expression_before_failure_binding`, `rejects_plain_set_expression_as_only_if_condition` |
 | Mutation | Numeric compound assignment | `set Total -= 1`, `set Total *= 2`, `set Total /= 2` | `evaluates_numeric_compound_assignments`, `evaluates_compound_assignments_to_slots_and_fields`, `rejects_int_divide_assignment_with_rational_result`, `rejects_non_numeric_subtract_assignment`, `runtime_errors_on_divide_assignment_by_zero` |
+| Mutation | Non-local mutation through captured variables and closures | local and returned `<transacts>` closures mutate captured variables, array/map slots, and `<computes>` struct fields with rollback; rejects missing write effects, outer `<computes>` calls, and effect erasure | `evaluates_mutability_column_non_local_mutation_runtime`, `evaluates_mutability_column_captured_aggregate_mutation_and_rollback`, `rejects_mutability_column_non_local_effect_and_capability_mismatches` |
 | Mutation | Immutable assignment rejection | `set X = 2` where `X := 1` | `rejects_assignment_to_immutable_bindings` |
 | Arrays | Verse array literals | `array{1, 2, 3}` | `evaluates_verse_array_literal_and_array_type` |
 | Arrays | Failable indexing with `int` indexes | `if (Value := Values[0]):`, rejects `Values[1.0]` and `Values[1 / 1]` | `evaluates_arrays_indexing_and_length_member`, `rejects_array_index_with_non_int`, `rejects_array_index_with_rational`, `runtime_errors_on_float_array_index` |
@@ -412,7 +413,6 @@ Primary references:
 | --- | --- | --- |
 | Maps | Core map expressions, typing, key validation, lookup/update, iteration, value-copy behavior, and weak-map static checks are implemented. | weak_map persistence backend; active-player storage restrictions; UEFN session lifecycle |
 | Functions | Core function definitions, calls, effects, overloads, extension methods, failure checks, returns, defer, and tuple-parameter behavior are implemented. | Cross-scope unreachable diagnostics; overload distinctness gaps |
-| Mutability | Core variable binding, assignment, container-slot mutation, write-effect checks, and value-copy behavior are implemented. | Non-local mutation effect propagation; mutation capability audits |
 
 ## Platform Layer (UEFN / Fortnite runtime)
 
