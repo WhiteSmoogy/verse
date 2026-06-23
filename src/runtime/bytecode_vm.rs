@@ -240,7 +240,7 @@ impl VmRef {
                         span,
                     ));
                 };
-                Ok(VmValue::Runtime(field.value.clone()))
+                Ok(VmValue::Runtime(copy_runtime_value(&field.value)))
             }
         }
     }
@@ -5899,12 +5899,23 @@ fn copy_runtime_value(value: &Value) -> Value {
             entries: entries.clone(),
             next_key: next_key.clone(),
         },
+        Value::StructInstance {
+            struct_name,
+            computes,
+            fields,
+        } => Value::StructInstance {
+            struct_name: struct_name.clone(),
+            computes: *computes,
+            fields: fields
+                .iter()
+                .map(|(name, value)| (name.clone(), copy_runtime_value(value)))
+                .collect(),
+        },
         Value::ParametricType { .. }
         | Value::Function { .. }
         | Value::Overload(_)
         | Value::BoundMethod { .. }
         | Value::Module { .. }
-        | Value::StructInstance { .. }
         | Value::ClassInstance { .. } => value.clone(),
     }
 }

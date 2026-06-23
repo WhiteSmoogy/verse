@@ -12,7 +12,6 @@ fn assert_runtime_cases(cases: &[(&str, &str, Value)]) {
 }
 
 #[test]
-#[ignore = "planned column: struct and enum value-copy runtime isolation"]
 fn evaluates_struct_enum_value_copy_semantics() {
     assert_runtime_cases(&[
         (
@@ -114,13 +113,9 @@ record := struct<computes>:
 var Current:record = record{}
 Snapshot := Current
 set Current.State = state.Done
-if:
-    Current.State = state.Done
-    Snapshot.State = state.Ready
-then:
-    42
-else:
-    0
+CurrentScore := if (Current.State = state.Done). 20 else. 0
+SnapshotScore := if (Snapshot.State = state.Ready). 22 else. 0
+CurrentScore + SnapshotScore
 "#,
             Value::Int(42),
         ),

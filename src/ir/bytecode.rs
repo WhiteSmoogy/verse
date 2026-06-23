@@ -1248,6 +1248,7 @@ struct LoweredSlotAccess {
     read_container: ValueOperand,
     index: ValueOperand,
     writebacks: Vec<SlotWriteback>,
+    field_writebacks: Vec<FieldWriteback>,
 }
 
 fn iterable_kind_from_type(value_type: &Type) -> Option<IterableKind> {
@@ -5384,6 +5385,7 @@ impl<'semantic> Lowerer<'semantic> {
         };
         self.emit_slot_call_set(&access, value_to_set, state, span);
         self.emit_slot_writebacks(&access.writebacks, state);
+        self.emit_field_writebacks(&access.field_writebacks, state);
         Ok(())
     }
 
@@ -5414,6 +5416,7 @@ impl<'semantic> Lowerer<'semantic> {
         };
         self.emit_slot_call_set(&access, value_to_set, state, span);
         self.emit_slot_writebacks(&access.writebacks, state);
+        self.emit_field_writebacks(&access.field_writebacks, state);
         Ok((value_to_set, failure_jumps))
     }
 
@@ -5428,7 +5431,8 @@ impl<'semantic> Lowerer<'semantic> {
         }
 
         let mut failure_jumps = Vec::new();
-        let mut write_container = self.lower_mutable_collection_value(slot.base, state)?;
+        let (mut write_container, field_writebacks) =
+            self.lower_mutable_collection_value(slot.base, state)?;
         let mut read_container =
             self.mutable_collection_read_value(slot.base, write_container, state);
         let mut writebacks = Vec::new();
@@ -5443,6 +5447,7 @@ impl<'semantic> Lowerer<'semantic> {
                         read_container,
                         index,
                         writebacks,
+                        field_writebacks,
                     },
                     failure_jumps,
                 ));
@@ -5612,7 +5617,7 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         collection: &Expr,
         state: &mut ChunkState,
-    ) -> Result<ValueOperand, UnsupportedBytecode> {
+    ) -> Result<(ValueOperand, Vec<FieldWriteback>), UnsupportedBytecode> {
         if let ExprKind::Ident(name) = &collection.kind {
             let Some(binding) = state.lookup(name) else {
                 return Err(UnsupportedBytecode);
@@ -5623,9 +5628,14 @@ impl<'semantic> Lowerer<'semantic> {
             if !binding.ref_backed {
                 return Err(UnsupportedBytecode);
             }
-            Ok(binding.operand)
+            Ok((binding.operand, Vec::new()))
+        } else if let ExprKind::Member { object, .. } = &collection.kind
+            && !is_self_expr(object)
+        {
+            self.lower_field_object_for_writeback(collection, state)
         } else {
             self.lower_expr(collection, state)
+                .map(|value| (value, Vec::new()))
         }
     }
 
@@ -8638,14 +8648,6 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> Result<Option<ValueOperand>, UnsupportedBytecode> {
-        if let Some(Type::Enum(enum_name)) = self.facts.expression_type(span)
-            && let Some((_, variant)) = path.rsplit_once('.')
-        {
-            return Ok(Some(state.constant(Constant::EnumValue {
-                enum_name: enum_name.to_string(),
-                variant: variant.to_string(),
-            })));
-        }
         if let Some((enum_name, variant)) = path.rsplit_once('.')
             && let Some(layout) = self.resolve_enum_layout(enum_name, state)
             && layout.variants.contains(variant)
