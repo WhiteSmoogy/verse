@@ -1529,6 +1529,27 @@ struct BytecodeTypeFunctionParam {
 }
 
 #[derive(Debug, Clone)]
+struct BytecodeTypeFunctionCandidate {
+    name: String,
+    runtime_name: String,
+    params: Vec<Param>,
+    return_type: Option<TypeAnnotation>,
+    body: Expr,
+}
+
+enum BytecodeTypeFunctionParamMatch {
+    Match(Vec<BytecodeTypeFunctionParam>),
+    NotTypeFunction,
+    Pending,
+}
+
+enum BytecodeTypeFunctionParamConstraintMatch {
+    Match(TypeParamConstraint),
+    NotTypeFunction,
+    Pending,
+}
+
+#[derive(Debug, Clone)]
 struct ClassLayout {
     runtime_name: String,
     base_class: Option<String>,
@@ -1666,50 +1687,60 @@ impl<'semantic> Lowerer<'semantic> {
         BytecodeProgram::new(self.chunks, self.functions, self.classes, 0)
     }
 
-    fn predeclare_static_type_functions(&mut self, statements: &[Stmt], namespace: Option<&str>) {
-        for statement in statements {
-            let StmtKind::Let { name, expr, .. } = &statement.kind else {
-                continue;
-            };
-            let runtime_name = namespace
-                .map(|namespace| format!("{namespace}.{name}"))
-                .unwrap_or_else(|| name.clone());
-            match &expr.kind {
-                ExprKind::Function {
-                    params,
-                    return_type,
-                    body,
-                    ..
-                } => {
-                    if static_type_function_return_type(return_type.as_ref())
-                        && let Some(type_function_params) =
-                            params.iter().map(bytecode_type_function_param).collect()
-                        && let Some(target) = bytecode_expr_to_type_name(body)
-                    {
-                        let info = BytecodeTypeFunction {
-                            params: type_function_params,
-                            target,
-                        };
-                        self.type_functions
-                            .entry(name.clone())
-                            .or_default()
-                            .push(info.clone());
-                        self.type_functions
-                            .entry(runtime_name)
-                            .or_default()
-                            .push(info);
-                    }
+    fn predeclare_static_type_functions(&mut self, statements: &[Stmt]) {
+        let mut candidates = Vec::new();
+        collect_bytecode_type_function_candidates(statements, None, &mut candidates);
+        let mut pending = vec![true; candidates.len()];
+
+        loop {
+            let mut progressed = false;
+            for (index, candidate) in candidates.iter().enumerate() {
+                if !pending[index] {
+                    continue;
                 }
-                ExprKind::ModuleDefinition { statements, .. } => {
-                    self.predeclare_static_type_functions(statements, Some(&runtime_name));
+                if !static_type_function_return_type(candidate.return_type.as_ref()) {
+                    pending[index] = false;
+                    continue;
                 }
-                _ => {}
+                let type_function_params =
+                    match self.bytecode_type_function_params(&candidate.params) {
+                        BytecodeTypeFunctionParamMatch::Match(params) => params,
+                        BytecodeTypeFunctionParamMatch::NotTypeFunction => {
+                            pending[index] = false;
+                            continue;
+                        }
+                        BytecodeTypeFunctionParamMatch::Pending => continue,
+                    };
+                let Some(target) = bytecode_expr_to_type_name(&candidate.body) else {
+                    pending[index] = false;
+                    continue;
+                };
+                let info = BytecodeTypeFunction {
+                    params: type_function_params,
+                    target,
+                };
+                self.type_functions
+                    .entry(candidate.name.clone())
+                    .or_default()
+                    .push(info.clone());
+                if candidate.runtime_name != candidate.name {
+                    self.type_functions
+                        .entry(candidate.runtime_name.clone())
+                        .or_default()
+                        .push(info);
+                }
+                pending[index] = false;
+                progressed = true;
+            }
+
+            if !progressed {
+                break;
             }
         }
     }
 
     fn lower_program(&mut self, program: &Program) -> Result<(), UnsupportedBytecode> {
-        self.predeclare_static_type_functions(&program.statements, None);
+        self.predeclare_static_type_functions(&program.statements);
         self.predeclare_runtime_type_layouts(&program.statements, None)?;
         self.predeclare_global_bindings(&program.statements, None);
         let mut state = ChunkState::new("entry");
@@ -3303,6 +3334,88 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
+    fn bytecode_type_function_params(&self, params: &[Param]) -> BytecodeTypeFunctionParamMatch {
+        let mut type_params = Vec::new();
+        let mut bytecode_params = Vec::new();
+
+        for param in params {
+            if param.named
+                || param.default.is_some()
+                || param.name.is_empty()
+                || !matches!(param.pattern, ParamPattern::Binding)
+            {
+                return BytecodeTypeFunctionParamMatch::NotTypeFunction;
+            }
+            for inferred in &param.type_params {
+                if type_params
+                    .iter()
+                    .any(|existing: &TypeParam| existing.name == inferred.name)
+                {
+                    return BytecodeTypeFunctionParamMatch::NotTypeFunction;
+                }
+                type_params.push(inferred.clone());
+            }
+            let Some(annotation) = param.annotation.as_ref() else {
+                return BytecodeTypeFunctionParamMatch::NotTypeFunction;
+            };
+            let constraint = match self
+                .bytecode_type_function_param_constraint(&annotation.name, &type_params)
+            {
+                BytecodeTypeFunctionParamConstraintMatch::Match(constraint) => constraint,
+                BytecodeTypeFunctionParamConstraintMatch::NotTypeFunction => {
+                    return BytecodeTypeFunctionParamMatch::NotTypeFunction;
+                }
+                BytecodeTypeFunctionParamConstraintMatch::Pending => {
+                    return BytecodeTypeFunctionParamMatch::Pending;
+                }
+            };
+            if type_params
+                .iter()
+                .any(|existing: &TypeParam| existing.name == param.name)
+            {
+                return BytecodeTypeFunctionParamMatch::NotTypeFunction;
+            }
+            type_params.push(TypeParam {
+                name: param.name.clone(),
+                constraint,
+                span: param.span,
+            });
+            bytecode_params.push(BytecodeTypeFunctionParam {
+                name: param.name.clone(),
+                constraint: annotation.name.clone(),
+            });
+        }
+
+        BytecodeTypeFunctionParamMatch::Match(bytecode_params)
+    }
+
+    fn bytecode_type_function_param_constraint(
+        &self,
+        type_name: &TypeName,
+        type_params: &[TypeParam],
+    ) -> BytecodeTypeFunctionParamConstraintMatch {
+        if let Some(constraint) = bytecode_type_function_target_to_type_param_constraint(type_name)
+        {
+            return BytecodeTypeFunctionParamConstraintMatch::Match(constraint);
+        }
+        let TypeName::Applied { name, .. } = type_name else {
+            return BytecodeTypeFunctionParamConstraintMatch::NotTypeFunction;
+        };
+        if is_bytecode_official_parametric_type_name(name) {
+            return BytecodeTypeFunctionParamConstraintMatch::NotTypeFunction;
+        }
+        if !self.type_functions.contains_key(name) {
+            return BytecodeTypeFunctionParamConstraintMatch::Pending;
+        }
+        let Some(resolved) = self.resolve_static_type_function_type_name(type_name, type_params, 0)
+        else {
+            return BytecodeTypeFunctionParamConstraintMatch::Pending;
+        };
+        bytecode_type_function_target_to_type_param_constraint(&resolved)
+            .map(BytecodeTypeFunctionParamConstraintMatch::Match)
+            .unwrap_or(BytecodeTypeFunctionParamConstraintMatch::NotTypeFunction)
+    }
+
     fn select_bytecode_type_function(
         &self,
         name: &str,
@@ -3327,30 +3440,30 @@ impl<'semantic> Lowerer<'semantic> {
         args: &[TypeName],
         type_params: &[TypeParam],
     ) -> Option<usize> {
-        info.params
-            .iter()
-            .zip(args)
-            .try_fold(0usize, |score, (param, arg)| {
-                Some(
-                    score
-                        + self.bytecode_type_function_param_match_score(param, arg, type_params)?,
-                )
-            })
+        let mut substitutions = HashMap::new();
+        let mut score = 0usize;
+        for (param, arg) in info.params.iter().zip(args) {
+            let constraint =
+                substitute_bytecode_type_name_params(&param.constraint, &substitutions)?;
+            score +=
+                self.bytecode_type_function_param_match_score(&constraint, arg, type_params)?;
+            substitutions.insert(param.name.clone(), arg.clone());
+        }
+        Some(score)
     }
 
     fn bytecode_type_function_param_match_score(
         &self,
-        param: &BytecodeTypeFunctionParam,
+        constraint: &TypeName,
         arg: &TypeName,
         type_params: &[TypeParam],
     ) -> Option<usize> {
-        if let Some(score) =
-            self.bytecode_type_constraint_match_score(&param.constraint, arg, type_params)
+        if let Some(score) = self.bytecode_type_constraint_match_score(constraint, arg, type_params)
         {
             return Some(score);
         }
         let resolved_constraint =
-            self.resolve_static_type_function_type_name(&param.constraint, type_params, 0)?;
+            self.resolve_static_type_function_type_name(constraint, type_params, 0)?;
         self.bytecode_type_constraint_match_score(&resolved_constraint, arg, type_params)
     }
 
@@ -9975,6 +10088,35 @@ fn bytecode_type_constraint_payload_head(type_name: &TypeName) -> Option<String>
     }
 }
 
+fn bytecode_type_function_target_to_type_param_constraint(
+    target: &TypeName,
+) -> Option<TypeParamConstraint> {
+    match target {
+        TypeName::Type => Some(TypeParamConstraint::Type),
+        TypeName::TypeBounds { lower, upper } => Some(TypeParamConstraint::TypeBounds {
+            lower: lower.as_ref().clone(),
+            upper: upper.as_ref().clone(),
+        }),
+        TypeName::Applied { name, args }
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1 =>
+        {
+            let parent = if name == "subtype" {
+                args[0].clone()
+            } else {
+                TypeName::Applied {
+                    name: name.clone(),
+                    args: args.clone(),
+                }
+            };
+            Some(TypeParamConstraint::Subtype(parent))
+        }
+        _ => None,
+    }
+}
+
 fn static_type_function_return_type(return_type: Option<&TypeAnnotation>) -> bool {
     return_type.is_some_and(|annotation| {
         matches!(
@@ -9984,23 +10126,69 @@ fn static_type_function_return_type(return_type: Option<&TypeAnnotation>) -> boo
     })
 }
 
-fn bytecode_type_function_param(param: &Param) -> Option<BytecodeTypeFunctionParam> {
-    let annotation = param.annotation.as_ref()?;
-    static_type_function_param_type_name(&annotation.name).then(|| BytecodeTypeFunctionParam {
-        name: param.name.clone(),
-        constraint: annotation.name.clone(),
-    })
+fn collect_bytecode_type_function_candidates(
+    statements: &[Stmt],
+    namespace: Option<&str>,
+    candidates: &mut Vec<BytecodeTypeFunctionCandidate>,
+) {
+    for statement in statements {
+        let StmtKind::Let { name, expr, .. } = &statement.kind else {
+            continue;
+        };
+        let runtime_name = namespace
+            .map(|namespace| format!("{namespace}.{name}"))
+            .unwrap_or_else(|| name.clone());
+        match &expr.kind {
+            ExprKind::Function {
+                params,
+                return_type,
+                body,
+                ..
+            } => candidates.push(BytecodeTypeFunctionCandidate {
+                name: name.clone(),
+                runtime_name,
+                params: params.clone(),
+                return_type: return_type.clone(),
+                body: body.as_ref().clone(),
+            }),
+            ExprKind::ModuleDefinition { statements, .. } => {
+                collect_bytecode_type_function_candidates(
+                    statements,
+                    Some(&runtime_name),
+                    candidates,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
-fn static_type_function_param_type_name(type_name: &TypeName) -> bool {
-    match type_name {
-        TypeName::Type | TypeName::TypeBounds { .. } => true,
-        TypeName::Applied { name, .. } => matches!(
-            name.as_str(),
-            "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
-        ),
-        _ => false,
-    }
+fn is_bytecode_official_parametric_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "event"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
+            | "task"
+            | "generator"
+            | "subtype"
+            | "castable_subtype"
+            | "concrete_subtype"
+            | "castable_concrete_subtype"
+            | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
+            | "modifier"
+            | "modifier_stack"
+            | "result"
+            | "success_result"
+            | "error_result"
+            | "awaitable"
+            | "signalable"
+            | "listenable"
+            | "subscribable"
+    )
 }
 
 fn bytecode_expr_to_type_name(expr: &Expr) -> Option<TypeName> {

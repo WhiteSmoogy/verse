@@ -1843,6 +1843,63 @@ Item.Read() + Item.Extra
 }
 
 #[test]
+fn evaluates_type_function_class_parent_with_constraint_supplier_runtime_surface() {
+    let source = r#"
+base_item := class:
+    Value:int = 40
+    Read():int = Value
+
+child_item := class(base_item):
+    Child:int = 2
+
+SubtypeOfBase():type = subtype(base_item)
+BoxOf(Kind:SubtypeOfBase()):type = Kind
+
+derived_item := class(BoxOf(child_item)):
+    Extra:int = 0
+
+Item := derived_item{}
+Item.Read() + Item.Child
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_interface_parent_with_dependent_constraint_supplier_runtime_surface() {
+    let source = r#"
+readable := interface:
+    Read():int
+
+named_readable := interface(readable):
+    Label():int
+
+SubtypeOf(Base:type):type = subtype(Base)
+ReaderOf(Base:type, Kind:SubtypeOf(Base)):type = Kind
+
+child_reader := interface(ReaderOf(readable, named_readable)):
+    Extra():int = 2
+
+box := class(child_reader):
+    Read<override>():int = 40
+    Label<override>():int = 0
+
+Item:child_reader = box{}
+Item.Read() + Item.Extra() + Item.Label()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_call_in_official_parametric_surface() {
     let source = r#"
 Payload():type = int
