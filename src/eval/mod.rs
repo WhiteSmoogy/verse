@@ -364,8 +364,11 @@ pub enum RuntimeAccessLevel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeClassInstanceField {
+    pub(crate) owner_class: String,
     pub(crate) name: String,
     pub(crate) mutable: bool,
+    pub(crate) predicts: bool,
+    pub(crate) predicts_extern: bool,
     pub(crate) value: Value,
 }
 

@@ -1,7 +1,5 @@
 use std::cmp::Ordering;
-#[cfg(feature = "tokio-host")]
-use std::collections::HashMap;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,6 +13,18 @@ use crate::eval::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PendingToken(pub(crate) u64);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PredictionKey {
+    object: usize,
+    field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PredictionDefaultKey {
+    class_name: String,
+    field: String,
+}
+
 pub(crate) trait Host {
     fn now(&self) -> Duration;
     fn arm_timer(&mut self, delay: Duration, token: PendingToken);
@@ -22,6 +32,14 @@ pub(crate) trait Host {
     fn poll_ready(&mut self) -> Vec<(PendingToken, Value)>;
     fn cancel(&mut self, token: PendingToken);
     fn has_pending(&self) -> bool;
+    fn prediction_value(
+        &mut self,
+        object: usize,
+        class_name: &str,
+        field: &str,
+        default: &Value,
+    ) -> Value;
+    fn set_prediction_value(&mut self, object: usize, class_name: &str, field: &str, value: Value);
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +107,8 @@ pub(crate) struct MockHost {
     timers: BinaryHeap<TimerEntry>,
     futures: Vec<(PendingToken, Pin<Box<dyn Future<Output = Value>>>)>,
     scripted_future_completions: VecDeque<ScriptedFutureCompletion>,
+    prediction_values: HashMap<PredictionKey, Value>,
+    prediction_defaults: HashMap<PredictionDefaultKey, Value>,
     poll_count: usize,
 }
 
@@ -100,6 +120,8 @@ impl Default for MockHost {
             timers: BinaryHeap::new(),
             futures: Vec::new(),
             scripted_future_completions: VecDeque::new(),
+            prediction_values: HashMap::new(),
+            prediction_defaults: HashMap::new(),
             poll_count: 0,
         }
     }
@@ -120,6 +142,23 @@ impl MockHost {
     #[cfg(test)]
     pub(crate) fn poll_count(&self) -> usize {
         self.poll_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_prediction_default(
+        class_name: impl Into<String>,
+        field: impl Into<String>,
+        value: Value,
+    ) -> Self {
+        let mut host = Self::default();
+        host.prediction_defaults.insert(
+            PredictionDefaultKey {
+                class_name: class_name.into(),
+                field: field.into(),
+            },
+            value,
+        );
+        host
     }
 
     fn poll_futures(&mut self, ready: &mut Vec<(PendingToken, Value)>) {
@@ -203,6 +242,48 @@ impl Host for MockHost {
     fn has_pending(&self) -> bool {
         !self.timers.is_empty() || !self.futures.is_empty()
     }
+
+    fn prediction_value(
+        &mut self,
+        object: usize,
+        class_name: &str,
+        field: &str,
+        default: &Value,
+    ) -> Value {
+        let key = PredictionKey {
+            object,
+            field: field.to_string(),
+        };
+        if let Some(value) = self.prediction_values.get(&key) {
+            return value.clone();
+        }
+        let value = self
+            .prediction_defaults
+            .get(&PredictionDefaultKey {
+                class_name: class_name.to_string(),
+                field: field.to_string(),
+            })
+            .cloned()
+            .unwrap_or_else(|| default.clone());
+        self.prediction_values.insert(key, value.clone());
+        value
+    }
+
+    fn set_prediction_value(
+        &mut self,
+        object: usize,
+        _class_name: &str,
+        field: &str,
+        value: Value,
+    ) {
+        self.prediction_values.insert(
+            PredictionKey {
+                object,
+                field: field.to_string(),
+            },
+            value,
+        );
+    }
 }
 
 #[cfg(feature = "tokio-host")]
@@ -212,6 +293,8 @@ pub(crate) struct TokioHost {
     local: tokio::task::LocalSet,
     ready: RcReadyQueue,
     pending: HashMap<PendingToken, tokio::task::JoinHandle<()>>,
+    prediction_values: HashMap<PredictionKey, Value>,
+    prediction_defaults: HashMap<PredictionDefaultKey, Value>,
 }
 
 #[cfg(feature = "tokio-host")]
@@ -229,6 +312,8 @@ impl TokioHost {
             local: tokio::task::LocalSet::new(),
             ready: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             pending: HashMap::new(),
+            prediction_values: HashMap::new(),
+            prediction_defaults: HashMap::new(),
         }
     }
 
@@ -292,6 +377,48 @@ impl Host for TokioHost {
 
     fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn prediction_value(
+        &mut self,
+        object: usize,
+        class_name: &str,
+        field: &str,
+        default: &Value,
+    ) -> Value {
+        let key = PredictionKey {
+            object,
+            field: field.to_string(),
+        };
+        if let Some(value) = self.prediction_values.get(&key) {
+            return value.clone();
+        }
+        let value = self
+            .prediction_defaults
+            .get(&PredictionDefaultKey {
+                class_name: class_name.to_string(),
+                field: field.to_string(),
+            })
+            .cloned()
+            .unwrap_or_else(|| default.clone());
+        self.prediction_values.insert(key, value.clone());
+        value
+    }
+
+    fn set_prediction_value(
+        &mut self,
+        object: usize,
+        _class_name: &str,
+        field: &str,
+        value: Value,
+    ) {
+        self.prediction_values.insert(
+            PredictionKey {
+                object,
+                field: field.to_string(),
+            },
+            value,
+        );
     }
 }
 

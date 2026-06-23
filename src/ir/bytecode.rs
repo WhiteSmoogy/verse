@@ -126,6 +126,8 @@ pub enum ObjectKind {
 pub struct FieldDescriptor {
     name: String,
     mutable: bool,
+    predicts: bool,
+    predicts_extern: bool,
     type_name: TypeName,
 }
 
@@ -136,6 +138,14 @@ impl FieldDescriptor {
 
     pub fn mutable(&self) -> bool {
         self.mutable
+    }
+
+    pub fn predicts(&self) -> bool {
+        self.predicts
+    }
+
+    pub fn predicts_extern(&self) -> bool {
+        self.predicts_extern
     }
 
     pub fn type_name(&self) -> &TypeName {
@@ -1510,7 +1520,7 @@ impl ChunkState {
                 .iter()
                 .rev()
                 .find_map(|scope| scope.get(&qualified).copied())
-            })
+        })
     }
 
     fn import(&mut self, module: String) {
@@ -3170,6 +3180,14 @@ impl<'semantic> Lowerer<'semantic> {
                 FieldDescriptor {
                     name: field.name.clone(),
                     mutable: field.mutable,
+                    predicts: field
+                        .specifiers
+                        .iter()
+                        .any(|specifier| specifier == "predicts"),
+                    predicts_extern: field
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "predicts_extern"),
                     type_name,
                 }
             })

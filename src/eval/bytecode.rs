@@ -54,6 +54,7 @@ pub(crate) fn bytecode_class_instance_value(
     unique: bool,
     fields: Vec<(String, bool, Value)>,
 ) -> Value {
+    let owner_class = class_name.clone();
     Value::ClassInstance {
         class_name,
         unique,
@@ -61,8 +62,11 @@ pub(crate) fn bytecode_class_instance_value(
             fields
                 .into_iter()
                 .map(|(name, mutable, value)| RuntimeClassInstanceField {
+                    owner_class: owner_class.clone(),
                     name,
                     mutable,
+                    predicts: false,
+                    predicts_extern: false,
                     value,
                 })
                 .collect(),

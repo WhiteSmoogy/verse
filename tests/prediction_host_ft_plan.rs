@@ -22,7 +22,6 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Prediction/host FT column: predicts field accessors"]
 fn evaluates_prediction_host_column_predicts_field_accessors() {
     assert_runtime_cases(&[
         (

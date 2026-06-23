@@ -632,6 +632,50 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         self.host.now().as_secs_f64()
     }
 
+    fn class_instance_value(
+        &self,
+        class_name: String,
+        unique: bool,
+        fields: Vec<(String, bool, Value)>,
+    ) -> Value {
+        let descriptors = self
+            .program_class_by_runtime_name(&class_name)
+            .map(|class| {
+                class
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name().to_string(),
+                            (field.predicts(), field.predicts_extern()),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let fields = fields
+            .into_iter()
+            .map(|(name, mutable, value)| {
+                let (predicts, predicts_extern) =
+                    descriptors.get(&name).copied().unwrap_or((false, false));
+                RuntimeClassInstanceField {
+                    owner_class: class_name.clone(),
+                    name,
+                    mutable,
+                    predicts,
+                    predicts_extern,
+                    value,
+                }
+            })
+            .collect();
+        Value::ClassInstance {
+            class_name,
+            unique,
+            fields: Rc::new(RefCell::new(fields)),
+            methods: Rc::new(Vec::new()),
+        }
+    }
+
     fn run_chunk(
         &mut self,
         chunk_index: usize,
@@ -1248,7 +1292,8 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     span,
                 } => {
                     let ref_value = self.get_ref_operand(&frame, ref_value, span)?;
-                    frame.set_register(dest, ref_value.get(span)?)?;
+                    let value = self.get_ref_value(&ref_value, span)?;
+                    frame.set_register(dest, value)?;
                 }
                 Instruction::RefSet {
                     ref_value,
@@ -1257,7 +1302,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 } => {
                     let ref_value = self.get_ref_operand(&frame, ref_value, span)?;
                     let value = self.get_operand(&frame, value, span)?;
-                    ref_value.set(value, span)?;
+                    self.set_ref_value(&ref_value, value, span)?;
                     tick_entry_after_instruction = true;
                 }
                 Instruction::RefSetLive {
@@ -1269,7 +1314,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     let _ = self.get_operand(&frame, task, span)?;
                     let ref_value = self.get_ref_operand(&frame, ref_value, span)?;
                     let value = self.get_operand(&frame, value, span)?;
-                    ref_value.set(value, span)?;
+                    self.set_ref_value(&ref_value, value, span)?;
                     tick_entry_after_instruction = true;
                 }
                 Instruction::Freeze { dest, value, span }
@@ -1336,7 +1381,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     let container = match self.get_operand(&frame, container, span)? {
                         VmValue::Ref(ref_value) => into_runtime(ref_value.borrow().clone(), span)?,
                         VmValue::FieldRef(field_ref) => {
-                            into_runtime(VmRef::Field(field_ref).get(span)?, span)?
+                            into_runtime(self.get_ref_value(&VmRef::Field(field_ref), span)?, span)?
                         }
                         value => into_runtime(value, span)?,
                     };
@@ -1389,7 +1434,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                                 .program_class_by_runtime_name(&class_name)
                                 .is_some_and(|class| class.unique());
                             let object =
-                                bytecode_class_instance_value(class_name.clone(), unique, fields);
+                                self.class_instance_value(class_name.clone(), unique, fields);
                             self.run_class_blocks(
                                 &object,
                                 &class_name,
@@ -1631,21 +1676,23 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 object_kind,
                 fields,
             } => match object_kind {
-                ObjectKind::Class => VmValue::Runtime(bytecode_class_instance_value(
-                    class_name.clone(),
-                    *unique,
-                    fields
-                        .iter()
-                        .map(|(name, mutable, type_name)| {
-                            let mut visiting = Vec::new();
-                            (
-                                name.clone(),
-                                *mutable,
-                                self.program_external_return_value(type_name, &mut visiting),
-                            )
-                        })
-                        .collect(),
-                )),
+                ObjectKind::Class => VmValue::Runtime(
+                    self.class_instance_value(
+                        class_name.clone(),
+                        *unique,
+                        fields
+                            .iter()
+                            .map(|(name, mutable, type_name)| {
+                                let mut visiting = Vec::new();
+                                (
+                                    name.clone(),
+                                    *mutable,
+                                    self.program_external_return_value(type_name, &mut visiting),
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
                 ObjectKind::Struct { computes } => VmValue::Runtime(Value::StructInstance {
                     struct_name: class_name.clone(),
                     computes: *computes,
@@ -2786,7 +2833,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
     }
 
     fn load_field_value(
-        &self,
+        &mut self,
         object: Value,
         name: &str,
         span: Span,
@@ -2795,6 +2842,11 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             return Ok(VmValue::Runtime(value));
         }
         let (qualifier, member_name) = parse_qualified_member_name(name);
+        if qualifier.is_none()
+            && let Some(value) = self.load_predicts_field_value(&object, member_name)
+        {
+            return Ok(VmValue::Runtime(value));
+        }
         if qualifier.is_none()
             && let Some(value) = bytecode_load_field_value(&object, member_name)
         {
@@ -2817,6 +2869,29 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             format!("field `{name}` not found"),
             span,
         ))
+    }
+
+    fn load_predicts_field_value(&mut self, object: &Value, name: &str) -> Option<Value> {
+        let Value::ClassInstance { fields, .. } = object else {
+            return None;
+        };
+        let object = Rc::as_ptr(fields) as usize;
+        let (owner_class, field_name, default) = {
+            let fields = fields.borrow();
+            let field = fields.iter().find(|field| field.name == name)?;
+            if !field.predicts {
+                return None;
+            }
+            (
+                field.owner_class.clone(),
+                field.name.clone(),
+                field.value.clone(),
+            )
+        };
+        Some(
+            self.host
+                .prediction_value(object, &owner_class, &field_name, &default),
+        )
     }
 
     fn bound_method_value(
@@ -2999,7 +3074,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
     }
 
     fn set_field_operand(
-        &self,
+        &mut self,
         frame: &mut Frame<'program>,
         object: ValueOperand,
         name: &str,
@@ -3013,11 +3088,66 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     span,
                 ));
             };
-            return set_field_vm_value(slot, name, value, span);
+            return self.set_field_vm_value(slot, name, value, span);
         }
 
         let object = self.get_runtime_operand(frame, object, span)?;
-        set_field_value(object, name, value, span)
+        self.set_field_runtime_value(object, name, value, span)
+    }
+
+    fn set_field_vm_value(
+        &mut self,
+        object: &mut VmValue,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match object {
+            VmValue::Runtime(Value::ClassInstance { fields, .. }) => {
+                self.set_class_field_value(fields, name, value, span)
+            }
+            VmValue::Runtime(_) => set_field_vm_value(object, name, value, span),
+            _ => set_field_vm_value(object, name, value, span),
+        }
+    }
+
+    fn set_field_runtime_value(
+        &mut self,
+        object: Value,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match object {
+            Value::ClassInstance { fields, .. } => {
+                self.set_class_field_value(&fields, name, value, span)
+            }
+            object => set_field_value(object, name, value, span),
+        }
+    }
+
+    fn set_class_field_value(
+        &mut self,
+        fields: &Rc<RefCell<Vec<RuntimeClassInstanceField>>>,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let object = Rc::as_ptr(fields) as usize;
+        let mut fields = fields.borrow_mut();
+        let Some(field) = fields.iter_mut().find(|field| field.name == name) else {
+            return Err(VerseError::runtime_at(
+                format!("class has no field `{name}`"),
+                span,
+            ));
+        };
+        if field.predicts {
+            self.host
+                .set_prediction_value(object, &field.owner_class, &field.name, value);
+        } else {
+            field.value = value;
+        }
+        Ok(())
     }
 
     fn get_ref_operand(
@@ -3062,6 +3192,82 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 span,
             )),
         }
+    }
+
+    fn get_ref_value(&mut self, ref_value: &VmRef, span: Span) -> Result<VmValue, VerseError> {
+        match ref_value {
+            VmRef::Local(value) => Ok(value.borrow().clone()),
+            VmRef::Field(field_ref) => self.get_field_ref_value(field_ref, span),
+        }
+    }
+
+    fn set_ref_value(
+        &mut self,
+        ref_value: &VmRef,
+        value: VmValue,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match ref_value {
+            VmRef::Local(ref_value) => {
+                *ref_value.borrow_mut() = value;
+                Ok(())
+            }
+            VmRef::Field(field_ref) => self.set_field_ref_value(field_ref, value, span),
+        }
+    }
+
+    fn get_field_ref_value(
+        &mut self,
+        field_ref: &VmFieldRef,
+        span: Span,
+    ) -> Result<VmValue, VerseError> {
+        let object = Rc::as_ptr(&field_ref.fields) as usize;
+        let (predicts, owner_class, name, value) = {
+            let fields = field_ref.fields.borrow();
+            let Some(field) = fields.get(field_ref.index) else {
+                return Err(VerseError::runtime_at(
+                    "class field ref index out of range",
+                    span,
+                ));
+            };
+            (
+                field.predicts,
+                field.owner_class.clone(),
+                field.name.clone(),
+                field.value.clone(),
+            )
+        };
+        let value = if predicts {
+            self.host
+                .prediction_value(object, &owner_class, &name, &value)
+        } else {
+            copy_runtime_value(&value)
+        };
+        Ok(VmValue::Runtime(value))
+    }
+
+    fn set_field_ref_value(
+        &mut self,
+        field_ref: &VmFieldRef,
+        value: VmValue,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        let value = into_runtime(value, span)?;
+        let object = Rc::as_ptr(&field_ref.fields) as usize;
+        let mut fields = field_ref.fields.borrow_mut();
+        let Some(field) = fields.get_mut(field_ref.index) else {
+            return Err(VerseError::runtime_at(
+                "class field ref index out of range",
+                span,
+            ));
+        };
+        if field.predicts {
+            self.host
+                .set_prediction_value(object, &field.owner_class, &field.name, value);
+        } else {
+            field.value = value;
+        }
+        Ok(())
     }
 
     fn runtime_values_from_operands(
@@ -4028,11 +4234,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         let fields =
             self.external_descriptor_fields(class.fields(), class.type_params(), &args, visiting);
         visiting.pop();
-        Some(bytecode_class_instance_value(
-            runtime_name,
-            class.unique(),
-            fields,
-        ))
+        Some(self.class_instance_value(runtime_name, class.unique(), fields))
     }
 
     fn external_interface_return_value(
@@ -4054,7 +4256,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             visiting,
         );
         visiting.pop();
-        Some(bytecode_class_instance_value(runtime_name, false, fields))
+        Some(self.class_instance_value(runtime_name, false, fields))
     }
 
     fn external_descriptor_fields(

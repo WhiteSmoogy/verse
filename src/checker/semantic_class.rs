@@ -59,6 +59,7 @@ pub(super) struct StructFieldInfo {
     pub(super) value_type: Type,
     pub(super) has_default: bool,
     pub(super) mutable: bool,
+    pub(super) predicts: bool,
     pub(super) final_member: bool,
     pub(super) access: AccessLevel,
     pub(super) scopes: Vec<String>,
@@ -366,7 +367,7 @@ impl Checker {
                     self.define(
                         &field.name,
                         field.value_type.clone(),
-                        field.mutable,
+                        field.mutable || field.predicts,
                         method.span,
                     )?;
                 }
@@ -728,6 +729,7 @@ impl Checker {
                     value_type,
                     has_default: field.default.is_some(),
                     mutable: field.mutable,
+                    predicts: field_has_specifier(&field.specifiers, "predicts"),
                     final_member: field_has_specifier(&field.specifiers, "final"),
                     access,
                     scopes,
@@ -1502,7 +1504,7 @@ impl Checker {
                     self.define(
                         &field.name,
                         field.value_type.clone(),
-                        field.mutable,
+                        field.mutable || field.predicts,
                         block.span,
                     )?;
                 }
@@ -2034,7 +2036,7 @@ impl Checker {
                     self.define(
                         &field.name,
                         field.value_type.clone(),
-                        field.mutable,
+                        field.mutable || field.predicts,
                         method.span,
                     )?;
                 }
@@ -2140,7 +2142,7 @@ impl Checker {
                     self.define(
                         &field.name,
                         field.value_type.clone(),
-                        field.mutable,
+                        field.mutable || field.predicts,
                         extension.span,
                     )?;
                 }

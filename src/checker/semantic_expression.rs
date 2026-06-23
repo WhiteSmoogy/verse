@@ -916,7 +916,7 @@ impl Checker {
                         ));
                     }
                 };
-                if !matches!(object_type, Type::Struct(_)) && !field.mutable {
+                if !matches!(object_type, Type::Struct(_)) && !field.mutable && !field.predicts {
                     return Err(VerseError::check_at(
                         format!("cannot assign to immutable field `{name}`"),
                         target.span,
