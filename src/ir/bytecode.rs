@@ -3194,6 +3194,7 @@ impl<'semantic> Lowerer<'semantic> {
                     &runtime_name,
                     &layout_fields,
                     base_class_name.as_deref(),
+                    type_params,
                     extension,
                 )
             })
@@ -3333,6 +3334,7 @@ impl<'semantic> Lowerer<'semantic> {
         class_name: &str,
         fields: &[StructField],
         super_class: Option<&str>,
+        type_params: &[TypeParam],
         extension: &ExtensionMethod,
     ) -> Result<ExtensionBinding, UnsupportedBytecode> {
         let Some(body) = extension.method.body.as_ref() else {
@@ -3366,8 +3368,12 @@ impl<'semantic> Lowerer<'semantic> {
         });
         let register_params =
             class_extension_register_params(fields, &extension.receiver, &extension.method.params)?;
-        let source_params =
-            class_extension_source_params(fields, &extension.receiver, &extension.method.params);
+        let source_params = class_extension_source_params(
+            fields,
+            &extension.receiver,
+            &extension.method.params,
+            type_params,
+        );
         let function = self.push_function_descriptor(
             Some(format!("{class_name}.{}", extension.method.name)),
             register_params.clone(),
@@ -8677,6 +8683,9 @@ impl<'semantic> Lowerer<'semantic> {
         let Some(layout) = self.resolve_class_layout(&class_name, state).cloned() else {
             return Err(UnsupportedBytecode);
         };
+        let runtime_class_name = self
+            .archetype_type_value_runtime_name(callee, state)
+            .unwrap_or_else(|| layout.runtime_name.clone());
 
         state.enter_scope();
         let mut explicit_fields = HashMap::new();
@@ -8766,7 +8775,7 @@ impl<'semantic> Lowerer<'semantic> {
         let dest = state.allocate_register(span);
         state.chunk.emit(Instruction::NewObject {
             dest,
-            class_name: layout.runtime_name,
+            class_name: runtime_class_name,
             object_kind: layout.object_kind,
             fields,
             span,
@@ -8911,17 +8920,7 @@ impl<'semantic> Lowerer<'semantic> {
         callee: &Expr,
         state: &ChunkState,
     ) -> Option<String> {
-        let target_name = match self.facts.expression_type(callee.span)? {
-            Type::StructType(name)
-            | Type::ClassType(name)
-            | Type::Struct(name)
-            | Type::Class(name) => name.clone(),
-            Type::TypeValueOf(item) => match item.as_ref() {
-                Type::Struct(name) | Type::Class(name) => name.clone(),
-                _ => return None,
-            },
-            _ => return None,
-        };
+        let target_name = self.archetype_type_value_target_name(callee)?;
 
         if self.resolve_class_layout(&target_name, state).is_some() {
             return Some(target_name);
@@ -8931,6 +8930,36 @@ impl<'semantic> Lowerer<'semantic> {
             return Some(erased.to_string());
         }
         Some(target_name)
+    }
+
+    fn archetype_type_value_runtime_name(
+        &self,
+        callee: &Expr,
+        state: &ChunkState,
+    ) -> Option<String> {
+        let target_name = self.archetype_type_value_target_name(callee)?;
+        if self.resolve_class_layout(&target_name, state).is_some() {
+            return Some(target_name);
+        }
+        let erased = erase_parametric_instance_name(&target_name);
+        if erased != target_name && self.resolve_class_layout(erased, state).is_some() {
+            return Some(target_name);
+        }
+        None
+    }
+
+    fn archetype_type_value_target_name(&self, callee: &Expr) -> Option<String> {
+        match self.facts.expression_type(callee.span)? {
+            Type::StructType(name)
+            | Type::ClassType(name)
+            | Type::Struct(name)
+            | Type::Class(name) => Some(name.clone()),
+            Type::TypeValueOf(item) => match item.as_ref() {
+                Type::Struct(name) | Type::Class(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn lower_color_archetype(
@@ -10628,6 +10657,7 @@ fn class_extension_source_params(
     fields: &[StructField],
     receiver: &Param,
     params: &[Param],
+    type_params: &[TypeParam],
 ) -> Vec<Param> {
     let mut source_params = Vec::with_capacity(1 + fields.len() + 1 + params.len());
     source_params.push(descriptor_placeholder_param("Self", receiver.span));
@@ -10636,7 +10666,9 @@ fn class_extension_source_params(
             .iter()
             .map(|field| descriptor_placeholder_param(&field.name, field.span)),
     );
-    source_params.push(receiver.clone());
+    let mut receiver = receiver.clone();
+    receiver.type_params.extend(type_params.iter().cloned());
+    source_params.push(receiver);
     source_params.extend(params.iter().cloned());
     source_params
 }

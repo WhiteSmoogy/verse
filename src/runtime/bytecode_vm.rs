@@ -1386,8 +1386,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     let object = match object_kind {
                         ObjectKind::Class => {
                             let unique = self
-                                .program
-                                .class(&class_name)
+                                .program_class_by_runtime_name(&class_name)
                                 .is_some_and(|class| class.unique());
                             let object =
                                 bytecode_class_instance_value(class_name.clone(), unique, fields);
@@ -2910,8 +2909,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         current_task: Option<Rc<RuntimeTask>>,
     ) -> Result<(), VerseError> {
         let blocks = self
-            .program
-            .class(class_name)
+            .program_class_by_runtime_name(class_name)
             .map(|class| class.blocks().to_vec())
             .unwrap_or_default();
         let Value::ClassInstance { fields, .. } = object else {

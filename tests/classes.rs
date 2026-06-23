@@ -1990,6 +1990,25 @@ Value.Use()
 }
 
 #[test]
+fn evaluates_external_parametric_class_scoped_extension_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    (Item:box(t)).Read<public>():t = external {}
+    Use<public>():t = Self.Read()
+
+Value := box(int){Value := 0}
+Value.Use() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_external_parametric_extension_method_return_runtime_surface() {
     let source = r#"
 box(t:type) := class:
