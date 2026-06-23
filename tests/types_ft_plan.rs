@@ -153,8 +153,7 @@ Item.Make().Value + 42
 }
 
 #[test]
-#[ignore = "planned Types FT column: cross-module generated parametric surfaces"]
-fn planned_types_column_cross_module_parametric_surfaces() {
+fn evaluates_types_column_cross_module_parametric_surfaces() {
     assert_project_runtime_case(
         "public type function returns generated aggregate across using import",
         &[

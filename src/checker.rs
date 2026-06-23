@@ -1669,6 +1669,45 @@ fn replace_type_param_atoms(name: &str, inferred: &HashMap<String, Type>) -> Str
     result
 }
 
+fn split_parametric_instance_type_name(name: &str) -> Option<(String, Vec<String>)> {
+    let (head, rest) = name.split_once('(')?;
+    let args = rest.strip_suffix(')')?;
+    Some((
+        head.to_string(),
+        split_parametric_instance_type_args(args)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
+fn split_parametric_instance_type_args(args: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut paren_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in args.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && angle_depth == 0 && bracket_depth == 0 => {
+                items.push(args[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < args.len() {
+        items.push(args[start..].trim());
+    }
+    items
+}
+
 fn parametric_type_kind(expr: &Expr) -> Option<ParametricTypeKind> {
     match expr.kind {
         ExprKind::StructDefinition { .. } => Some(ParametricTypeKind::Struct),

@@ -2061,6 +2061,7 @@ impl Checker {
             )
         }));
         let result = (|| {
+            self.dependent_type_value_param_signature(params, return_type)?;
             for type_param in &type_params {
                 self.ensure_type_param_constraint_dependencies_accessible(
                     dependee,
@@ -4644,6 +4645,17 @@ impl Checker {
             self.instantiate_parametric_type(&qualified, &actual_args, span)?;
             return Ok(actual_name);
         }
-        Ok(replace_type_param_atoms(name, inferred))
+        let replaced = replace_type_param_atoms(name, inferred);
+        if replaced != name
+            && let Some((head, args)) = split_parametric_instance_type_name(&replaced)
+            && self.resolve_parametric_type_reference(&head).is_some()
+        {
+            let args = args
+                .iter()
+                .map(|arg| self.type_name_to_type_name(&TypeName::parse(arg.clone()), span))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.instantiate_parametric_type(&head, &args, span)?;
+        }
+        Ok(replaced)
     }
 }
