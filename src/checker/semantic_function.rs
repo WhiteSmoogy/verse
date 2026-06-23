@@ -235,8 +235,8 @@ pub(super) fn function_signatures_conflict(
         return false;
     }
 
-    let include_type_value_family_overlap = !(type_can_be_used_as_type_value(left_return_type)
-        && type_can_be_used_as_type_value(right_return_type));
+    let include_type_value_family_overlap = !type_can_be_used_as_type_value(left_return_type)
+        && !type_can_be_used_as_type_value(right_return_type);
 
     if let (Some(left_specs), Some(right_specs)) =
         (left_param_specs.as_deref(), right_param_specs.as_deref())
