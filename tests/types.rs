@@ -1567,6 +1567,42 @@ if (Value := Outcome.GetSuccess[]). Value else. 0
 }
 
 #[test]
+fn evaluates_type_function_official_event_result_archetype_surface() {
+    let source = r#"
+EventOf(Payload:type):type = event(Payload)
+
+Ready:EventOf(int) = EventOf(int){}
+Ready.Signal(42)
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_official_sticky_event_result_archetype_surface() {
+    let source = r#"
+StickyOf(Payload:type):type = sticky_event(Payload)
+
+Ready:StickyOf(int) = StickyOf(int){}
+Before:int = if (Ready.IsSignaled[]). 1 else. 0
+Ready.Signal(7)
+After:int = if (Ready.IsSignaled[]). 40 else. 0
+Before + After + 2
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_type_bounds_former_value_call() {
     let source = r#"
 base_item := class:

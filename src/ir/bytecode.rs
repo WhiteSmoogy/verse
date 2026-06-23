@@ -7465,6 +7465,12 @@ impl<'semantic> Lowerer<'semantic> {
             self.archetype_type_value_layout_name(callee, state)
                 .unwrap_or(class_name)
         };
+        if let Some(value_type) = self.archetype_type_value_external_type_name(callee) {
+            if !entries.is_empty() {
+                return Err(UnsupportedBytecode);
+            }
+            return Ok(self.emit_external(value_type, state, span));
+        }
         if matches!(class_name.as_str(), "event" | "generator" | "sticky_event") {
             if !entries.is_empty() {
                 return Err(UnsupportedBytecode);
@@ -7582,6 +7588,16 @@ impl<'semantic> Lowerer<'semantic> {
             span,
         });
         Ok(ValueOperand::Register(dest))
+    }
+
+    fn archetype_type_value_external_type_name(&self, callee: &Expr) -> Option<TypeName> {
+        let Type::TypeValueOf(item) = self.facts.expression_type(callee.span)? else {
+            return None;
+        };
+        match item.as_ref() {
+            Type::Event(_) | Type::StickyEvent(_) => type_to_runtime_type_name(item.as_ref()),
+            _ => None,
+        }
     }
 
     fn archetype_type_value_layout_name(

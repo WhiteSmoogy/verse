@@ -2122,6 +2122,11 @@ impl Checker {
         }
 
         let callee_type = self.check_callee_expr(callee)?;
+        if let Some(event_type) =
+            self.check_type_value_event_archetype(&callee_type, entries, callee.span)?
+        {
+            return Ok(event_type);
+        }
         let (aggregate_name, result_type, expected_kind, label) = match callee_type {
             Type::StructType(name) => (
                 name.clone(),
@@ -2355,6 +2360,28 @@ impl Checker {
         })();
         self.pop_scope();
         result
+    }
+
+    fn check_type_value_event_archetype(
+        &self,
+        callee_type: &Type,
+        entries: &[ArchetypeEntry],
+        span: Span,
+    ) -> Result<Option<Type>, VerseError> {
+        let Type::TypeValueOf(item) = callee_type else {
+            return Ok(None);
+        };
+        let event_type = match item.as_ref() {
+            Type::Event(_) | Type::StickyEvent(_) => item.as_ref().clone(),
+            _ => return Ok(None),
+        };
+        if !entries.is_empty() {
+            return Err(VerseError::check_at(
+                "`event` archetype construction expects an empty body",
+                span,
+            ));
+        }
+        Ok(Some(event_type))
     }
 
     pub(super) fn check_archetype_constructor_call(
