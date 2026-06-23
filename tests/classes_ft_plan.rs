@@ -26,8 +26,7 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Classes/interfaces column: constructor delegation surfaces"]
-fn planned_constructor_delegation_surfaces() {
+fn evaluates_constructor_delegation_surfaces() {
     assert_runtime_cases(&[
         (
             "same-class constructor delegates to parent-delegating constructor",
