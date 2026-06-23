@@ -18,6 +18,7 @@ pub struct BytecodeProgram {
     functions: Vec<FunctionDescriptor>,
     chunks: Vec<BytecodeChunk>,
     classes: Vec<ClassDescriptor>,
+    interfaces: Vec<InterfaceDescriptor>,
 }
 
 impl BytecodeProgram {
@@ -25,6 +26,7 @@ impl BytecodeProgram {
         chunks: Vec<BytecodeChunk>,
         functions: Vec<FunctionDescriptor>,
         classes: Vec<ClassDescriptor>,
+        interfaces: Vec<InterfaceDescriptor>,
         entry: usize,
     ) -> Self {
         Self {
@@ -32,6 +34,7 @@ impl BytecodeProgram {
             functions,
             chunks,
             classes,
+            interfaces,
         }
     }
 
@@ -51,8 +54,19 @@ impl BytecodeProgram {
         &self.classes
     }
 
+    pub fn interfaces(&self) -> &[InterfaceDescriptor] {
+        &self.interfaces
+    }
+
     pub fn class(&self, name: &str) -> Option<&ClassDescriptor> {
         self.classes.iter().rev().find(|class| class.name == name)
+    }
+
+    pub fn interface(&self, name: &str) -> Option<&InterfaceDescriptor> {
+        self.interfaces
+            .iter()
+            .rev()
+            .find(|interface| interface.name == name)
     }
 
     pub fn entry_chunk(&self) -> &BytecodeChunk {
@@ -73,6 +87,7 @@ impl BytecodeProgram {
             entry: 0,
             functions: Vec::new(),
             classes: Vec::new(),
+            interfaces: Vec::new(),
             chunks: vec![BytecodeChunk {
                 name: "test-entry".to_string(),
                 register_count,
@@ -162,6 +177,32 @@ impl ClassDescriptor {
 
     pub fn blocks(&self) -> &[ClassBlockDescriptor] {
         &self.blocks
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDescriptor {
+    name: String,
+    type_params: Vec<String>,
+    fields: Vec<String>,
+    methods: Vec<ClassMethodDescriptor>,
+}
+
+impl InterfaceDescriptor {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn type_params(&self) -> &[String] {
+        &self.type_params
+    }
+
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+
+    pub fn methods(&self) -> &[ClassMethodDescriptor] {
+        &self.methods
     }
 }
 
@@ -409,6 +450,10 @@ pub enum Constant {
         class_name: String,
         unique: bool,
         object_kind: ObjectKind,
+        fields: Vec<(String, bool, TypeName)>,
+    },
+    ExternalInterface {
+        interface_name: String,
         fields: Vec<(String, bool, TypeName)>,
     },
     ExternalReturn(TypeName),
@@ -1524,6 +1569,7 @@ struct Lowerer<'semantic> {
     chunks: Vec<BytecodeChunk>,
     functions: Vec<FunctionDescriptor>,
     classes: Vec<ClassDescriptor>,
+    interfaces: Vec<InterfaceDescriptor>,
     class_layouts: HashMap<String, ClassLayout>,
     enum_layouts: HashMap<String, EnumLayout>,
     interface_layouts: HashMap<String, InterfaceLayout>,
@@ -1695,6 +1741,7 @@ impl<'semantic> Lowerer<'semantic> {
                 .iter()
                 .map(|name| builtin_class_descriptor(name))
                 .collect(),
+            interfaces: Vec::new(),
             class_layouts,
             enum_layouts: HashMap::new(),
             interface_layouts: HashMap::new(),
@@ -1706,7 +1753,13 @@ impl<'semantic> Lowerer<'semantic> {
     }
 
     fn finish(self) -> BytecodeProgram {
-        BytecodeProgram::new(self.chunks, self.functions, self.classes, 0)
+        BytecodeProgram::new(
+            self.chunks,
+            self.functions,
+            self.classes,
+            self.interfaces,
+            0,
+        )
     }
 
     fn predeclare_static_type_functions(&mut self, statements: &[Stmt]) {
@@ -2087,7 +2140,7 @@ impl<'semantic> Lowerer<'semantic> {
                         parents,
                         fields.clone(),
                         methods.clone(),
-                    );
+                    )?;
                     let interface_type =
                         state.constant(Constant::InterfaceType { name: name.clone() });
                     state.define(
@@ -2207,7 +2260,7 @@ impl<'semantic> Lowerer<'semantic> {
                         parents,
                         fields.clone(),
                         methods.clone(),
-                    );
+                    )?;
                     let interface_type =
                         state.constant(Constant::InterfaceType { name: name.clone() });
                     state.define(
@@ -2545,7 +2598,7 @@ impl<'semantic> Lowerer<'semantic> {
                         parents,
                         fields.clone(),
                         methods.clone(),
-                    );
+                    )?;
                     let binding = Binding {
                         operand: state.constant(Constant::InterfaceType {
                             name: qualified.clone(),
@@ -2661,7 +2714,7 @@ impl<'semantic> Lowerer<'semantic> {
                         parents,
                         fields.clone(),
                         methods.clone(),
-                    );
+                    )?;
                     let binding = Binding {
                         operand: state.constant(Constant::InterfaceType {
                             name: qualified.clone(),
@@ -3288,7 +3341,7 @@ impl<'semantic> Lowerer<'semantic> {
         parents: &[TypeAnnotation],
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
-    ) {
+    ) -> Result<(), UnsupportedBytecode> {
         let layout = self.collect_interface_layout(
             runtime_name.clone(),
             parents,
@@ -3296,8 +3349,39 @@ impl<'semantic> Lowerer<'semantic> {
             methods,
             type_params,
         );
+        let type_param_names = type_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
+        let method_descriptors = layout
+            .methods
+            .iter()
+            .filter(|method| method.body.is_some())
+            .map(|method| {
+                self.lower_class_method(
+                    &runtime_name,
+                    &layout.fields,
+                    &[],
+                    None,
+                    method,
+                    &type_param_names,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let descriptor = InterfaceDescriptor {
+            name: runtime_name.clone(),
+            type_params: type_param_names,
+            fields: layout
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect(),
+            methods: method_descriptors,
+        };
         self.interface_layouts.insert(local_name, layout.clone());
         self.interface_layouts.insert(runtime_name, layout);
+        self.interfaces.push(descriptor);
+        Ok(())
     }
 
     fn type_annotation_aggregate_name(
@@ -4420,6 +4504,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> ValueOperand {
         let constant = self
             .external_aggregate_constant(&value_type, state)
+            .or_else(|| self.external_interface_constant(&value_type, state))
             .unwrap_or(Constant::External(value_type));
         let source = state.constant(constant);
         let dest = state.allocate_register(span);
@@ -4482,6 +4567,56 @@ impl<'semantic> Lowerer<'semantic> {
         })
     }
 
+    fn external_interface_constant(
+        &self,
+        value_type: &TypeName,
+        state: &ChunkState,
+    ) -> Option<Constant> {
+        let (name, args) = aggregate_type_name_parts(value_type)?;
+        if args.is_empty() {
+            return None;
+        }
+        let layout = self
+            .resolve_interface_layout_in_state(&name, state)
+            .or_else(|| {
+                let erased = erase_parametric_instance_name(&name);
+                (erased != name.as_str())
+                    .then(|| self.resolve_interface_layout_in_state(erased, state))
+                    .flatten()
+            })?;
+        let substitutions = layout
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let fields = layout
+            .fields
+            .iter()
+            .map(|field| {
+                let field_type = field
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| annotation.name.clone())
+                    .unwrap_or(TypeName::Any);
+                let field_type = substitute_bytecode_type_name_params(&field_type, &substitutions)
+                    .unwrap_or(field_type);
+                let field_type = self
+                    .resolve_static_type_function_type_name(&field_type, &[], 0)
+                    .unwrap_or(field_type);
+                (field.name.clone(), field.mutable, field_type)
+            })
+            .collect();
+        let rendered_args = args
+            .iter()
+            .map(render_runtime_type_name_from_type_name)
+            .collect::<Option<Vec<_>>>()?;
+        Some(Constant::ExternalInterface {
+            interface_name: format!("{}({})", layout.runtime_name, rendered_args.join(", ")),
+            fields,
+        })
+    }
+
     fn emit_external_return(
         &mut self,
         value_type: TypeName,
@@ -4490,6 +4625,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> ValueOperand {
         let constant = self
             .external_aggregate_constant(&value_type, state)
+            .or_else(|| self.external_interface_constant(&value_type, state))
             .unwrap_or(Constant::ExternalReturn(value_type));
         let source = state.constant(constant);
         let dest = state.allocate_register(span);
@@ -8865,6 +9001,19 @@ impl<'semantic> Lowerer<'semantic> {
 
     fn resolve_interface_layout(&self, name: &str) -> Option<&InterfaceLayout> {
         self.interface_layouts.get(name)
+    }
+
+    fn resolve_interface_layout_in_state(
+        &self,
+        name: &str,
+        state: &ChunkState,
+    ) -> Option<&InterfaceLayout> {
+        self.interface_layouts.get(name).or_else(|| {
+            state.imports.iter().rev().find_map(|module| {
+                let qualified = format!("{module}.{name}");
+                self.interface_layouts.get(&qualified)
+            })
+        })
     }
 
     fn lower_named_call_arguments(

@@ -22,7 +22,7 @@ use crate::eval::{
 };
 use crate::ir::bytecode::{
     BytecodeChunk, BytecodeProgram, ClassDescriptor, ClassMethodDescriptor, Constant, Instruction,
-    ObjectKind, RegisterIndex, ValueOperand,
+    InterfaceDescriptor, ObjectKind, RegisterIndex, ValueOperand,
 };
 use crate::runtime::host::{Host, MockHost, PendingToken};
 use crate::token::{CharacterKind, Span};
@@ -2772,22 +2772,26 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         else {
             return None;
         };
-        let class = self.program_class_by_runtime_name(class_name)?;
-        let mut candidates = class
-            .methods()
+        let (methods, type_params) =
+            if let Some(class) = self.program_class_by_runtime_name(class_name) {
+                (class.methods(), class.type_params())
+            } else {
+                let interface = self.program_interface_by_runtime_name(class_name)?;
+                (interface.methods(), interface.type_params())
+            };
+        let mut candidates = methods
             .iter()
             .filter(|method| {
                 method.name() == name
                     && qualifier.is_none_or(|qualifier| method.qualifier() == Some(qualifier))
             })
-            .map(|method| bytecode_method_candidate(method, class.type_params()))
+            .map(|method| bytecode_method_candidate(method, type_params))
             .collect::<Vec<_>>();
         if candidates.is_empty() && qualifier.is_some() {
-            candidates = class
-                .methods()
+            candidates = methods
                 .iter()
                 .filter(|method| method.name() == name)
-                .map(|method| bytecode_method_candidate(method, class.type_params()))
+                .map(|method| bytecode_method_candidate(method, type_params))
                 .collect::<Vec<_>>();
         }
         if candidates.is_empty() {
@@ -3732,6 +3736,16 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         })
     }
 
+    fn program_interface_by_runtime_name(&self, name: &str) -> Option<&InterfaceDescriptor> {
+        self.program.interface(name).or_else(|| {
+            self.program
+                .interfaces()
+                .iter()
+                .rev()
+                .find(|interface| runtime_type_names_match(interface.name(), name))
+        })
+    }
+
     fn runtime_cast_target(&self, value: &Value) -> Option<RuntimeCastTarget> {
         match value {
             Value::ClassType { name, .. } => Some(RuntimeCastTarget::Class(name.clone())),
@@ -4668,6 +4682,23 @@ fn value_from_constant(constant: &Constant) -> VmValue {
                     .collect(),
             }),
         },
+        Constant::ExternalInterface {
+            interface_name,
+            fields,
+        } => VmValue::Runtime(bytecode_class_instance_value(
+            interface_name.clone(),
+            false,
+            fields
+                .iter()
+                .map(|(name, mutable, type_name)| {
+                    (
+                        name.clone(),
+                        *mutable,
+                        bytecode_external_return_value(type_name),
+                    )
+                })
+                .collect(),
+        )),
         Constant::ExternalReturn(type_name) => {
             VmValue::Runtime(bytecode_external_return_value(type_name))
         }

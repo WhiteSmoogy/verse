@@ -3520,7 +3520,8 @@ box := class(reader(int)):
 Pair:pair(int) = external {}
 Stored:holder(int) = external {}
 Item:reader(int) = box{}
-Pair.Left + Stored.Get() + Stored.Value + Item.Read() + Item.Current
+ExternalItem:reader(int) = external {}
+Pair.Left + Stored.Get() + Stored.Value + Item.Read() + Item.Current + ExternalItem.Read() + ExternalItem.Current
 "#,
     );
     let entry = root.join("main.verse");
