@@ -22,8 +22,7 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned `for` column: generator iterable effect propagation"]
-fn planned_for_generator_iterable_effect_propagation() {
+fn evaluates_for_generator_iterable_effect_propagation() {
     assert_runtime_cases(&[
         (
             "computes function can iterate computes array source",
@@ -103,7 +102,7 @@ Items(Ok:logic)<decides><transacts>:[]int =
     Ok?
     array{40, 2}
 Use()<transacts>:?int = option{
-    Values:[]int = for (Item : Items[Ok := false]):
+    Values:[]int = for (Item : Items[false]):
         Item
     Values.Length
 }

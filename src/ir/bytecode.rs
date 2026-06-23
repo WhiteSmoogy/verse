@@ -6036,7 +6036,9 @@ impl<'semantic> Lowerer<'semantic> {
                 op,
                 expr: value,
             } => self.lower_failable_set_expression(target, *op, value, state, expr.span),
-            ExprKind::For { clauses, body } => self.lower_failable_for(clauses, body, state),
+            ExprKind::For { clauses, body } => {
+                self.lower_failable_for(clauses, body, state, expr.span)
+            }
             _ => {
                 let source = self.lower_expr(expr, state)?;
                 let dest = state.allocate_register(expr.span);
@@ -6602,6 +6604,7 @@ impl<'semantic> Lowerer<'semantic> {
         clauses: &[ForClause],
         body: &Expr,
         state: &mut ChunkState,
+        span: Span,
     ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
         let Some((first_clause, tail_clauses)) = clauses.split_first() else {
             return Err(UnsupportedBytecode);
@@ -6612,6 +6615,13 @@ impl<'semantic> Lowerer<'semantic> {
         else {
             return Err(UnsupportedBytecode);
         };
+
+        let result = state.allocate_register(span);
+        state.chunk.emit(Instruction::NewMutableArray {
+            dest: result,
+            values: Vec::new(),
+            span,
+        });
 
         let jumps = if let ExprKind::Binary {
             left,
@@ -6629,21 +6639,37 @@ impl<'semantic> Lowerer<'semantic> {
                 iterable.span,
                 tail_clauses,
                 body,
+                result,
                 state,
             )?
         } else {
             match self.iterable_kind_for_expr(iterable, state) {
-                Some(IterableKind::Indexed) => {
-                    self.lower_failable_indexed_for(binding, iterable, tail_clauses, body, state)?
-                }
-                Some(IterableKind::Map) => {
-                    self.lower_failable_map_for(binding, iterable, tail_clauses, body, state)?
-                }
+                Some(IterableKind::Indexed) => self.lower_failable_indexed_for(
+                    binding,
+                    iterable,
+                    tail_clauses,
+                    body,
+                    result,
+                    state,
+                )?,
+                Some(IterableKind::Map) => self.lower_failable_map_for(
+                    binding,
+                    iterable,
+                    tail_clauses,
+                    body,
+                    result,
+                    state,
+                )?,
                 None => return Err(UnsupportedBytecode),
             }
         };
 
-        Ok((state.none(), jumps))
+        state.chunk.emit(Instruction::InPlaceMakeImmutable {
+            dest: result,
+            container: ValueOperand::Register(result),
+            span,
+        });
+        Ok((ValueOperand::Register(result), jumps))
     }
 
     fn lower_range_for(
@@ -6961,6 +6987,7 @@ impl<'semantic> Lowerer<'semantic> {
         iterable_span: Span,
         tail_clauses: &[ForClause],
         body: &Expr,
+        result: RegisterIndex,
         state: &mut ChunkState,
     ) -> Result<Vec<usize>, UnsupportedBytecode> {
         let start = self.lower_expr(left, state)?;
@@ -6995,7 +7022,7 @@ impl<'semantic> Lowerer<'semantic> {
                 iterable_kind: None,
             },
         );
-        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, state)?;
+        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, result, state)?;
         state.exit_scope();
         state.chunk.emit(Instruction::Add {
             dest: index,
@@ -7018,6 +7045,7 @@ impl<'semantic> Lowerer<'semantic> {
         iterable: &Expr,
         tail_clauses: &[ForClause],
         body: &Expr,
+        result: RegisterIndex,
         state: &mut ChunkState,
     ) -> Result<Vec<usize>, UnsupportedBytecode> {
         let container = self.lower_expr(iterable, state)?;
@@ -7094,7 +7122,7 @@ impl<'semantic> Lowerer<'semantic> {
                 );
             }
         }
-        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, state)?;
+        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, result, state)?;
         state.exit_scope();
         state.chunk.emit(Instruction::Add {
             dest: index,
@@ -7117,6 +7145,7 @@ impl<'semantic> Lowerer<'semantic> {
         iterable: &Expr,
         tail_clauses: &[ForClause],
         body: &Expr,
+        result: RegisterIndex,
         state: &mut ChunkState,
     ) -> Result<Vec<usize>, UnsupportedBytecode> {
         let map = self.lower_expr(iterable, state)?;
@@ -7204,7 +7233,7 @@ impl<'semantic> Lowerer<'semantic> {
                 );
             }
         }
-        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, state)?;
+        let jumps = self.lower_failable_for_tail_or_body(tail_clauses, body, result, state)?;
         state.exit_scope();
         state.chunk.emit(Instruction::Add {
             dest: index,
@@ -7225,17 +7254,25 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         clauses: &[ForClause],
         body: &Expr,
+        result: RegisterIndex,
         state: &mut ChunkState,
     ) -> Result<Vec<usize>, UnsupportedBytecode> {
         let Some((clause, tail)) = clauses.split_first() else {
-            let (_, jumps) = self.lower_failable_expr(body, state)?;
+            let (body_value, jumps) = self.lower_failable_for_body_value(body, state)?;
+            state.chunk.emit(Instruction::ArrayAdd {
+                dest: result,
+                container: ValueOperand::Register(result),
+                value_to_add: body_value,
+                span: body.span,
+            });
             return Ok(jumps);
         };
 
         match clause {
             ForClause::Generator {
                 binding, iterable, ..
-            } => self.lower_failable_nested_for_generator(binding, iterable, tail, body, state),
+            } => self
+                .lower_failable_nested_for_generator(binding, iterable, tail, body, result, state),
             ForClause::RangeOrLet { name, expr, .. }
                 if matches!(
                     expr.kind,
@@ -7253,7 +7290,9 @@ impl<'semantic> Lowerer<'semantic> {
                 else {
                     unreachable!("range clause shape was checked above")
                 };
-                self.lower_failable_range_for(name, left, right, expr.span, tail, body, state)
+                self.lower_failable_range_for(
+                    name, left, right, expr.span, tail, body, result, state,
+                )
             }
             ForClause::Let { name, expr, span } | ForClause::RangeOrLet { name, expr, span } => {
                 let failure_context_id = self.allocate_failure_context_id();
@@ -7280,7 +7319,7 @@ impl<'semantic> Lowerer<'semantic> {
                     id: failure_context_id,
                     span: *span,
                 });
-                let tail_jumps = self.lower_failable_for_tail_or_body(tail, body, state)?;
+                let tail_jumps = self.lower_failable_for_tail_or_body(tail, body, result, state)?;
                 let failure_target = state.chunk.next_instruction_index();
                 state.chunk.patch_jump(begin_failure, failure_target);
                 state.chunk.patch_jump(end_failure, failure_target);
@@ -7302,7 +7341,7 @@ impl<'semantic> Lowerer<'semantic> {
                     id: failure_context_id,
                     span: expr.span,
                 });
-                let tail_jumps = self.lower_failable_for_tail_or_body(tail, body, state)?;
+                let tail_jumps = self.lower_failable_for_tail_or_body(tail, body, result, state)?;
                 let failure_target = state.chunk.next_instruction_index();
                 state.chunk.patch_jump(begin_failure, failure_target);
                 state.chunk.patch_jump(end_failure, failure_target);
@@ -7320,6 +7359,7 @@ impl<'semantic> Lowerer<'semantic> {
         iterable: &Expr,
         tail_clauses: &[ForClause],
         body: &Expr,
+        result: RegisterIndex,
         state: &mut ChunkState,
     ) -> Result<Vec<usize>, UnsupportedBytecode> {
         if let ExprKind::Binary {
@@ -7338,18 +7378,36 @@ impl<'semantic> Lowerer<'semantic> {
                 iterable.span,
                 tail_clauses,
                 body,
+                result,
                 state,
             );
         }
 
         match self.iterable_kind_for_expr(iterable, state) {
-            Some(IterableKind::Indexed) => {
-                self.lower_failable_indexed_for(binding, iterable, tail_clauses, body, state)
-            }
+            Some(IterableKind::Indexed) => self.lower_failable_indexed_for(
+                binding,
+                iterable,
+                tail_clauses,
+                body,
+                result,
+                state,
+            ),
             Some(IterableKind::Map) => {
-                self.lower_failable_map_for(binding, iterable, tail_clauses, body, state)
+                self.lower_failable_map_for(binding, iterable, tail_clauses, body, result, state)
             }
             None => Err(UnsupportedBytecode),
+        }
+    }
+
+    fn lower_failable_for_body_value(
+        &mut self,
+        body: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
+        if self.option_body_can_fail(body, state) {
+            self.lower_failable_expr(body, state)
+        } else {
+            Ok((self.lower_expr(body, state)?, Vec::new()))
         }
     }
 
