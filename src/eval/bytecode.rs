@@ -210,6 +210,7 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
                 value: Box::new(Value::External),
             }
         }
+        TypeName::Option(_) => Value::Option(None),
         _ => Value::External,
     }
 }

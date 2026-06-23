@@ -1464,6 +1464,22 @@ if (Item := Value?). Item else. 0
 }
 
 #[test]
+fn evaluates_type_function_option_external_runtime_surface() {
+    let source = r#"
+Maybe(Kind:type):type = ?Kind
+
+Value:Maybe(int) = external {}
+if (Item := Value?). Item else. 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_tuple_type_former_result_annotation() {
     let source = r#"
 Pair(Left:type, Right:type):type = (Left, Right)

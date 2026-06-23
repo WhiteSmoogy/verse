@@ -99,6 +99,20 @@ First + Second
 }
 
 #[test]
+fn evaluates_external_option_as_empty_runtime_value() {
+    let source = r#"
+Maybe:?int = external {}
+if (Value := Maybe?). Value else. 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_failable_option_query_inside_defer() {
     let error = check_source(
         r#"
