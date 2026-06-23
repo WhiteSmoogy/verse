@@ -21,6 +21,113 @@ fn assert_project_runtime_case(name: &str, files: &[(&str, &str)], entry: &str, 
     assert_eq!(check_project_file(&entry).expect(name), Type::Int, "{name}");
 }
 
+fn assert_runtime_string_cases(cases: &[(&str, &str, &str)]) {
+    for (name, source, expected) in cases {
+        assert_eq!(
+            run_source(source).expect(name),
+            Value::String((*expected).into()),
+            "{name}"
+        );
+    }
+}
+
+fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
+    for (name, source, expected_message) in cases {
+        let error = check_source(source).expect_err(name);
+        assert!(
+            error.to_string().contains(expected_message),
+            "{name}: expected error containing `{expected_message}`, got {error}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "planned Types FT column: arbitrary precision numeric runtime"]
+fn planned_types_column_arbitrary_precision_numeric_runtime() {
+    assert_runtime_string_cases(&[
+        (
+            "big integer addition crosses i64 max",
+            "ToString(9223372036854775807 + 1)",
+            "9223372036854775808",
+        ),
+        (
+            "big integer multiplication remains exact",
+            "ToString(3037000500 * 3037000500)",
+            "9223372037000250000",
+        ),
+        (
+            "big rational numerator reduces exactly",
+            r#"
+if:
+    Half := 9223372036854775808 / 2
+    Half = 4611686018427387904
+then:
+    "ok"
+else:
+    "bad"
+"#,
+            "ok",
+        ),
+    ]);
+}
+
+#[test]
+#[ignore = "planned Types FT column: official float-only numeric decides surfaces"]
+fn planned_types_column_float_only_numeric_decides_surfaces() {
+    assert_runtime_cases(&[(
+        "float decides helpers still run",
+        r#"
+Close := if (IsAlmostEqual[1.0, 1.01, 0.02]). 20 else. 0
+Zero := if ((0.01).IsAlmostZero[0.02]). 20 else. 0
+Finite := if (Value := (2.0).IsFinite[]). if (Rounded := Round[Value]). Rounded else. 0 else. 0
+Close + Zero + Finite
+"#,
+        Value::Int(42),
+    )]);
+
+    assert_check_rejects(&[
+        (
+            "rational IsAlmostEqual is not a float overload",
+            r#"
+if:
+    Half := 1 / 2
+    IsAlmostEqual[Half, Half, 0.1]
+then:
+    1
+else:
+    0
+"#,
+            "float",
+        ),
+        (
+            "rational IsAlmostZero receiver is not a float receiver",
+            r#"
+if:
+    Half := 1 / 2
+    Half.IsAlmostZero[0.1]
+then:
+    1
+else:
+    0
+"#,
+            "IsAlmostZero",
+        ),
+        (
+            "rational IsFinite receiver is not a float receiver",
+            r#"
+if:
+    Half := 1 / 2
+    Half.IsFinite[]
+then:
+    1
+else:
+    0
+"#,
+            "IsFinite",
+        ),
+    ]);
+}
+
 #[test]
 fn evaluates_types_column_full_type_function_runtime_surfaces() {
     assert_runtime_cases(&[
