@@ -1623,6 +1623,40 @@ Item.Stack.Evaluate(2) + StructItem.Stack.Evaluate(0)
 }
 
 #[test]
+fn evaluates_type_function_external_archetype_fields_and_assignments_runtime_surface() {
+    let source = r#"
+DataTypes<public> := module:
+    ModifierOf<public>(Item:type):type = modifier(Item)
+    StackOf<public>(Item:type):type = modifier_stack(Item)
+
+add := class(DataTypes.ModifierOf(int)):
+    Amount:int
+    Evaluate<override>(InValue:int):int =
+        InValue + Amount
+
+holder := class:
+    var Stack:DataTypes.StackOf(int)
+
+record := struct:
+    Stack:DataTypes.StackOf(int)
+
+Item := holder{Stack := external {}}
+Item.Stack.AddModifier(add{Amount := 40}, 0)
+StructItem := record{Stack := external {}}
+StructItem.Stack.AddModifier(add{Amount := 20}, 0)
+set Item.Stack = external {}
+Item.Stack.AddModifier(add{Amount := 5}, 0)
+Item.Stack.Evaluate(2) + StructItem.Stack.Evaluate(0)
+"#;
+
+    assert_eq!(eval(source), Value::Int(27));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_official_event_result_archetype_surface() {
     let source = r#"
 EventOf(Payload:type):type = event(Payload)

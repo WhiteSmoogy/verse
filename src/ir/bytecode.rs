@@ -4672,8 +4672,10 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> Result<(), UnsupportedBytecode> {
+        let field_annotation = self.field_annotation_for_object(object, name, state);
         let (object, writebacks) = self.lower_field_object_for_writeback(object, state)?;
-        let right_source = self.lower_expr(expr, state)?;
+        let right_source =
+            self.lower_annotated_field_value(field_annotation.as_ref(), expr, state)?;
         let value = match op {
             AssignOp::Assign => right_source,
             AssignOp::AddAssign
@@ -5600,8 +5602,10 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
+        let field_annotation = self.field_annotation_for_object(object, name, state);
         let (object, writebacks) = self.lower_field_object_for_writeback(object, state)?;
-        let (right_source, failure_jumps) = self.lower_failable_expr(expr, state)?;
+        let (right_source, failure_jumps) =
+            self.lower_failable_annotated_field_value(field_annotation.as_ref(), expr, state)?;
         let value = match op {
             AssignOp::Assign => right_source,
             AssignOp::AddAssign
@@ -8173,7 +8177,8 @@ impl<'semantic> Lowerer<'semantic> {
         for entry in entries {
             match entry {
                 ArchetypeEntry::Field(field) => {
-                    let value = self.lower_expr(&field.expr, state)?;
+                    let value =
+                        self.lower_archetype_field_value(&layout, &field.name, &field.expr, state)?;
                     explicit_fields.insert(field.name.clone(), value);
                 }
                 ArchetypeEntry::Let(binding) => {
@@ -8269,15 +8274,83 @@ impl<'semantic> Lowerer<'semantic> {
         expr: &Expr,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
+        self.lower_annotated_field_value(field.annotation.as_ref(), expr, state)
+    }
+
+    fn lower_archetype_field_value(
+        &mut self,
+        layout: &ClassLayout,
+        name: &str,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<ValueOperand, UnsupportedBytecode> {
+        let annotation = layout
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .and_then(|field| field.annotation.as_ref());
+        self.lower_annotated_field_value(annotation, expr, state)
+    }
+
+    fn lower_annotated_field_value(
+        &mut self,
+        annotation: Option<&TypeAnnotation>,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<ValueOperand, UnsupportedBytecode> {
         if matches!(expr.kind, ExprKind::External) {
             Ok(self.emit_external(
-                self.external_runtime_type_name(field.annotation.as_ref(), expr),
+                self.external_runtime_type_name(annotation, expr),
                 state,
                 expr.span,
             ))
         } else {
             self.lower_expr(expr, state)
         }
+    }
+
+    fn lower_failable_annotated_field_value(
+        &mut self,
+        annotation: Option<&TypeAnnotation>,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<(ValueOperand, Vec<usize>), UnsupportedBytecode> {
+        if matches!(expr.kind, ExprKind::External) {
+            Ok((
+                self.emit_external(
+                    self.external_runtime_type_name(annotation, expr),
+                    state,
+                    expr.span,
+                ),
+                Vec::new(),
+            ))
+        } else {
+            self.lower_failable_expr(expr, state)
+        }
+    }
+
+    fn field_annotation_for_object(
+        &self,
+        object: &Expr,
+        name: &str,
+        state: &ChunkState,
+    ) -> Option<TypeAnnotation> {
+        let object_type = self.facts.expression_type(object.span)?;
+        let type_name = match object_type {
+            Type::Struct(name) | Type::Class(name) => name,
+            _ => return None,
+        };
+        self.resolve_class_layout(type_name, state)
+            .or_else(|| {
+                let erased = erase_parametric_instance_name(type_name);
+                (erased != type_name)
+                    .then(|| self.resolve_class_layout(erased, state))
+                    .flatten()
+            })?
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .and_then(|field| field.annotation.clone())
     }
 
     fn archetype_type_value_external_type_name(&self, callee: &Expr) -> Option<TypeName> {
