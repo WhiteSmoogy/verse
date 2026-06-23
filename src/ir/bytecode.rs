@@ -3149,7 +3149,7 @@ impl<'semantic> Lowerer<'semantic> {
             qualifier: method.qualifier.clone(),
             name: method.name.clone(),
             params: lower_param_names(&method.params)?,
-            param_types: lower_runtime_param_types(&method.params, type_params),
+            param_types: lower_runtime_param_types(&method.params, type_params, self.facts),
             function,
             field_count: fields.len(),
             decides: method.effects.iter().any(|effect| effect == "decides"),
@@ -9394,27 +9394,49 @@ fn erase_parametric_instance_name(name: &str) -> &str {
 }
 
 fn runtime_param_type(
+    erased_type_params: &[String],
+    value_type: Option<&Type>,
     annotation: Option<&TypeAnnotation>,
+) -> Option<TypeName> {
+    if let Some(value_type) = value_type {
+        return runtime_param_type_from_type(value_type, erased_type_params);
+    }
+    let annotation = annotation?;
+    runtime_param_type_from_annotation(annotation, erased_type_params)
+}
+
+fn runtime_param_type_from_type(
+    value_type: &Type,
     erased_type_params: &[String],
 ) -> Option<TypeName> {
-    let annotation = annotation?;
-    match &annotation.name {
+    let type_name = type_to_runtime_type_name(value_type)?;
+    (!runtime_type_name_erases_to_param(&type_name, erased_type_params)).then_some(type_name)
+}
+
+fn runtime_param_type_from_annotation(
+    annotation: &TypeAnnotation,
+    erased_type_params: &[String],
+) -> Option<TypeName> {
+    (!runtime_type_name_erases_to_param(&annotation.name, erased_type_params))
+        .then(|| annotation.name.clone())
+}
+
+fn runtime_type_name_erases_to_param(type_name: &TypeName, erased_type_params: &[String]) -> bool {
+    matches!(
+        type_name,
         TypeName::Named(name) | TypeName::Applied { name, .. }
-            if erased_type_params.iter().any(|param| param == name) =>
-        {
-            None
-        }
-        other => Some(other.clone()),
-    }
+            if erased_type_params.iter().any(|param| param == name)
+    )
 }
 
 fn lower_runtime_param_types(
     params: &[Param],
     erased_type_params: &[String],
+    facts: &SemanticFacts,
 ) -> Vec<Option<TypeName>> {
     let mut types = Vec::new();
     for param in params {
-        lower_runtime_param_pattern_types(param, erased_type_params, &mut types);
+        lower_runtime_param_pattern_types(param, erased_type_params, facts, &mut types);
     }
     types
 }
@@ -9422,18 +9444,20 @@ fn lower_runtime_param_types(
 fn lower_runtime_param_pattern_types(
     param: &Param,
     erased_type_params: &[String],
+    facts: &SemanticFacts,
     types: &mut Vec<Option<TypeName>>,
 ) {
     match &param.pattern {
         ParamPattern::Binding | ParamPattern::Anonymous => {
             types.push(runtime_param_type(
-                param.annotation.as_ref(),
                 erased_type_params,
+                facts.binding_type(param.span),
+                param.annotation.as_ref(),
             ));
         }
         ParamPattern::Tuple(items) => {
             for item in items {
-                lower_runtime_param_pattern_types(item, erased_type_params, types);
+                lower_runtime_param_pattern_types(item, erased_type_params, facts, types);
             }
         }
     }

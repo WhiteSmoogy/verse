@@ -1646,6 +1646,29 @@ Accept(child_item)
 }
 
 #[test]
+fn evaluates_type_function_call_in_class_method_parameter_runtime() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+BoxOf(Kind:type):type = box(Kind)
+
+reader := class:
+    Read(Item:BoxOf(int)):int =
+        Item.Value
+
+Reader := reader{}
+Reader.Read(box(int){Value := 42})
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_call_in_extension_receiver_annotation() {
     let source = r#"
 ListOf(Kind:type):type = []Kind

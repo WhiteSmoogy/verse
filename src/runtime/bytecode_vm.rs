@@ -4062,10 +4062,7 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
                 | Value::Type(_)
                 | Value::External
         ),
-        TypeName::Named(name) => matches!(
-            value,
-            Value::ClassInstance { class_name, .. } if class_name == name
-        ),
+        TypeName::Named(name) => runtime_named_value_matches_type(value, name),
         TypeName::Applied { name, .. } => match value {
             Value::SubscribableEventIntrnl { .. } => matches!(
                 name.as_str(),
@@ -4090,8 +4087,7 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
                 name.as_str(),
                 "sticky_event" | "event" | "awaitable" | "signalable"
             ),
-            Value::ClassInstance { class_name, .. } => class_name == name,
-            _ => false,
+            other => runtime_named_value_matches_type(other, name),
         },
         TypeName::Array(_) => matches!(value, Value::Array(_) | Value::Tuple(_)),
         TypeName::Map(_, _) | TypeName::WeakMap(_, _) => matches!(value, Value::Map(_)),
@@ -4100,6 +4096,39 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
         TypeName::Function | TypeName::FunctionSignature { .. } => {
             matches!(value, Value::NativeFunction { .. } | Value::External)
         }
+    }
+}
+
+fn runtime_named_value_matches_type(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::External => true,
+        Value::Diagnostic(_) => expected == "diagnostic",
+        Value::EnumValue { enum_name, .. } => runtime_type_names_match(enum_name, expected),
+        Value::StructInstance { struct_name, .. } => {
+            runtime_type_names_match(struct_name, expected)
+        }
+        Value::ClassInstance { class_name, .. } => runtime_type_names_match(class_name, expected),
+        Value::EnumType { name, .. }
+        | Value::StructType { name, .. }
+        | Value::ClassType { name, .. }
+        | Value::InterfaceType { name, .. }
+        | Value::Module { name, .. } => runtime_type_names_match(name, expected),
+        Value::Type(TypeName::Named(name) | TypeName::Applied { name, .. }) => {
+            runtime_type_names_match(name, expected)
+        }
+        Value::Result {
+            succeeded: true, ..
+        } => expected == "result" || expected == "success_result",
+        Value::Result {
+            succeeded: false, ..
+        } => expected == "result" || expected == "error_result",
+        Value::ClassifiableSubset(_) => expected == "classifiable_subset",
+        Value::ClassifiableSubsetKey { .. } => expected == "classifiable_subset_key",
+        Value::ClassifiableSubsetVar { .. } => expected == "classifiable_subset_var",
+        Value::ModifierCancelHandle { .. } | Value::SubscriptionCancelHandle { .. } => {
+            expected == "cancelable"
+        }
+        _ => false,
     }
 }
 
