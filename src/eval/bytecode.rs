@@ -189,6 +189,13 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
                 args: vec![args[0].clone()],
             })
         }
+        TypeName::Applied { name, args } if name == "result" && args.len() == 2 => {
+            let _ = args;
+            Value::Result {
+                succeeded: true,
+                value: Box::new(Value::External),
+            }
+        }
         TypeName::Applied { name, args } if name == "success_result" && args.len() == 1 => {
             let _ = args;
             Value::Result {

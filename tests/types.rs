@@ -1529,6 +1529,24 @@ if (Value := Outcome.GetSuccess[]). Value else. 0
 }
 
 #[test]
+fn evaluates_type_function_result_external_runtime_surface() {
+    let source = r#"
+ResultOf(Success:type, Error:type):type = result(Success, Error)
+
+Outcome:ResultOf(int, string) = external {}
+GotSuccess := if (Value := Outcome.GetSuccess[]). 42 else. 0
+MissError := if (Value := Outcome.GetError[]). 0 else. 1
+GotSuccess + MissError
+"#;
+
+    assert_eq!(eval(source), Value::Int(43));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn checks_type_function_official_parametric_former_annotations() {
     let source = r#"
 EventOf(Payload:type):type = event(Payload)
