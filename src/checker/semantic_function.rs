@@ -476,7 +476,7 @@ pub(super) fn infer_function_type_params(
 
 impl Checker {
     pub(super) fn infer_function_type_params(
-        &self,
+        &mut self,
         param_types: Option<&[Type]>,
         return_type: Option<&Type>,
         arg_types: &[Type],
@@ -498,7 +498,7 @@ impl Checker {
     }
 
     fn infer_type_params_from_known_constraints(
-        &self,
+        &mut self,
         constraints: &HashMap<String, TypeParamConstraint>,
         inferred: &mut HashMap<String, Type>,
     ) -> Option<()> {
@@ -518,7 +518,7 @@ impl Checker {
     }
 
     fn infer_type_params_from_constraints(
-        &self,
+        &mut self,
         pattern: &Type,
         actual: &Type,
         inferred: &mut HashMap<String, Type>,
@@ -613,7 +613,7 @@ impl Checker {
     }
 
     pub(super) fn infer_type_params_from_constraint(
-        &self,
+        &mut self,
         constraint: &TypeParamConstraint,
         actual: &Type,
         inferred: &mut HashMap<String, Type>,
@@ -629,7 +629,7 @@ impl Checker {
     }
 
     fn type_name_to_inference_pattern(
-        &self,
+        &mut self,
         name: &TypeName,
         inferred: &HashMap<String, Type>,
     ) -> Option<Type> {
@@ -714,6 +714,9 @@ impl Checker {
                         return None;
                     }
                     let instance_name = render_parametric_instance_type_name(&qualified, &args);
+                    self.parametric_type_instances
+                        .entry(instance_name.clone())
+                        .or_insert_with(|| args.clone());
                     Some(match info.kind {
                         ParametricTypeKind::Struct => Type::Struct(instance_name),
                         ParametricTypeKind::Class => Type::Class(instance_name),
@@ -1113,12 +1116,13 @@ pub(super) fn infer_type_params_from_type(
 ) -> Option<()> {
     match (pattern, actual) {
         (Type::Param(name, _), actual) => {
-            if inferred.contains_key(name) {
-                Some(())
-            } else {
+            if inferred
+                .get(name)
+                .is_none_or(|existing| unresolved_type_function_inferred_param(existing, name))
+            {
                 inferred.insert(name.clone(), actual.clone());
-                Some(())
             }
+            Some(())
         }
         (Type::TypeValueOf(pattern), actual) => {
             let actual = type_value_instance_type(actual)?;
@@ -1214,6 +1218,10 @@ pub(super) fn infer_type_params_from_type(
         }
         _ => Some(()),
     }
+}
+
+pub(super) fn unresolved_type_function_inferred_param(value_type: &Type, name: &str) -> bool {
+    matches!(value_type, Type::Param(param_name, _) if param_name == name)
 }
 
 pub(super) fn substitute_type_params(value_type: &Type, inferred: &HashMap<String, Type>) -> Type {

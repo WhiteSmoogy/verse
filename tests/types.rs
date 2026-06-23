@@ -2496,6 +2496,80 @@ Value
 }
 
 #[test]
+fn evaluates_type_function_call_where_subtype_parameter_inference_from_type_parameter() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+
+BoxSubtype(Element:type):type = subtype(base_box(Element))
+Pick(Kind:BoxSubtype(t) where t:type):type = base_box(t)
+
+holder(t:type) := class:
+    Value:Pick(base_box(t))
+
+Item := holder(int){Value := base_box(int){Value := 42}}
+Item.Value.Value
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_where_inferred_class_parent_runtime_surface() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+    Read():t = Value
+
+BoxSubtype(Element:type):type = subtype(base_box(Element))
+BoxOf(Kind:BoxSubtype(t) where t:type):type = base_box(t)
+
+child_box(t:type) := class(BoxOf(base_box(t))):
+    Extra:int = 2
+
+Item := child_box(int){Value := 40}
+Item.Read() + Item.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_where_inferred_interface_parent_runtime_surface() {
+    let source = r#"
+base_reader(t:type) := interface:
+    Read():t
+
+ReaderSubtype(Element:type):type = subtype(base_reader(Element))
+ReaderOf(Kind:ReaderSubtype(t) where t:type):type = base_reader(t)
+
+child_reader(t:type) := interface(ReaderOf(base_reader(t))):
+    Extra():int = 2
+
+box := class(child_reader(int)):
+    Value:int = 40
+    Read<override>():int = Value
+
+Item:child_reader(int) = box{}
+Item.Read() + Item.Extra()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_where_subtype_parameter_inference_from_child() {
     let source = r#"
 base_box(t:type) := class:

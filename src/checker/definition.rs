@@ -3043,10 +3043,20 @@ impl Checker {
         span: Span,
     ) -> Result<HashMap<String, Type>, VerseError> {
         let mut inferred = info
-            .params
+            .inferred_params
             .iter()
-            .zip(args.iter())
-            .map(|(param, arg)| (param.name.clone(), arg.clone()))
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    Type::Param(param.name.clone(), param.constraint.clone()),
+                )
+            })
+            .chain(
+                info.params
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(param, arg)| (param.name.clone(), arg.clone())),
+            )
             .collect::<HashMap<_, _>>();
         for (param, arg) in info.params.iter().zip(args) {
             self.infer_type_params_from_constraint(&param.constraint, arg, &mut inferred)
@@ -3060,7 +3070,10 @@ impl Checker {
                 })?;
         }
         for param in &info.inferred_params {
-            if !inferred.contains_key(&param.name) {
+            if inferred
+                .get(&param.name)
+                .is_none_or(|actual| unresolved_type_function_inferred_param(actual, &param.name))
+            {
                 return Err(VerseError::check_at(
                     format!(
                         "could not infer type parameter `{}` for type function `{display_name}`",

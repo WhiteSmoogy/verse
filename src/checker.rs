@@ -37,7 +37,7 @@ use semantic_function::{
     inherited_method_duplicate_index, inherited_method_override_index, method_binding_types,
     method_group_type, method_has_qualifier, method_qualifiers_conflict,
     method_signatures_conflict, positional_call_args, push_distinct_local_method_info,
-    substitute_type_params, type_contains_type_param,
+    substitute_type_params, type_contains_type_param, unresolved_type_function_inferred_param,
 };
 
 mod semantic_scope;
