@@ -562,6 +562,8 @@ impl Checker {
                                 blocks,
                             },
                         )?;
+                    let constructor_effects =
+                        self.class_constructor_effects_with_base(base.as_deref(), blocks);
                     (
                         fields,
                         methods,
@@ -576,7 +578,7 @@ impl Checker {
                         castable,
                         class_has_specifier(specifiers, "persistable"),
                         false,
-                        class_constructor_effects(blocks),
+                        constructor_effects,
                         constructor_access,
                         constructor_scopes,
                     )
@@ -1263,7 +1265,8 @@ impl Checker {
                 native: self.aggregate_is_native(class_name),
                 persistable: class_has_specifier(specifiers, "persistable"),
                 computes: false,
-                constructor_effects: class_constructor_effects(blocks),
+                constructor_effects: self
+                    .class_constructor_effects_with_base(base_name.as_deref(), blocks),
                 constructor_access,
                 constructor_scopes,
                 fields: inherited_fields.clone(),
@@ -2191,6 +2194,23 @@ impl Checker {
             return Ok(());
         }
         self.define(name, Type::ClassType(class_name.to_string()), false, span)
+    }
+
+    pub(super) fn class_constructor_effects_with_base(
+        &self,
+        base_name: Option<&str>,
+        blocks: &[ClassBlock],
+    ) -> Vec<String> {
+        let mut effects = base_name
+            .and_then(|base_name| self.struct_types.get(base_name))
+            .map(|info| info.constructor_effects.clone())
+            .unwrap_or_default();
+        for effect in class_constructor_effects(blocks) {
+            if !effects.iter().any(|seen| seen == &effect) {
+                effects.push(effect);
+            }
+        }
+        effects
     }
 }
 

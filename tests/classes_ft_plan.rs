@@ -109,8 +109,7 @@ base:
 }
 
 #[test]
-#[ignore = "planned Classes/interfaces column: class block failure/effect rollback"]
-fn planned_class_block_failure_effect_rollback() {
+fn evaluates_class_block_failure_effect_rollback() {
     assert_runtime_cases(&[
         (
             "failed option construction rolls back escaped class block result",

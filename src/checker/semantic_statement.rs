@@ -638,6 +638,8 @@ impl Checker {
                             blocks,
                         },
                     )?;
+                let constructor_effects =
+                    self.class_constructor_effects_with_base(base.as_deref(), blocks);
                 self.struct_types.insert(
                     qualified.clone(),
                     StructInfo {
@@ -653,7 +655,7 @@ impl Checker {
                         native: field_has_specifier(specifiers, "native"),
                         persistable: class_has_specifier(class_specifiers, "persistable"),
                         computes: false,
-                        constructor_effects: class_constructor_effects(blocks),
+                        constructor_effects,
                         constructor_access,
                         constructor_scopes,
                         fields,
