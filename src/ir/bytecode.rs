@@ -1510,9 +1510,16 @@ struct Lowerer<'semantic> {
     class_layouts: HashMap<String, ClassLayout>,
     enum_layouts: HashMap<String, EnumLayout>,
     interface_layouts: HashMap<String, InterfaceLayout>,
+    type_functions: HashMap<String, Vec<BytecodeTypeFunction>>,
     function_return_classes: HashMap<(String, usize), String>,
     global_bindings: HashMap<String, GlobalBinding>,
     next_failure_context_id: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BytecodeTypeFunction {
+    params: Vec<String>,
+    target: TypeName,
 }
 
 #[derive(Debug, Clone)]
@@ -1642,6 +1649,7 @@ impl<'semantic> Lowerer<'semantic> {
             class_layouts,
             enum_layouts: HashMap::new(),
             interface_layouts: HashMap::new(),
+            type_functions: HashMap::new(),
             function_return_classes: HashMap::new(),
             global_bindings: HashMap::new(),
             next_failure_context_id: 0,
@@ -1652,7 +1660,49 @@ impl<'semantic> Lowerer<'semantic> {
         BytecodeProgram::new(self.chunks, self.functions, self.classes, 0)
     }
 
+    fn predeclare_static_type_functions(&mut self, statements: &[Stmt], namespace: Option<&str>) {
+        for statement in statements {
+            let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                continue;
+            };
+            let runtime_name = namespace
+                .map(|namespace| format!("{namespace}.{name}"))
+                .unwrap_or_else(|| name.clone());
+            match &expr.kind {
+                ExprKind::Function {
+                    params,
+                    return_type,
+                    body,
+                    ..
+                } => {
+                    if static_type_function_return_type(return_type.as_ref())
+                        && params.iter().all(static_type_function_param)
+                        && let Some(target) = bytecode_expr_to_type_name(body)
+                    {
+                        let info = BytecodeTypeFunction {
+                            params: params.iter().map(|param| param.name.clone()).collect(),
+                            target,
+                        };
+                        self.type_functions
+                            .entry(name.clone())
+                            .or_default()
+                            .push(info.clone());
+                        self.type_functions
+                            .entry(runtime_name)
+                            .or_default()
+                            .push(info);
+                    }
+                }
+                ExprKind::ModuleDefinition { statements, .. } => {
+                    self.predeclare_static_type_functions(statements, Some(&runtime_name));
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn lower_program(&mut self, program: &Program) -> Result<(), UnsupportedBytecode> {
+        self.predeclare_static_type_functions(&program.statements, None);
         self.predeclare_runtime_type_layouts(&program.statements, None)?;
         self.predeclare_global_bindings(&program.statements, None);
         let mut state = ChunkState::new("entry");
@@ -2846,7 +2896,7 @@ impl<'semantic> Lowerer<'semantic> {
         fields: &[StructField],
     ) -> (Option<String>, Vec<StructField>) {
         let base_class_name = base
-            .and_then(type_annotation_class_name)
+            .and_then(|annotation| self.type_annotation_aggregate_name(annotation))
             .filter(|base_name| {
                 self.resolve_class_layout(base_name, &ChunkState::new("<class-base>"))
                     .is_some()
@@ -2886,7 +2936,7 @@ impl<'semantic> Lowerer<'semantic> {
         let mut layout_fields = Vec::new();
         let mut layout_methods = Vec::new();
         for parent in parents {
-            if let Some(parent_name) = type_annotation_class_name(parent)
+            if let Some(parent_name) = self.type_annotation_aggregate_name(parent)
                 && let Some(parent_layout) = self.resolve_interface_layout(&parent_name)
             {
                 merge_struct_fields(&mut layout_fields, parent_layout.fields.clone());
@@ -3119,13 +3169,120 @@ impl<'semantic> Lowerer<'semantic> {
         self.interface_layouts.insert(runtime_name, layout);
     }
 
+    fn type_annotation_aggregate_name(&self, annotation: &TypeAnnotation) -> Option<String> {
+        self.resolve_static_type_function_type_name(&annotation.name, 0)
+            .as_ref()
+            .and_then(type_name_aggregate_head)
+            .or_else(|| type_annotation_class_name(annotation))
+    }
+
+    fn resolve_static_type_function_type_name(
+        &self,
+        type_name: &TypeName,
+        depth: usize,
+    ) -> Option<TypeName> {
+        if depth > 16 {
+            return None;
+        }
+        match type_name {
+            TypeName::Applied { name, args } => {
+                if let Some(info) = self.select_bytecode_type_function(name, args.len()) {
+                    let substitutions = info
+                        .params
+                        .iter()
+                        .cloned()
+                        .zip(args.iter().cloned())
+                        .collect::<HashMap<_, _>>();
+                    let target =
+                        substitute_bytecode_type_name_params(&info.target, &substitutions)?;
+                    return self
+                        .resolve_static_type_function_type_name(&target, depth + 1)
+                        .or(Some(target));
+                }
+                Some(TypeName::Applied {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .map(|arg| {
+                            self.resolve_static_type_function_type_name(arg, depth + 1)
+                                .unwrap_or_else(|| arg.clone())
+                        })
+                        .collect(),
+                })
+            }
+            TypeName::Array(item) => Some(TypeName::Array(match item.as_ref() {
+                Some(item) => Some(Box::new(
+                    self.resolve_static_type_function_type_name(item, depth + 1)
+                        .unwrap_or_else(|| item.as_ref().clone()),
+                )),
+                None => None,
+            })),
+            TypeName::Map(key, value) => Some(TypeName::Map(
+                Box::new(
+                    self.resolve_static_type_function_type_name(key, depth + 1)
+                        .unwrap_or_else(|| key.as_ref().clone()),
+                ),
+                Box::new(
+                    self.resolve_static_type_function_type_name(value, depth + 1)
+                        .unwrap_or_else(|| value.as_ref().clone()),
+                ),
+            )),
+            TypeName::WeakMap(key, value) => Some(TypeName::WeakMap(
+                Box::new(
+                    self.resolve_static_type_function_type_name(key, depth + 1)
+                        .unwrap_or_else(|| key.as_ref().clone()),
+                ),
+                Box::new(
+                    self.resolve_static_type_function_type_name(value, depth + 1)
+                        .unwrap_or_else(|| value.as_ref().clone()),
+                ),
+            )),
+            TypeName::Tuple(items) => Some(TypeName::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        self.resolve_static_type_function_type_name(item, depth + 1)
+                            .unwrap_or_else(|| item.clone())
+                    })
+                    .collect(),
+            )),
+            TypeName::Option(item) => Some(TypeName::Option(Box::new(
+                self.resolve_static_type_function_type_name(item, depth + 1)
+                    .unwrap_or_else(|| item.as_ref().clone()),
+            ))),
+            TypeName::TypeBounds { lower, upper } => Some(TypeName::TypeBounds {
+                lower: Box::new(
+                    self.resolve_static_type_function_type_name(lower, depth + 1)
+                        .unwrap_or_else(|| lower.as_ref().clone()),
+                ),
+                upper: Box::new(
+                    self.resolve_static_type_function_type_name(upper, depth + 1)
+                        .unwrap_or_else(|| upper.as_ref().clone()),
+                ),
+            }),
+            _ => Some(type_name.clone()),
+        }
+    }
+
+    fn select_bytecode_type_function(
+        &self,
+        name: &str,
+        arity: usize,
+    ) -> Option<&BytecodeTypeFunction> {
+        self.type_functions
+            .get(name)?
+            .iter()
+            .find(|info| info.params.len() == arity)
+    }
+
     fn class_interface_names(
         &self,
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
     ) -> Vec<String> {
         let mut names = Vec::new();
-        if let Some(base_name) = base.and_then(type_annotation_class_name)
+        if let Some(base_name) =
+            base.and_then(|annotation| self.type_annotation_aggregate_name(annotation))
             && self.resolve_interface_layout(&base_name).is_some()
         {
             names.push(base_name);
@@ -3133,7 +3290,7 @@ impl<'semantic> Lowerer<'semantic> {
         names.extend(
             interfaces
                 .iter()
-                .filter_map(type_annotation_class_name)
+                .filter_map(|annotation| self.type_annotation_aggregate_name(annotation))
                 .filter(|name| self.resolve_interface_layout(name).is_some()),
         );
         names
@@ -9612,6 +9769,149 @@ fn type_annotation_class_name(annotation: &TypeAnnotation) -> Option<String> {
         TypeName::Named(name) => Some(name.clone()),
         TypeName::Applied { name, .. } => Some(name.clone()),
         _ => None,
+    }
+}
+
+fn type_name_aggregate_head(type_name: &TypeName) -> Option<String> {
+    match type_name {
+        TypeName::Named(name) | TypeName::Applied { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+fn static_type_function_return_type(return_type: Option<&TypeAnnotation>) -> bool {
+    return_type.is_some_and(|annotation| {
+        matches!(
+            annotation.name,
+            TypeName::Type | TypeName::TypeBounds { .. } | TypeName::Applied { .. }
+        )
+    })
+}
+
+fn static_type_function_param(param: &Param) -> bool {
+    param
+        .annotation
+        .as_ref()
+        .is_some_and(|annotation| static_type_function_param_type_name(&annotation.name))
+}
+
+fn static_type_function_param_type_name(type_name: &TypeName) -> bool {
+    match type_name {
+        TypeName::Type | TypeName::TypeBounds { .. } => true,
+        TypeName::Applied { name, .. } => matches!(
+            name.as_str(),
+            "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+        ),
+        _ => false,
+    }
+}
+
+fn bytecode_expr_to_type_name(expr: &Expr) -> Option<TypeName> {
+    match &expr.kind {
+        ExprKind::Ident(name) => Some(TypeName::parse(name.clone())),
+        ExprKind::QualifiedName { qualifier, name } => {
+            Some(TypeName::Named(format!("{qualifier}.{name}")))
+        }
+        ExprKind::Member { object, name } => compile_time_member_path(object)
+            .map(|namespace| TypeName::Named(format!("{namespace}.{name}"))),
+        ExprKind::QualifiedMember {
+            object,
+            qualifier,
+            name,
+        } => compile_time_member_path(object)
+            .map(|namespace| TypeName::Named(format!("{namespace}.{qualifier}.{name}"))),
+        ExprKind::Call { callee, args } => {
+            let name = callable_lookup_name(callee)?;
+            let args = args
+                .iter()
+                .map(|arg| {
+                    let CallArg::Positional(expr) = arg else {
+                        return None;
+                    };
+                    bytecode_expr_to_type_name(expr)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(TypeName::Applied { name, args })
+        }
+        ExprKind::TypeAnnotationLiteral { annotation } => Some(annotation.name.clone()),
+        ExprKind::Tuple(items) => Some(TypeName::Tuple(
+            items
+                .iter()
+                .map(bytecode_expr_to_type_name)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        ExprKind::Option(Some(item)) => Some(TypeName::Option(Box::new(
+            bytecode_expr_to_type_name(item)?,
+        ))),
+        ExprKind::Array(items) => {
+            let mut item_types = items.iter().map(bytecode_expr_to_type_name);
+            let first = item_types.next().flatten();
+            Some(TypeName::Array(first.map(Box::new)))
+        }
+        _ => None,
+    }
+}
+
+fn substitute_bytecode_type_name_params(
+    type_name: &TypeName,
+    substitutions: &HashMap<String, TypeName>,
+) -> Option<TypeName> {
+    match type_name {
+        TypeName::TypeBounds { lower, upper } => Some(TypeName::TypeBounds {
+            lower: Box::new(substitute_bytecode_type_name_params(lower, substitutions)?),
+            upper: Box::new(substitute_bytecode_type_name_params(upper, substitutions)?),
+        }),
+        TypeName::Array(item) => Some(TypeName::Array(match item.as_ref() {
+            Some(item) => Some(Box::new(substitute_bytecode_type_name_params(
+                item,
+                substitutions,
+            )?)),
+            None => None,
+        })),
+        TypeName::Map(key, value) => Some(TypeName::Map(
+            Box::new(substitute_bytecode_type_name_params(key, substitutions)?),
+            Box::new(substitute_bytecode_type_name_params(value, substitutions)?),
+        )),
+        TypeName::WeakMap(key, value) => Some(TypeName::WeakMap(
+            Box::new(substitute_bytecode_type_name_params(key, substitutions)?),
+            Box::new(substitute_bytecode_type_name_params(value, substitutions)?),
+        )),
+        TypeName::Tuple(items) => Some(TypeName::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_bytecode_type_name_params(item, substitutions))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        TypeName::Option(item) => Some(TypeName::Option(Box::new(
+            substitute_bytecode_type_name_params(item, substitutions)?,
+        ))),
+        TypeName::FunctionSignature {
+            params,
+            effects,
+            return_type,
+        } => Some(TypeName::FunctionSignature {
+            params: params
+                .iter()
+                .map(|param| substitute_bytecode_type_name_params(param, substitutions))
+                .collect::<Option<Vec<_>>>()?,
+            effects: effects.clone(),
+            return_type: Box::new(substitute_bytecode_type_name_params(
+                return_type,
+                substitutions,
+            )?),
+        }),
+        TypeName::Applied { name, args } => Some(TypeName::Applied {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_bytecode_type_name_params(arg, substitutions))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        TypeName::Named(name) => substitutions
+            .get(name)
+            .cloned()
+            .or_else(|| Some(TypeName::Named(name.clone()))),
+        other => Some(other.clone()),
     }
 }
 

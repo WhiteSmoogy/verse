@@ -1761,6 +1761,55 @@ Use(int_reader{})
 }
 
 #[test]
+fn evaluates_type_function_call_in_class_parent_runtime_surface() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+    Read():t = Value
+
+BoxOf(Kind:type):type = base_box(Kind)
+
+child_box(t:type) := class(BoxOf(t)):
+    Extra:int = 2
+
+Item := child_box(int){Value := 40}
+Item.Read() + Item.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_call_in_interface_parent_runtime_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+ReaderOf(Kind:type):type = reader(Kind)
+
+child_reader(t:type) := interface(ReaderOf(t)):
+    Extra:int = 2
+
+box := class(child_reader(int)):
+    Value:int = 40
+    Read<override>():int = Value
+
+Item:child_reader(int) = box{}
+Item.Read() + Item.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_call_in_official_parametric_surface() {
     let source = r#"
 Payload():type = int
