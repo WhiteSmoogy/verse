@@ -135,7 +135,6 @@ PlayerData.profile_data{XP := 40, Coins := 2}.XP + 2
 }
 
 #[test]
-#[ignore = "planned Persistence/evolution FT column"]
 fn checks_persistence_evolution_column_backward_compatible_schema_changes() {
     let root = temp_project_dir("persistence_evolution_schema_changes");
     write_profile_project(
@@ -143,14 +142,13 @@ fn checks_persistence_evolution_column_backward_compatible_schema_changes() {
         "PublishedProfile",
         Some("PersistenceCompatConstraint"),
         r#"
-Profile<public> := module:
-    rank<public> := enum<persistable>{Bronze, Silver}
-    snapshot<public> := struct<persistable>:
-        Rank<public>:rank = rank.Bronze
-    profile_data<public> := class<final><persistable>:
-        XP<public>:int = 0
-        Snapshot<public>:snapshot = snapshot{}
-    var Saved:weak_map(player, profile_data) = map{}
+rank<public> := enum<persistable>{Bronze, Silver}
+snapshot<public> := struct<persistable>:
+    Rank<public>:rank
+profile_data<public> := class<final><persistable>:
+    XP<public>:int = 0
+    Snapshot<public>:snapshot = snapshot{Rank := rank.Bronze}
+var Saved:weak_map(player, profile_data) = map{}
 "#,
     );
     write_profile_project(
@@ -158,17 +156,16 @@ Profile<public> := module:
         "Game",
         None,
         r#"
-Profile<public> := module:
-    rank<public> := enum<persistable>{Bronze, Silver, Gold}
-    snapshot<public> := struct<persistable>:
-        Rank<public>:rank = rank.Bronze
-        Wins<public>:int = 0
-    profile_data<public> := class<final><persistable>:
-        XP<public>:int = 0
-        Snapshot<public>:snapshot = snapshot{}
-        Title<public>:string = ""
-    var Saved:weak_map(player, profile_data) = map{}
-Profile.profile_data{XP := 42}.XP
+rank<public> := enum<persistable>{Bronze, Silver, Gold}
+snapshot<public> := struct<persistable>:
+    Rank<public>:rank
+    Wins<public>:int = 0
+profile_data<public> := class<final><persistable>:
+    XP<public>:int = 0
+    Snapshot<public>:snapshot = snapshot{Rank := rank.Bronze, Wins := 0}
+    Title<public>:string = ""
+var Saved:weak_map(player, profile_data) = map{}
+profile_data{XP := 42}.XP
 "#,
     );
     write_project_file(
@@ -186,14 +183,13 @@ Profile.profile_data{XP := 42}.XP
         &root,
         "Game\\main.verse",
         r#"
-Profile<public> := module:
-    rank<public> := enum<persistable>{Bronze}
-    snapshot<public> := struct<persistable>:
-        Rank<public>:int = 0
-    profile_data<public> := class<final><persistable>:
-        XP<public>:float = 0.0
-        Snapshot<public>:snapshot = snapshot{}
-    var Saved:weak_map(player, profile_data) = map{}
+rank<public> := enum<persistable>{Bronze}
+snapshot<public> := struct<persistable>:
+    Rank<public>:int
+profile_data<public> := class<final><persistable>:
+    XP<public>:float = 0.0
+    Snapshot<public>:snapshot = snapshot{Rank := 0}
+var Saved:weak_map(player, profile_data) = map{}
 42
 "#,
     );

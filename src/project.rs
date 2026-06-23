@@ -390,6 +390,47 @@ fn check_persistence_constraints(
                 ));
             }
         }
+        for (path, expected_variants) in expected.enums {
+            let current_path = remap_persistence_path(&path, &constraint.package, package, &remaps);
+            let Some(actual_variants) = current.enums.get(&current_path) else {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(persistence_compat_error(&path, &constraint.package));
+            };
+            if !expected_variants
+                .iter()
+                .all(|variant| actual_variants.contains(variant))
+            {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(persistence_compat_error(&path, &constraint.package));
+            }
+        }
+        for (path, expected_aggregate) in expected.aggregates {
+            let current_path = remap_persistence_path(&path, &constraint.package, package, &remaps);
+            let Some(actual_aggregate) = current.aggregates.get(&current_path) else {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(persistence_compat_error(&path, &constraint.package));
+            };
+            if actual_aggregate.kind != expected_aggregate.kind {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(persistence_compat_error(&path, &constraint.package));
+            }
+            for (field, expected_type) in expected_aggregate.fields {
+                if actual_aggregate.fields.get(&field) != Some(&expected_type) {
+                    if constraint.soft {
+                        continue;
+                    }
+                    return Err(persistence_compat_error(&path, &constraint.package));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -397,6 +438,19 @@ fn check_persistence_constraints(
 #[derive(Default)]
 struct PersistenceSchema {
     weak_maps: HashMap<String, (TypeName, TypeName)>,
+    enums: HashMap<String, Vec<String>>,
+    aggregates: HashMap<String, PersistableAggregateSchema>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistableAggregateKind {
+    Struct,
+    Class,
+}
+
+struct PersistableAggregateSchema {
+    kind: PersistableAggregateKind,
+    fields: HashMap<String, TypeName>,
 }
 
 fn extract_persistence_schema(source: &str) -> Result<PersistenceSchema, VerseError> {
@@ -413,13 +467,54 @@ fn collect_persistence_schema(
 ) {
     for statement in statements {
         match &statement.kind {
-            StmtKind::Let { name, expr, .. } => {
-                if let ExprKind::ModuleDefinition { statements, .. } = &expr.kind {
+            StmtKind::Let { name, expr, .. } => match &expr.kind {
+                ExprKind::ModuleDefinition { statements, .. } => {
                     module_path.push(name.clone());
                     collect_persistence_schema(statements, module_path, schema);
                     module_path.pop();
                 }
-            }
+                ExprKind::EnumDefinition {
+                    persistable: true,
+                    variants,
+                    ..
+                } => {
+                    schema.enums.insert(
+                        qualified_schema_path(module_path, name),
+                        variants
+                            .iter()
+                            .map(|variant| variant.name.clone())
+                            .collect(),
+                    );
+                }
+                ExprKind::StructDefinition {
+                    persistable: true,
+                    fields,
+                    ..
+                } => {
+                    schema.aggregates.insert(
+                        qualified_schema_path(module_path, name),
+                        PersistableAggregateSchema {
+                            kind: PersistableAggregateKind::Struct,
+                            fields: persistable_fields(fields),
+                        },
+                    );
+                }
+                ExprKind::ClassDefinition {
+                    specifiers, fields, ..
+                } if specifiers
+                    .iter()
+                    .any(|specifier| specifier == "persistable") =>
+                {
+                    schema.aggregates.insert(
+                        qualified_schema_path(module_path, name),
+                        PersistableAggregateSchema {
+                            kind: PersistableAggregateKind::Class,
+                            fields: persistable_fields(fields),
+                        },
+                    );
+                }
+                _ => {}
+            },
             StmtKind::Var {
                 name,
                 annotation: Some(annotation),
@@ -435,6 +530,27 @@ fn collect_persistence_schema(
             _ => {}
         }
     }
+}
+
+fn persistable_fields(fields: &[crate::ast::StructField]) -> HashMap<String, TypeName> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            field
+                .annotation
+                .as_ref()
+                .map(|annotation| (field.name.clone(), annotation.name.clone()))
+        })
+        .collect()
+}
+
+fn persistence_compat_error(path: &str, package: &str) -> VerseError {
+    VerseError::parse(
+        format!(
+            "persistent schema `{path}` is not backward-compatible with persistence constraint package `{package}`"
+        ),
+        Span::new(0, 0, 1, 1),
+    )
 }
 
 fn qualified_schema_path(module_path: &[String], name: &str) -> String {
