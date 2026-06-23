@@ -3792,6 +3792,16 @@ impl Checker {
                 let type_param = Type::Param(name.to_string(), TypeParamConstraint::Type);
                 return Some((type_param.clone(), Type::TypeValueOf(Box::new(type_param))));
             }
+            Type::TypeValueBounds { lower, upper } => {
+                let type_param = Type::Param(
+                    name.to_string(),
+                    TypeParamConstraint::TypeBounds {
+                        lower: type_to_constraint_type_name(lower)?,
+                        upper: type_to_constraint_type_name(upper)?,
+                    },
+                );
+                return Some((type_param.clone(), Type::TypeValueOf(Box::new(type_param))));
+            }
             _ => return None,
         };
         let parent_name = type_to_constraint_type_name(parent)?;

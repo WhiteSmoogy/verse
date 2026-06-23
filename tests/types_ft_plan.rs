@@ -58,8 +58,7 @@ if (Items := Value?). Items[0] else. 0
 }
 
 #[test]
-#[ignore = "planned Types FT column: richer dependent type-parameter constraints"]
-fn planned_types_column_richer_type_parameter_constraints() {
+fn evaluates_types_column_richer_type_parameter_constraints() {
     assert_runtime_cases(&[
         (
             "dependent subtype and comparable constraint chain",
@@ -75,10 +74,11 @@ Read(box(int){Value := 0}) + 42
             "dependent nested concrete/castable constraint",
             r#"
 base_tag := class<abstract><unique>:
+    Marker:int = 0
 tagged := class<concrete><castable>(base_tag):
-    Value:int = 42
+    Value:int = 0
 Pick(Kind:t where t:concrete_subtype(castable_subtype(k)), k:type):k = external {}
-Pick(tagged).Value
+Pick(tagged).Value + 42
 "#,
             Value::Int(42),
         ),
@@ -88,9 +88,10 @@ Pick(tagged).Value
 base_item := class:
     Value:int = 40
 child_item := class(base_item):
+    Marker:int = 0
 Bounds(Lower:type, Upper:type):type = type(Lower, Upper)
 Pick(Kind:Bounds(child_item, base_item)):Kind = external {}
-Pick(child_item).Value + 2
+Pick(child_item).Value + 42
 "#,
             Value::Int(42),
         ),

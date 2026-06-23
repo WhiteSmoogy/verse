@@ -3883,6 +3883,23 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 continue;
             }
             if let VmValue::Runtime(value) = arg {
+                if let Some(actual_type) = runtime_value_type_name(value) {
+                    if let TypeName::Named(name) = &annotation.name
+                        && capture_names.contains(name.as_str())
+                    {
+                        record_type_name_substitution(name, &actual_type, &mut substitutions);
+                    }
+                    for type_param in &param.type_params {
+                        if let Some(actual) = substitutions.get(&type_param.name).cloned() {
+                            infer_type_param_constraint_substitutions(
+                                &type_param.constraint,
+                                &actual,
+                                &capture_names,
+                                &mut substitutions,
+                            );
+                        }
+                    }
+                }
                 self.infer_runtime_type_name_substitutions(
                     &annotation.name,
                     value,
@@ -4771,12 +4788,77 @@ fn runtime_type_value_payload(value: &Value) -> Option<TypeName> {
 fn type_value_parameter_annotation(type_name: &TypeName) -> bool {
     match type_name {
         TypeName::Type | TypeName::TypeBounds { .. } => true,
-        TypeName::Applied { name, .. } => matches!(
-            name.as_str(),
-            "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
-        ),
+        TypeName::Applied { name, .. } => {
+            matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) || !is_builtin_runtime_type_constructor(name)
+        }
         _ => false,
     }
+}
+
+fn is_builtin_runtime_type_constructor(name: &str) -> bool {
+    matches!(
+        name,
+        "array"
+            | "map"
+            | "weak_map"
+            | "tuple"
+            | "option"
+            | "event"
+            | "task"
+            | "generator"
+            | "result"
+            | "success_result"
+            | "error_result"
+            | "subscribable_event"
+            | "subscribable_event_intrnl"
+            | "sticky_event"
+            | "classifiable_subset"
+            | "classifiable_subset_key"
+            | "classifiable_subset_var"
+            | "modifier"
+            | "modifier_stack"
+            | "awaitable"
+            | "signalable"
+            | "subscribable"
+            | "listenable"
+    )
+}
+
+fn infer_type_param_constraint_substitutions(
+    constraint: &TypeParamConstraint,
+    actual: &TypeName,
+    capture_names: &HashSet<&str>,
+    substitutions: &mut HashMap<String, TypeName>,
+) {
+    match constraint {
+        TypeParamConstraint::Type => {}
+        TypeParamConstraint::Subtype(parent) => {
+            infer_type_name_constraint_substitutions(parent, actual, capture_names, substitutions);
+        }
+        TypeParamConstraint::TypeBounds { lower, upper } => {
+            infer_type_name_constraint_substitutions(lower, actual, capture_names, substitutions);
+            infer_type_name_constraint_substitutions(upper, actual, capture_names, substitutions);
+        }
+    }
+}
+
+fn infer_type_name_constraint_substitutions(
+    expected: &TypeName,
+    actual: &TypeName,
+    capture_names: &HashSet<&str>,
+    substitutions: &mut HashMap<String, TypeName>,
+) {
+    if let TypeName::Applied { name, args } = expected
+        && type_wrapper_for_inference(name)
+        && let [inner] = args.as_slice()
+    {
+        infer_type_name_constraint_substitutions(inner, actual, capture_names, substitutions);
+        return;
+    }
+    infer_type_name_substitutions(expected, actual, true, capture_names, substitutions);
 }
 
 fn infer_type_name_substitutions(
