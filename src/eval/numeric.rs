@@ -4,27 +4,32 @@ use super::Value;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct RationalValue {
-    pub(super) numerator: i64,
-    pub(super) denominator: i64,
+    pub(super) numerator: i128,
+    pub(super) denominator: i128,
 }
 
 impl RationalValue {
-    pub(crate) fn new(numerator: i64, denominator: i64) -> Self {
+    pub(crate) fn new(numerator: i128, denominator: i128) -> Self {
         debug_assert!(denominator != 0, "rational denominator cannot be zero");
         let mut numerator = numerator;
         let mut denominator = denominator;
-        if denominator < 0 {
-            numerator = -numerator;
-            denominator = -denominator;
+        let divisor = gcd_i128(numerator, denominator);
+        numerator = div_i128_by_u128(numerator, divisor);
+        denominator = div_i128_by_u128(denominator, divisor);
+        if denominator < 0
+            && let (Some(flipped_numerator), Some(flipped_denominator)) =
+                (numerator.checked_neg(), denominator.checked_neg())
+        {
+            numerator = flipped_numerator;
+            denominator = flipped_denominator;
         }
-        let divisor = gcd_i64(numerator, denominator);
         Self {
-            numerator: numerator / divisor,
-            denominator: denominator / divisor,
+            numerator,
+            denominator,
         }
     }
 
-    pub(crate) fn from_int(value: i64) -> Self {
+    pub(crate) fn from_int(value: i128) -> Self {
         Self {
             numerator: value,
             denominator: 1,
@@ -92,7 +97,7 @@ impl fmt::Display for RationalValue {
 
 #[derive(Clone, Copy)]
 pub(super) enum RuntimeNumber {
-    Int(i64),
+    Int(i128),
     Float(f64),
     Rational(RationalValue),
 }
@@ -142,13 +147,24 @@ pub(crate) fn rational_or_int(value: RationalValue) -> Value {
     }
 }
 
-fn gcd_i64(left: i64, right: i64) -> i64 {
-    let mut left = (left as i128).abs();
-    let mut right = (right as i128).abs();
+fn gcd_i128(left: i128, right: i128) -> u128 {
+    let mut left = left.unsigned_abs();
+    let mut right = right.unsigned_abs();
     while right != 0 {
         let next = left % right;
         left = right;
         right = next;
     }
-    left.max(1) as i64
+    left.max(1)
+}
+
+fn div_i128_by_u128(value: i128, divisor: u128) -> i128 {
+    if divisor == 1 {
+        return value;
+    }
+    if let Ok(divisor) = i128::try_from(divisor) {
+        return value / divisor;
+    }
+    debug_assert_eq!(value, i128::MIN);
+    -1
 }

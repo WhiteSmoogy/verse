@@ -16,42 +16,49 @@ fn evaluates_hexadecimal_integer_literals() {
 }
 
 #[test]
-fn evaluates_signed_64_bit_integer_literal_bounds() {
-    assert_eq!(eval("9223372036854775807"), Value::Int(i64::MAX));
-    assert_eq!(eval("-9223372036854775808"), Value::Int(i64::MIN));
-    assert_eq!(eval("-0x8000000000000000"), Value::Int(i64::MIN));
-}
-
-#[test]
-fn rejects_integer_literal_above_signed_64_bit_range() {
-    let error = parse_source("9223372036854775808").expect_err("source should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("outside the 64-bit signed range")
+fn evaluates_signed_128_bit_integer_literal_bounds() {
+    assert_eq!(
+        eval("170141183460469231731687303715884105727"),
+        Value::Int(i128::MAX)
+    );
+    assert_eq!(
+        eval("-170141183460469231731687303715884105727 - 1"),
+        Value::Int(i128::MIN)
+    );
+    assert_eq!(
+        eval("9223372036854775808"),
+        Value::Int(9_223_372_036_854_775_808)
     );
 }
 
 #[test]
-fn rejects_integer_literal_below_signed_64_bit_range() {
-    let error = parse_source("-9223372036854775809").expect_err("source should fail");
+fn rejects_integer_literal_above_signed_128_bit_range() {
+    let error =
+        parse_source("170141183460469231731687303715884105728").expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("outside the 64-bit signed range")
+            .contains("outside the 128-bit signed range")
     );
 }
 
 #[test]
-fn rejects_hex_integer_literal_above_signed_64_bit_range() {
-    let error = parse_source("0x8000000000000001").expect_err("source should fail");
+fn evaluates_integer_literal_below_signed_64_bit_range() {
+    assert_eq!(
+        eval("-9223372036854775809"),
+        Value::Int(-9_223_372_036_854_775_809)
+    );
+}
+
+#[test]
+fn rejects_hex_integer_literal_above_signed_128_bit_range() {
+    let error = parse_source("0x80000000000000000000000000000000").expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("outside the 64-bit signed range")
+            .contains("outside the 128-bit signed range")
     );
 }
 

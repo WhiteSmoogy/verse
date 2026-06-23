@@ -859,13 +859,6 @@ impl Parser {
 
         let token = self.advance().clone();
         match token.kind {
-            TokenKind::Number {
-                value: NumberLiteral::Int(value),
-                kind: NumberKind::Int,
-            } if value > i128::from(i64::MAX) => Err(VerseError::parse(
-                format!("integer literal `{value}` is outside the 64-bit signed range"),
-                token.span,
-            )),
             TokenKind::Number { value, kind } => {
                 Ok(Expr::new(ExprKind::Number { value, kind }, token.span))
             }

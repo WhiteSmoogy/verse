@@ -42,8 +42,7 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Types FT column: arbitrary precision numeric runtime"]
-fn planned_types_column_arbitrary_precision_numeric_runtime() {
+fn evaluates_types_column_arbitrary_precision_numeric_runtime() {
     assert_runtime_string_cases(&[
         (
             "big integer addition crosses i64 max",
@@ -61,6 +60,19 @@ fn planned_types_column_arbitrary_precision_numeric_runtime() {
 if:
     Half := 9223372036854775808 / 2
     Half = 4611686018427387904
+then:
+    "ok"
+else:
+    "bad"
+"#,
+            "ok",
+        ),
+        (
+            "minimum i128 rational numerator reduces exactly",
+            r#"
+if:
+    Half := (-170141183460469231731687303715884105727 - 1) / 2
+    Half = -85070591730234615865843651857942052864
 then:
     "ok"
 else:

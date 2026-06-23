@@ -1517,7 +1517,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 Instruction::BeginProfileBlock { dest, .. } => {
                     frame.set_register(
                         dest,
-                        VmValue::Runtime(Value::Int(profile_wall_time_start())),
+                        VmValue::Runtime(Value::Int(i128::from(profile_wall_time_start()))),
                     )?;
                 }
                 Instruction::EndProfileBlock {
@@ -5004,7 +5004,10 @@ fn record_type_name_substitution(
 
 fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
     match expected {
-        TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
+        TypeName::Int => matches!(value, Value::Int(_)),
+        TypeName::IntRange { min, max } => {
+            matches!(value, Value::Int(value) if i128::from(*min) <= *value && *value <= i128::from(*max))
+        }
         TypeName::Float => matches!(value, Value::Float(_)),
         TypeName::FloatRange(range) => {
             runtime_floatish_value_to_f64(value).is_some_and(|value| range.contains(value))
@@ -6055,7 +6058,7 @@ fn length_value(container: Value, span: Span) -> Result<Value, VerseError> {
             ));
         }
     };
-    Ok(Value::Int(length as i64))
+    Ok(Value::Int(length as i128))
 }
 
 fn array_value(values: Vec<Value>) -> Value {
@@ -6130,7 +6133,7 @@ fn numeric_values(
     left: Value,
     right: Value,
     span: Span,
-    int_op: fn(i64, i64) -> Option<i64>,
+    int_op: fn(i128, i128) -> Option<i128>,
     float_op: fn(f64, f64) -> f64,
     rational_op: fn(RationalValue, RationalValue) -> RationalValue,
 ) -> Result<Value, VerseError> {
@@ -6162,7 +6165,7 @@ fn numeric_values(
     )))
 }
 
-fn expect_int(value: Value, context: &str, span: Span) -> Result<i64, VerseError> {
+fn expect_int(value: Value, context: &str, span: Span) -> Result<i128, VerseError> {
     match value {
         Value::Int(value) => Ok(value),
         other => Err(VerseError::runtime_at(
@@ -6193,15 +6196,15 @@ fn numeric_is_zero(value: &Value) -> bool {
     }
 }
 
-fn checked_add(left: i64, right: i64) -> Option<i64> {
+fn checked_add(left: i128, right: i128) -> Option<i128> {
     left.checked_add(right)
 }
 
-fn checked_sub(left: i64, right: i64) -> Option<i64> {
+fn checked_sub(left: i128, right: i128) -> Option<i128> {
     left.checked_sub(right)
 }
 
-fn checked_mul(left: i64, right: i64) -> Option<i64> {
+fn checked_mul(left: i128, right: i128) -> Option<i128> {
     left.checked_mul(right)
 }
 

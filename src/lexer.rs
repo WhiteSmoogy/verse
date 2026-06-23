@@ -578,14 +578,19 @@ impl Lexer {
 
         let value = match kind {
             NumberKind::Int => {
-                let value = literal.parse::<i128>().map_err(|_| {
+                let value = literal.parse::<u128>().map_err(|_| {
                     VerseError::lex(
-                        format!("invalid integer literal `{literal}`"),
+                        format!("integer literal `{literal}` is outside the 128-bit signed range"),
                         self.span_from(start),
                     )
                 })?;
-                self.check_integer_literal_range(value, &literal, start)?;
-                NumberLiteral::Int(value)
+                if value > i128::MAX as u128 {
+                    return Err(VerseError::lex(
+                        format!("integer literal `{literal}` is outside the 128-bit signed range"),
+                        self.span_from(start),
+                    ));
+                }
+                NumberLiteral::Int(value as i128)
             }
             NumberKind::Float => {
                 let value = literal.parse::<f64>().map_err(|_| {
@@ -605,22 +610,6 @@ impl Lexer {
         };
 
         Ok(self.token(TokenKind::Number { value, kind }, start))
-    }
-
-    fn check_integer_literal_range(
-        &self,
-        value: i128,
-        literal: &str,
-        start: Snapshot,
-    ) -> Result<(), VerseError> {
-        if value <= i128::from(i64::MAX) + 1 {
-            return Ok(());
-        }
-
-        Err(VerseError::lex(
-            format!("integer literal `{literal}` is outside the 64-bit signed range"),
-            self.span_from(start),
-        ))
     }
 
     fn hex_number(&mut self, start: Snapshot) -> Result<Token, VerseError> {
@@ -647,9 +636,9 @@ impl Lexer {
                 self.span_from(start),
             )
         })?;
-        if value > i64::MAX as u128 + 1 {
+        if value > i128::MAX as u128 {
             return Err(VerseError::lex(
-                format!("integer literal `0x{literal}` is outside the 64-bit signed range"),
+                format!("integer literal `0x{literal}` is outside the 128-bit signed range"),
                 self.span_from(start),
             ));
         }

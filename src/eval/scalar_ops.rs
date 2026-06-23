@@ -21,7 +21,7 @@ pub(super) fn expect_number(value: &Value, context: &str, span: Span) -> Result<
     }
 }
 
-pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result<i64, VerseError> {
+pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result<i128, VerseError> {
     match runtime_number(value) {
         Some(RuntimeNumber::Int(value)) => Ok(value),
         Some(RuntimeNumber::Rational(value)) if value.is_integer() => Ok(value.numerator),
@@ -33,7 +33,7 @@ pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result
                     span,
                 ));
             }
-            Ok(number as i64)
+            Ok(number as i128)
         }
         None => Err(VerseError::runtime_at(
             format!("{context} expected integer, got {value}"),
@@ -48,7 +48,9 @@ pub(super) fn expect_index_integer(
     span: Span,
 ) -> Result<i64, VerseError> {
     match value {
-        Value::Int(value) => Ok(*value),
+        Value::Int(value) => i64::try_from(*value).map_err(|_| {
+            VerseError::runtime_at(format!("{context} expected index in int64 range"), span)
+        }),
         _ => Err(VerseError::runtime_at(
             format!("{context} expected int, got {value}"),
             span,

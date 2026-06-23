@@ -232,7 +232,7 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
 pub(crate) fn bytecode_external_return_value(type_name: &TypeName) -> Value {
     match type_name {
         TypeName::Int => Value::Int(0),
-        TypeName::IntRange { min, .. } => Value::Int(*min),
+        TypeName::IntRange { min, .. } => Value::Int(i128::from(*min)),
         TypeName::Float => Value::Float(0.0),
         TypeName::FloatRange(range) => {
             let value = if range.contains(0.0) {

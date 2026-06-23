@@ -199,7 +199,7 @@ fn evaluates_sized_nat_type_annotations_for_integer_literals() {
             Type::IntRange(IntRange::new(0, i64::MAX)),
         ),
     ] {
-        assert_eq!(eval(source), Value::Int(expected_value));
+        assert_eq!(eval(source), Value::Int(i128::from(expected_value)));
         assert_eq!(
             check_source(source).expect("source should check"),
             expected_type
@@ -265,7 +265,7 @@ fn evaluates_sized_int_type_annotations_for_integer_literals() {
             Type::IntRange(IntRange::new(i64::MIN, i64::MAX)),
         ),
     ] {
-        assert_eq!(eval(source), Value::Int(expected_value));
+        assert_eq!(eval(source), Value::Int(i128::from(expected_value)));
         assert_eq!(
             check_source(source).expect("source should check"),
             expected_type
@@ -377,6 +377,14 @@ fn rejects_integer_literal_outside_sized_int_annotations() {
             "Value:int32 = 2147483648",
             "int_range(-2147483648, 2147483647)",
         ),
+        (
+            "Value:int64 = 9223372036854775808",
+            "int_range(-9223372036854775808, 9223372036854775807)",
+        ),
+        (
+            "Value:int64 = -9223372036854775808 - 1",
+            "int_range(-9223372036854775808, 9223372036854775807)",
+        ),
     ] {
         let error = check_source(source).expect_err("source should fail");
         assert!(
@@ -392,6 +400,10 @@ fn rejects_integer_literal_outside_sized_nat_annotations() {
         ("Value:nat8 = 256", "int_range(0, 255)"),
         ("Value:nat16 = 65536", "int_range(0, 65535)"),
         ("Value:nat32 = 4294967296", "int_range(0, 4294967295)"),
+        (
+            "Value:nat64 = 9223372036854775808",
+            "int_range(0, 9223372036854775807)",
+        ),
     ] {
         let error = check_source(source).expect_err("source should fail");
         assert!(

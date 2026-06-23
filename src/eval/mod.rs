@@ -114,7 +114,7 @@ pub(crate) fn with_stable_runtime_epoch<T>(
 
 #[derive(Clone)]
 pub enum Value {
-    Int(i64),
+    Int(i128),
     Float(f64),
     Rational(RationalValue),
     Char(char),
@@ -1108,7 +1108,7 @@ fn eval_array_method(
                 .iter()
                 .position(|item| item == &needle)
                 .ok_or_else(|| VerseError::runtime_at("`Find` failed: element not found", span))?;
-            Ok(Value::Int(index as i64))
+            Ok(Value::Int(index as i128))
         }
         "RemoveFirstElement" => {
             let [needle]: [Value; 1] = args.try_into().map_err(|args: Vec<Value>| {
@@ -1276,7 +1276,7 @@ fn eval_array_method_failable(
             Ok(items
                 .iter()
                 .position(|item| item == &needle)
-                .map(|index| Value::Int(index as i64)))
+                .map(|index| Value::Int(index as i128)))
         }
         "RemoveFirstElement" => {
             let [needle]: [Value; 1] = args.try_into().map_err(|args: Vec<Value>| {
@@ -2168,7 +2168,10 @@ fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
     match payload {
         TypeName::Any | TypeName::Comparable => true,
         TypeName::Type | TypeName::TypeBounds { .. } => runtime_value_is_type_value(value),
-        TypeName::Int | TypeName::IntRange { .. } => matches!(value, Value::Int(_)),
+        TypeName::Int => matches!(value, Value::Int(_)),
+        TypeName::IntRange { min, max } => {
+            matches!(value, Value::Int(value) if i128::from(*min) <= *value && *value <= i128::from(*max))
+        }
         TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
         TypeName::FloatRange(range) => match value {
             Value::Int(value) => range.contains(*value as f64),
@@ -3252,14 +3255,11 @@ fn native_mod(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> 
         return Ok(NativeResult::Failure("division by zero"));
     }
 
-    let modulus = (divisor as i128).abs();
-    let dividend = dividend as i128;
+    let modulus = divisor
+        .checked_abs()
+        .ok_or_else(|| VerseError::runtime_at("`Mod` divisor overflow", span))?;
     let remainder = ((dividend % modulus) + modulus) % modulus;
-    Ok(NativeResult::Value(Value::Int(integer_from_i128(
-        remainder,
-        "`Mod` result",
-        span,
-    )?)))
+    Ok(NativeResult::Value(Value::Int(remainder)))
 }
 
 fn native_quotient(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
@@ -3270,16 +3270,15 @@ fn native_quotient(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseEr
         return Ok(NativeResult::Failure("division by zero"));
     }
 
-    let dividend = dividend as i128;
-    let divisor = divisor as i128;
-    let modulus = divisor.abs();
+    let modulus = divisor
+        .checked_abs()
+        .ok_or_else(|| VerseError::runtime_at("`Quotient` divisor overflow", span))?;
     let remainder = ((dividend % modulus) + modulus) % modulus;
-    let quotient = (dividend - remainder) / divisor;
-    Ok(NativeResult::Value(Value::Int(integer_from_i128(
-        quotient,
-        "`Quotient` result",
-        span,
-    )?)))
+    let quotient = dividend
+        .checked_sub(remainder)
+        .and_then(|value| value.checked_div(divisor))
+        .ok_or_else(|| VerseError::runtime_at("`Quotient` integer overflow", span))?;
+    Ok(NativeResult::Value(Value::Int(quotient)))
 }
 
 fn native_bit_and(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
@@ -3413,34 +3412,29 @@ fn verse_float_order(left: &f64, right: &f64) -> std::cmp::Ordering {
     }
 }
 
-fn integer_from_i128(value: i128, context: &str, span: Span) -> Result<i64, VerseError> {
-    i64::try_from(value)
-        .map_err(|_| VerseError::runtime_at(format!("{context} is outside int range"), span))
-}
-
-fn float_integer_result(value: f64, context: &str, span: Span) -> Result<i64, VerseError> {
+fn float_integer_result(value: f64, context: &str, span: Span) -> Result<i128, VerseError> {
     if !value.is_finite() {
         return Err(VerseError::runtime_at(
             format!("{context} expected a finite value"),
             span,
         ));
     }
-    const I64_MAX_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
-    if value < i64::MIN as f64 || value >= I64_MAX_EXCLUSIVE_AS_F64 {
+    const I128_MAX_EXCLUSIVE_AS_F64: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+    if value < i128::MIN as f64 || value >= I128_MAX_EXCLUSIVE_AS_F64 {
         return Err(VerseError::runtime_at(
             format!("{context} result is outside int range"),
             span,
         ));
     }
-    Ok(value as i64)
+    Ok(value as i128)
 }
 
-fn rational_floor_to_i64(value: RationalValue) -> i64 {
+fn rational_floor_to_int(value: RationalValue) -> i128 {
     value.numerator.div_euclid(value.denominator)
 }
 
-fn rational_ceil_to_i64(value: RationalValue) -> i64 {
-    let floor = rational_floor_to_i64(value);
+fn rational_ceil_to_int(value: RationalValue) -> i128 {
+    let floor = rational_floor_to_int(value);
     if value.numerator.rem_euclid(value.denominator) == 0 {
         floor
     } else {
@@ -3451,7 +3445,7 @@ fn rational_ceil_to_i64(value: RationalValue) -> i64 {
 fn native_ceil(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
     if let Some(RuntimeNumber::Rational(value)) = runtime_number(&value) {
-        return Ok(NativeResult::Value(Value::Int(rational_ceil_to_i64(value))));
+        return Ok(NativeResult::Value(Value::Int(rational_ceil_to_int(value))));
     }
     let value = expect_number(&value, "`Ceil` value", span)?;
     if !value.is_finite() {
@@ -3467,7 +3461,7 @@ fn native_ceil(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError>
 fn native_floor(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
     if let Some(RuntimeNumber::Rational(value)) = runtime_number(&value) {
-        return Ok(NativeResult::Value(Value::Int(rational_floor_to_i64(
+        return Ok(NativeResult::Value(Value::Int(rational_floor_to_int(
             value,
         ))));
     }
