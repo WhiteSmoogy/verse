@@ -114,7 +114,6 @@ Choose(Kind:type(child_item, base_item)):int = 2
 }
 
 #[test]
-#[ignore = "planned Functions overload FT column: runtime overload selection surfaces"]
 fn evaluates_functions_overload_column_runtime_selection_surfaces() {
     assert_runtime_cases(&[
         (

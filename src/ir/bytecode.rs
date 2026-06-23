@@ -299,7 +299,7 @@ pub struct FunctionDescriptor {
     external_return_type: Option<TypeName>,
     chunk: usize,
     decides: bool,
-    captures: bool,
+    capture_names: Vec<String>,
 }
 
 impl FunctionDescriptor {
@@ -336,7 +336,11 @@ impl FunctionDescriptor {
     }
 
     pub fn captures(&self) -> bool {
-        self.captures
+        !self.capture_names.is_empty()
+    }
+
+    fn capture_names(&self) -> &[String] {
+        &self.capture_names
     }
 }
 
@@ -3395,7 +3399,7 @@ impl<'semantic> Lowerer<'semantic> {
                 .effects
                 .iter()
                 .any(|effect| effect == "decides"),
-            false,
+            Vec::new(),
         )?;
         Ok(ExtensionBinding {
             name: extension.method.name.clone(),
@@ -3970,7 +3974,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             false,
-            false,
+            Vec::new(),
         )?;
         Ok(ClassBlockDescriptor {
             function,
@@ -4034,7 +4038,7 @@ impl<'semantic> Lowerer<'semantic> {
                 None,
                 state,
                 decides,
-                false,
+                Vec::new(),
             );
         }
 
@@ -4061,7 +4065,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             decides,
-            false,
+            Vec::new(),
         )
     }
 
@@ -8013,6 +8017,10 @@ impl<'semantic> Lowerer<'semantic> {
             ValueOperand::Register(dest)
         } else if let Some(function) = selected_direct_function {
             state.constant(Constant::Function(function))
+        } else if let Some(function) =
+            selected_function.filter(|function| self.functions[*function].captures())
+        {
+            self.emit_captured_function_descriptor(function, state, span)?
         } else {
             self.lower_expr(callee, state)?
         };
@@ -9640,6 +9648,47 @@ impl<'semantic> Lowerer<'semantic> {
         ValueOperand::Register(dest)
     }
 
+    fn emit_captured_function_descriptor(
+        &mut self,
+        function: usize,
+        state: &mut ChunkState,
+        span: Span,
+    ) -> Result<ValueOperand, UnsupportedBytecode> {
+        let capture_names = self
+            .functions
+            .get(function)
+            .ok_or(UnsupportedBytecode)?
+            .capture_names()
+            .to_vec();
+        if capture_names.is_empty() {
+            return Ok(state.constant(Constant::Function(function)));
+        }
+
+        let values = capture_names
+            .iter()
+            .map(|name| state.lookup(name).map(|binding| binding.operand))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(UnsupportedBytecode)?;
+        let parent_scope = state.allocate_register(span);
+        state.chunk.emit(Instruction::NewScope {
+            dest: parent_scope,
+            values,
+            span,
+        });
+
+        let dest = state.allocate_register(span);
+        let procedure = state.constant(Constant::Function(function));
+        let none = state.none();
+        state.chunk.emit(Instruction::NewFunction {
+            dest,
+            procedure,
+            self_value: none,
+            parent_scope: ValueOperand::Register(parent_scope),
+            span,
+        });
+        Ok(ValueOperand::Register(dest))
+    }
+
     fn collect_function_captures(
         &self,
         params: &[Param],
@@ -9730,7 +9779,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             decides,
-            !captures.is_empty(),
+            capture_binding_names(captures),
         )
     }
 
@@ -9826,7 +9875,7 @@ impl<'semantic> Lowerer<'semantic> {
             None,
             state,
             false,
-            false,
+            Vec::new(),
         )
     }
 
@@ -9880,7 +9929,7 @@ impl<'semantic> Lowerer<'semantic> {
                 external_return_type.clone(),
                 state,
                 decides,
-                !captures.is_empty(),
+                capture_binding_names(captures),
             );
         } else {
             self.lower_annotated_return_value(return_type, body, &mut state)?
@@ -9902,7 +9951,7 @@ impl<'semantic> Lowerer<'semantic> {
             external_return_type,
             state,
             decides,
-            !captures.is_empty(),
+            capture_binding_names(captures),
         )
     }
 
@@ -9916,7 +9965,7 @@ impl<'semantic> Lowerer<'semantic> {
         external_return_type: Option<TypeName>,
         state: ChunkState,
         decides: bool,
-        captures: bool,
+        capture_names: Vec<String>,
     ) -> Result<usize, UnsupportedBytecode> {
         let chunk_index = self.chunks.len() + 1;
         let function_index = self.functions.len();
@@ -9929,7 +9978,7 @@ impl<'semantic> Lowerer<'semantic> {
             external_return_type,
             chunk: chunk_index,
             decides,
-            captures,
+            capture_names,
         });
         self.chunks.push(state.finish());
         Ok(function_index)
@@ -10080,6 +10129,13 @@ fn collect_function_captures(
                 binding,
             })
         })
+        .collect()
+}
+
+fn capture_binding_names(captures: &[CaptureBinding]) -> Vec<String> {
+    captures
+        .iter()
+        .map(|capture| capture.name.clone())
         .collect()
 }
 
