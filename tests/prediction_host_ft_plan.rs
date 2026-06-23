@@ -74,7 +74,6 @@ sync_state{}.Get()
 }
 
 #[test]
-#[ignore = "planned Prediction/host FT column: predicts extern host storage"]
 fn evaluates_prediction_host_column_predicts_extern_storage() {
     assert_runtime_cases(&[
         (

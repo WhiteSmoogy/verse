@@ -6577,6 +6577,23 @@ Trace
     }
 
     #[test]
+    fn predicts_extern_reads_host_prediction_default() {
+        let source = r#"
+sync_state := class:
+    @predicts_extern
+    State<predicts>:int = 0
+
+sync_state{}.State
+"#;
+        let ir = crate::pipeline::compile_source(source).expect("source should compile");
+        let host = MockHost::with_prediction_default("sync_state", "State", Value::Int(42));
+        let mut executor = BytecodeExecutor::with_host(ir.bytecode_program(), host);
+        let value = executor.run().expect("source should run");
+
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
     fn official_utility_control_flow_instructions_execute() {
         let slot = RegisterIndex(2);
         let result = RegisterIndex(3);
