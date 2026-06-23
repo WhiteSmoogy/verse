@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{ExprKind, Program, Stmt, StmtKind};
+use crate::ast::{ExprKind, Program, Stmt, StmtKind, TypeName};
 use crate::checker::{Type, check_source_in_package};
 use crate::digest::generate_digest_for_program;
 use crate::error::VerseError;
@@ -28,6 +28,7 @@ pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
         &loaded.source,
         project.package.as_deref(),
         &loaded.persistence_constraints,
+        &project.persistence_scope_remaps,
     )?;
     Ok(value_type)
 }
@@ -355,17 +356,125 @@ fn check_persistence_constraints(
     source: &str,
     package: Option<&str>,
     constraints: &[PersistenceConstraintPackage],
+    scope_remaps: &[PersistenceScopeRemap],
 ) -> Result<(), VerseError> {
-    let _ = (source, package);
+    let current = extract_persistence_schema(source)?;
     for constraint in constraints {
-        let _ = (
-            &constraint.package,
-            &constraint.source,
-            constraint.soft,
-            &constraint.scope_remaps,
-        );
+        let expected = extract_persistence_schema(&constraint.source)?;
+        let mut remaps = constraint.scope_remaps.clone();
+        remaps.extend(scope_remaps.iter().cloned());
+        for (path, expected_type) in expected.weak_maps {
+            let current_path = remap_persistence_path(&path, &constraint.package, package, &remaps);
+            let Some(actual_type) = current.weak_maps.get(&current_path) else {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(VerseError::parse(
+                    format!(
+                        "persistent weak_map `{path}` is missing in current package for persistence constraint package `{}`",
+                        constraint.package
+                    ),
+                    Span::new(0, 0, 1, 1),
+                ));
+            };
+            if actual_type != &expected_type {
+                if constraint.soft {
+                    continue;
+                }
+                return Err(VerseError::parse(
+                    format!(
+                        "persistent weak_map `{path}` is not backward-compatible with persistence constraint package `{}`",
+                        constraint.package
+                    ),
+                    Span::new(0, 0, 1, 1),
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct PersistenceSchema {
+    weak_maps: HashMap<String, (TypeName, TypeName)>,
+}
+
+fn extract_persistence_schema(source: &str) -> Result<PersistenceSchema, VerseError> {
+    let program = parse_source(source)?;
+    let mut schema = PersistenceSchema::default();
+    collect_persistence_schema(&program.statements, &mut Vec::new(), &mut schema);
+    Ok(schema)
+}
+
+fn collect_persistence_schema(
+    statements: &[Stmt],
+    module_path: &mut Vec<String>,
+    schema: &mut PersistenceSchema,
+) {
+    for statement in statements {
+        match &statement.kind {
+            StmtKind::Let { name, expr, .. } => {
+                if let ExprKind::ModuleDefinition { statements, .. } = &expr.kind {
+                    module_path.push(name.clone());
+                    collect_persistence_schema(statements, module_path, schema);
+                    module_path.pop();
+                }
+            }
+            StmtKind::Var {
+                name,
+                annotation: Some(annotation),
+                ..
+            } => {
+                if let TypeName::WeakMap(key, value) = &annotation.name {
+                    let path = qualified_schema_path(module_path, name);
+                    schema
+                        .weak_maps
+                        .insert(path, ((**key).clone(), (**value).clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualified_schema_path(module_path: &[String], name: &str) -> String {
+    if module_path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", module_path.join("."), name)
+    }
+}
+
+fn remap_persistence_path(
+    path: &str,
+    constraint_package: &str,
+    current_package: Option<&str>,
+    remaps: &[PersistenceScopeRemap],
+) -> String {
+    for remap in remaps {
+        let from = strip_package_prefix(&remap.from, Some(constraint_package));
+        let to = strip_package_prefix(&remap.to, current_package);
+        if path == from {
+            return to;
+        }
+        if let Some(suffix) = path.strip_prefix(&format!("{from}.")) {
+            return format!("{to}.{suffix}");
+        }
+    }
+    path.to_string()
+}
+
+fn strip_package_prefix(path: &str, package: Option<&str>) -> String {
+    let Some(package) = package else {
+        return path.to_string();
+    };
+    if path == package {
+        String::new()
+    } else if let Some(stripped) = path.strip_prefix(&format!("{package}.")) {
+        stripped.to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 fn find_manifest_for_entry(entry: &Path) -> Result<Option<PathBuf>, VerseError> {

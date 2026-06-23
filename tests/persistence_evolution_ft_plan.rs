@@ -86,7 +86,6 @@ Profile.profile_data{XP := 40, Level := 2}.XP + 2
 }
 
 #[test]
-#[ignore = "planned Persistence/evolution FT column"]
 fn checks_persistence_evolution_column_scope_remapped_schema_paths() {
     let root = temp_project_dir("persistence_evolution_scope_remap");
     write_profile_project(
@@ -122,6 +121,16 @@ PlayerData.profile_data{XP := 40, Coins := 2}.XP + 2
     assert_eq!(
         check_project_file(root.join("Game\\Game.vproject")).expect("project should check"),
         Type::Int
+    );
+
+    write_project_file(
+        &root,
+        "Game\\Game.vproject",
+        "package = Game\nentry = main.verse\ndependencyPackages = PublishedProfile\n",
+    );
+    assert_project_check_error(
+        root.join("Game\\Game.vproject"),
+        "persistent weak_map `Data.Saved` is missing",
     );
 }
 
