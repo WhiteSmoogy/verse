@@ -137,7 +137,6 @@ Run()
 }
 
 #[test]
-#[ignore = "planned Mutability FT column: non-local effect and capability checks"]
 fn rejects_mutability_column_non_local_effect_and_capability_mismatches() {
     assert_check_rejects(&[
         (
@@ -180,7 +179,7 @@ MakeCounter()<transacts>:type{_():int} =
 
 MakeCounter()()
 "#,
-            "annotated as `function/0 -> int`",
+            "annotated to return `function/0 -> int`",
         ),
     ]);
 }
