@@ -3752,12 +3752,12 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         candidate: &VmBoundMethodCandidate,
         value: VmValue,
     ) -> VmValue {
-        if !matches!(value, VmValue::Runtime(Value::External)) {
-            return value;
-        }
         let Some(return_type) = candidate.external_return_type.as_ref() else {
             return value;
         };
+        if !matches!(value, VmValue::Runtime(_)) {
+            return value;
+        }
         let return_type = self
             .bound_method_return_substitutions(self_value, candidate)
             .map(|substitutions| substitute_runtime_type_name_params(return_type, &substitutions))

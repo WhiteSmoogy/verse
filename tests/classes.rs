@@ -1471,6 +1471,42 @@ Item.Next().Current + 42
 }
 
 #[test]
+fn evaluates_external_parametric_class_method_tuple_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Pair():tuple(t, int) = external {}
+
+Item:box(int) = external {}
+Pair := Item.Pair()
+Pair(0) + Pair(1) + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_class_method_function_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    MakeReader():type{_():t} = external {}
+
+Item:box(int) = external {}
+Read := Item.MakeReader()
+Read() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_shared_constraint_parametric_class_instance_methods() {
     let source = r#"
 pair_box(t&u:type) := class:
