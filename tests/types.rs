@@ -1741,6 +1741,52 @@ Picked.Read()
 }
 
 #[test]
+fn evaluates_type_function_parametric_class_result_cast_surface() {
+    let source = r#"
+base_box(t:type) := class:
+    Value:t
+    Read():t = Value
+
+child_box(t:type) := class(base_box(t)):
+    Extra:int = 2
+
+BoxOf(Kind:type):type = base_box(Kind)
+Item:child_box(int) = child_box(int){Value := 42}
+
+if (Casted := BoxOf(int)[Item]). Casted.Read() else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_parametric_interface_result_cast_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Read():t
+
+box(t:type) := class(reader(t)):
+    Value:t
+    Read<override>():t = Value
+
+ReaderOf(Kind:type):type = reader(Kind)
+Item:box(int) = box(int){Value := 42}
+
+if (Casted := ReaderOf(int)[Item]). Casted.Read() else. 0
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_type_literal_primitive_result_annotation() {
     let source = r#"
 Pick():type = type{1}

@@ -3540,7 +3540,10 @@ impl Checker {
             Type::ClassType(target) => {
                 self.check_class_cast(&target, args, &arg_types, callee.span)
             }
-            Type::Subtype(_) | Type::CastableSubtype(_) | Type::ConcreteSubtype(_) => {
+            Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+            | Type::TypeValueOf(_) => {
                 self.check_type_value_cast(callee, &callee_type, args, &arg_types, callee.span)
             }
             Type::Unknown | Type::Any => Ok(Type::Unknown),
@@ -4524,7 +4527,7 @@ impl Checker {
         let target = self.type_value_cast_target(callee, callee_type);
         let Some(bound) = self.type_value_cast_bound(&target) else {
             return Err(VerseError::check_at(
-                format!("type value cast target `{target}` is not a class type"),
+                format!("type value cast target `{target}` is not a class or interface type"),
                 callee.span,
             ));
         };
@@ -4538,9 +4541,18 @@ impl Checker {
             {
                 Ok(target)
             }
+            (Type::Class(source), Type::Interface(bound))
+                if self.class_implements_interface(source, &bound) =>
+            {
+                Ok(target)
+            }
             (Type::Class(_), Type::Any | Type::Unknown) => Ok(target),
             (Type::Class(source), Type::Class(bound)) => Err(VerseError::check_at(
                 format!("cannot cast class `{source}` to unrelated class `{bound}`"),
+                args[0].span,
+            )),
+            (Type::Class(source), Type::Interface(bound)) => Err(VerseError::check_at(
+                format!("cannot cast class `{source}` to unrelated interface `{bound}`"),
                 args[0].span,
             )),
             (Type::Unknown | Type::Any, _) => Ok(target),
@@ -4564,9 +4576,10 @@ impl Checker {
         }
 
         match callee_type {
-            Type::Subtype(item) | Type::CastableSubtype(item) | Type::ConcreteSubtype(item) => {
-                item.as_ref().clone()
-            }
+            Type::Subtype(item)
+            | Type::CastableSubtype(item)
+            | Type::ConcreteSubtype(item)
+            | Type::TypeValueOf(item) => item.as_ref().clone(),
             other => other.clone(),
         }
     }
@@ -4574,6 +4587,7 @@ impl Checker {
     fn type_value_cast_bound(&self, value_type: &Type) -> Option<Type> {
         match value_type {
             Type::Class(name) => Some(Type::Class(name.clone())),
+            Type::Interface(name) => Some(Type::Interface(name.clone())),
             Type::Any | Type::Unknown => Some(value_type.clone()),
             Type::Param(_, TypeParamConstraint::Subtype(parent)) => self
                 .type_name_to_type_name_for_assignability(parent)
@@ -4581,9 +4595,10 @@ impl Checker {
             Type::Param(_, TypeParamConstraint::TypeBounds { upper, .. }) => self
                 .type_name_to_type_name_for_assignability(upper)
                 .and_then(|parent| self.type_value_cast_bound(&parent)),
-            Type::Subtype(item) | Type::CastableSubtype(item) | Type::ConcreteSubtype(item) => {
-                self.type_value_cast_bound(item)
-            }
+            Type::Subtype(item)
+            | Type::CastableSubtype(item)
+            | Type::ConcreteSubtype(item)
+            | Type::TypeValueOf(item) => self.type_value_cast_bound(item),
             _ => None,
         }
     }
@@ -4953,7 +4968,10 @@ impl Checker {
                 self.ensure_failable_expression_allowed(call.span)?;
                 Ok(value_type)
             }
-            Type::Subtype(_) | Type::CastableSubtype(_) | Type::ConcreteSubtype(_) => {
+            Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+            | Type::TypeValueOf(_) => {
                 let value_type = self.check_type_value_cast(
                     callee,
                     &callee_type,

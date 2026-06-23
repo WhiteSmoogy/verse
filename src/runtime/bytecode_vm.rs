@@ -42,6 +42,11 @@ enum VmValue {
     Uninitialized,
 }
 
+enum RuntimeCastTarget {
+    Class(String),
+    Interface(String),
+}
+
 #[derive(Clone)]
 struct VmFunction {
     function: usize,
@@ -3562,22 +3567,21 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         span,
                     ));
                 }
-                if let Value::ClassType { name, .. } = value {
+                if let Some(target) = self.runtime_cast_target(&value) {
                     let [candidate] = args.as_slice() else {
                         return Err(VerseError::runtime_at(
-                            "class type cast expected one argument",
+                            "type value cast expected one argument",
                             span,
                         ));
                     };
                     let candidate = into_runtime(candidate.clone(), span)?;
-                    return Ok(match &candidate {
-                        Value::ClassInstance { class_name, .. }
-                            if self.class_instance_is_a(class_name, &name) =>
-                        {
+                    return Ok(
+                        if self.runtime_value_matches_cast_target(&candidate, &target) {
                             CallOutcome::Value(VmValue::Runtime(candidate))
-                        }
-                        _ => CallOutcome::Failure,
-                    });
+                        } else {
+                            CallOutcome::Failure
+                        },
+                    );
                 }
                 let [index] = args.as_slice() else {
                     return Err(VerseError::runtime_at(
@@ -3648,17 +3652,70 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
     }
 
     fn class_instance_is_a(&self, actual: &str, expected: &str) -> bool {
-        let mut current = Some(actual);
+        let mut current = Some(actual.to_string());
         while let Some(class_name) = current {
-            if class_name == expected {
+            if runtime_type_names_match(&class_name, expected) {
                 return true;
             }
             current = self
-                .program
-                .class(class_name)
-                .and_then(|class| class.base_class());
+                .program_class_by_runtime_name(&class_name)
+                .and_then(|class| class.base_class().map(str::to_string));
         }
         false
+    }
+
+    fn class_instance_implements_interface(&self, actual: &str, expected: &str) -> bool {
+        let mut current = Some(actual.to_string());
+        while let Some(class_name) = current {
+            let Some(class) = self.program_class_by_runtime_name(&class_name) else {
+                return false;
+            };
+            if class
+                .interfaces()
+                .iter()
+                .any(|interface| runtime_type_names_match(interface, expected))
+            {
+                return true;
+            }
+            current = class.base_class().map(str::to_string);
+        }
+        false
+    }
+
+    fn program_class_by_runtime_name(&self, name: &str) -> Option<&ClassDescriptor> {
+        self.program.class(name).or_else(|| {
+            self.program
+                .classes()
+                .iter()
+                .rev()
+                .find(|class| runtime_type_names_match(class.name(), name))
+        })
+    }
+
+    fn runtime_cast_target(&self, value: &Value) -> Option<RuntimeCastTarget> {
+        match value {
+            Value::ClassType { name, .. } => Some(RuntimeCastTarget::Class(name.clone())),
+            Value::InterfaceType { name, .. } => Some(RuntimeCastTarget::Interface(name.clone())),
+            Value::Type(TypeName::Named(name))
+                if self.program_class_by_runtime_name(name).is_some() =>
+            {
+                Some(RuntimeCastTarget::Class(name.clone()))
+            }
+            Value::Type(TypeName::Named(name)) => Some(RuntimeCastTarget::Interface(name.clone())),
+            _ => None,
+        }
+    }
+
+    fn runtime_value_matches_cast_target(&self, value: &Value, target: &RuntimeCastTarget) -> bool {
+        let Value::ClassInstance { class_name, .. } = value else {
+            return false;
+        };
+        match target {
+            RuntimeCastTarget::Class(name) => self.class_instance_is_a(class_name, name),
+            RuntimeCastTarget::Interface(name) => {
+                self.class_instance_implements_interface(class_name, name)
+            }
+        }
     }
 
     fn index_value_failable(
@@ -3667,14 +3724,11 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         index: Value,
         span: Span,
     ) -> Result<Option<Value>, VerseError> {
-        if let Value::ClassType { name, .. } = collection {
-            return Ok(match &index {
-                Value::ClassInstance { class_name, .. }
-                    if self.class_instance_is_a(class_name, &name) =>
-                {
-                    Some(index)
-                }
-                _ => None,
+        if let Some(target) = self.runtime_cast_target(&collection) {
+            return Ok(if self.runtime_value_matches_cast_target(&index, &target) {
+                Some(index)
+            } else {
+                None
             });
         }
         index_value_failable(collection, index, span)
@@ -3956,6 +4010,28 @@ fn vm_value_matches_type(value: &VmValue, expected: Option<&TypeName>) -> bool {
             _ => false,
         },
     }
+}
+
+fn runtime_type_names_match(left: &str, right: &str) -> bool {
+    let left_erased = runtime_erased_type_name(left);
+    let right_erased = runtime_erased_type_name(right);
+    left == right
+        || left_erased == right_erased
+        || runtime_local_type_name(left) == right
+        || runtime_local_type_name(right) == left
+        || runtime_local_type_name(left_erased) == right_erased
+        || runtime_local_type_name(right_erased) == left_erased
+        || runtime_local_type_name(left_erased) == runtime_local_type_name(right_erased)
+}
+
+fn runtime_erased_type_name(name: &str) -> &str {
+    name.split_once('(')
+        .map(|(generic, _)| generic)
+        .unwrap_or(name)
+}
+
+fn runtime_local_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
