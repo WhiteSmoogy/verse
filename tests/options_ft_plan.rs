@@ -87,8 +87,7 @@ if (Actual := Value?). Actual else. 0
 }
 
 #[test]
-#[ignore = "planned Options FT column: option source effect propagation"]
-fn planned_options_column_option_source_effect_propagation() {
+fn evaluates_option_source_effect_propagation() {
     assert_runtime_cases(&[
         (
             "computes option source can call decides computes",
