@@ -215,6 +215,7 @@ pub(super) fn function_signatures_conflict(
             arity_range: left_arity_range,
             param_types: left_param_types,
             param_specs: left_param_specs,
+            return_type: left_return_type,
             ..
         },
         Type::Function {
@@ -222,6 +223,7 @@ pub(super) fn function_signatures_conflict(
             arity_range: right_arity_range,
             param_types: right_param_types,
             param_specs: right_param_specs,
+            return_type: right_return_type,
             ..
         },
     ) = (left, right)
@@ -233,10 +235,18 @@ pub(super) fn function_signatures_conflict(
         return false;
     }
 
+    let include_type_value_family_overlap = !(type_can_be_used_as_type_value(left_return_type)
+        && type_can_be_used_as_type_value(right_return_type));
+
     if let (Some(left_specs), Some(right_specs)) =
         (left_param_specs.as_deref(), right_param_specs.as_deref())
     {
-        return param_specs_overlap(left_specs, right_specs, struct_types);
+        return param_specs_overlap(
+            left_specs,
+            right_specs,
+            struct_types,
+            include_type_value_family_overlap,
+        );
     }
 
     left_arity == right_arity
@@ -244,6 +254,7 @@ pub(super) fn function_signatures_conflict(
             left_param_types.as_deref(),
             right_param_types.as_deref(),
             struct_types,
+            include_type_value_family_overlap,
         )
 }
 
@@ -251,8 +262,14 @@ pub(super) fn param_specs_overlap(
     left: &[ParamSpec],
     right: &[ParamSpec],
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
-    if param_specs_overlap_direct(left, right, struct_types) {
+    if param_specs_overlap_direct(
+        left,
+        right,
+        struct_types,
+        include_type_value_family_overlap,
+    ) {
         return true;
     }
 
@@ -260,19 +277,34 @@ pub(super) fn param_specs_overlap(
     let right_variants = expanded_single_tuple_param_spec_variants(right);
 
     for left_variant in &left_variants {
-        if param_specs_overlap_direct(left_variant, right, struct_types) {
+        if param_specs_overlap_direct(
+            left_variant,
+            right,
+            struct_types,
+            include_type_value_family_overlap,
+        ) {
             return true;
         }
         for right_variant in &right_variants {
-            if param_specs_overlap_direct(left_variant, right_variant, struct_types) {
+            if param_specs_overlap_direct(
+                left_variant,
+                right_variant,
+                struct_types,
+                include_type_value_family_overlap,
+            ) {
                 return true;
             }
         }
     }
 
-    right_variants
-        .iter()
-        .any(|right_variant| param_specs_overlap_direct(left, right_variant, struct_types))
+    right_variants.iter().any(|right_variant| {
+        param_specs_overlap_direct(
+            left,
+            right_variant,
+            struct_types,
+            include_type_value_family_overlap,
+        )
+    })
 }
 
 pub(super) fn expanded_single_tuple_param_spec_variants(
@@ -294,6 +326,7 @@ pub(super) fn param_specs_overlap_direct(
     left: &[ParamSpec],
     right: &[ParamSpec],
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
     let left_positional = left
         .iter()
@@ -306,21 +339,36 @@ pub(super) fn param_specs_overlap_direct(
         .map(|spec| &spec.value_type)
         .collect::<Vec<_>>();
 
-    if !param_type_slices_overlap(&left_positional, &right_positional, struct_types) {
+    if !param_type_slices_overlap(
+        &left_positional,
+        &right_positional,
+        struct_types,
+        include_type_value_family_overlap,
+    ) {
         return false;
     }
 
     let left_named = left.iter().filter(|spec| spec.named).collect::<Vec<_>>();
     let right_named = right.iter().filter(|spec| spec.named).collect::<Vec<_>>();
 
-    required_named_params_are_accepted_by(&left_named, &right_named, struct_types)
-        && required_named_params_are_accepted_by(&right_named, &left_named, struct_types)
+    required_named_params_are_accepted_by(
+        &left_named,
+        &right_named,
+        struct_types,
+        include_type_value_family_overlap,
+    ) && required_named_params_are_accepted_by(
+        &right_named,
+        &left_named,
+        struct_types,
+        include_type_value_family_overlap,
+    )
 }
 
 pub(super) fn required_named_params_are_accepted_by(
     required_source: &[&ParamSpec],
     target: &[&ParamSpec],
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
     required_source
         .iter()
@@ -330,7 +378,12 @@ pub(super) fn required_named_params_are_accepted_by(
                 .iter()
                 .find(|candidate| candidate.name == required.name)
                 .is_some_and(|candidate| {
-                    types_not_distinct(&required.value_type, &candidate.value_type, struct_types)
+                    overload_param_types_overlap(
+                        &required.value_type,
+                        &candidate.value_type,
+                        struct_types,
+                        include_type_value_family_overlap,
+                    )
                 })
         })
 }
@@ -339,12 +392,18 @@ pub(super) fn param_type_lists_overlap(
     left: Option<&[Type]>,
     right: Option<&[Type]>,
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => {
             let left_refs = left.iter().collect::<Vec<_>>();
             let right_refs = right.iter().collect::<Vec<_>>();
-            param_type_slices_overlap(&left_refs, &right_refs, struct_types)
+            param_type_slices_overlap(
+                &left_refs,
+                &right_refs,
+                struct_types,
+                include_type_value_family_overlap,
+            )
         }
         _ => true,
     }
@@ -354,24 +413,42 @@ pub(super) fn param_type_slices_overlap(
     left: &[&Type],
     right: &[&Type],
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
     if left.len() == right.len()
         && left
             .iter()
             .zip(right)
-            .all(|(left, right)| types_not_distinct(left, right, struct_types))
+            .all(|(left, right)| {
+                overload_param_types_overlap(
+                    left,
+                    right,
+                    struct_types,
+                    include_type_value_family_overlap,
+                )
+            })
     {
         return true;
     }
 
     if let [single] = left
-        && single_param_overlaps_sequence(single, right, struct_types)
+        && single_param_overlaps_sequence(
+            single,
+            right,
+            struct_types,
+            include_type_value_family_overlap,
+        )
     {
         return true;
     }
 
     if let [single] = right {
-        return single_param_overlaps_sequence(single, left, struct_types);
+        return single_param_overlaps_sequence(
+            single,
+            left,
+            struct_types,
+            include_type_value_family_overlap,
+        );
     }
 
     false
@@ -381,13 +458,88 @@ pub(super) fn single_param_overlaps_sequence(
     single: &Type,
     sequence: &[&Type],
     struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
 ) -> bool {
     match single {
         Type::Tuple(items) if items.len() == sequence.len() => items
             .iter()
             .zip(sequence)
-            .all(|(item, sequence_type)| types_not_distinct(item, sequence_type, struct_types)),
+            .all(|(item, sequence_type)| {
+                overload_param_types_overlap(
+                    item,
+                    sequence_type,
+                    struct_types,
+                    include_type_value_family_overlap,
+                )
+            }),
         _ => false,
+    }
+}
+
+fn overload_param_types_overlap(
+    left: &Type,
+    right: &Type,
+    struct_types: &HashMap<String, StructInfo>,
+    include_type_value_family_overlap: bool,
+) -> bool {
+    types_not_distinct(left, right, struct_types)
+        || (include_type_value_family_overlap
+            && type_value_families_overlap(left, right, struct_types))
+}
+
+fn type_value_families_overlap(
+    left: &Type,
+    right: &Type,
+    struct_types: &HashMap<String, StructInfo>,
+) -> bool {
+    match (left, right) {
+        (Type::TypeValue, other) | (other, Type::TypeValue) => is_type_value_family(other),
+        (
+            Type::TypeValueBounds {
+                lower: left_lower,
+                upper: left_upper,
+            },
+            Type::TypeValueBounds {
+                lower: right_lower,
+                upper: right_upper,
+            },
+        ) => {
+            types_not_distinct(left_upper, right_upper, struct_types)
+                && types_not_distinct(left_lower, right_lower, struct_types)
+        }
+        (Type::TypeValueBounds { upper, .. }, other)
+        | (other, Type::TypeValueBounds { upper, .. }) => subtype_family_base(other)
+            .is_some_and(|base| types_not_distinct(upper, base, struct_types)),
+        _ => match (subtype_family_base(left), subtype_family_base(right)) {
+            (Some(left_base), Some(right_base)) => {
+                types_not_distinct(left_base, right_base, struct_types)
+            }
+            _ => false,
+        },
+    }
+}
+
+fn is_type_value_family(value_type: &Type) -> bool {
+    matches!(
+        value_type,
+        Type::TypeValue
+            | Type::TypeValueOf(_)
+            | Type::TypeValueBounds { .. }
+            | Type::Subtype(_)
+            | Type::CastableSubtype(_)
+            | Type::ConcreteSubtype(_)
+            | Type::ClassType(_)
+            | Type::InterfaceType(_)
+            | Type::StructType(_)
+            | Type::EnumType(_)
+    )
+}
+
+fn subtype_family_base(value_type: &Type) -> Option<&Type> {
+    match value_type {
+        Type::Subtype(base) | Type::CastableSubtype(base) => Some(base),
+        Type::ConcreteSubtype(inner) => subtype_family_base(inner),
+        _ => None,
     }
 }
 

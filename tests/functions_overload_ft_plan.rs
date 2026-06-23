@@ -60,14 +60,15 @@ Choose(Value:float):int = 2
 }
 
 #[test]
-#[ignore = "planned Functions overload FT column: type-value family distinctness"]
 fn rejects_functions_overload_column_type_value_family_distinctness() {
     assert_check_rejects(&[
         (
             "subtype bases overlap through subclass type values",
             r#"
 base_item := class:
+    Marker:int = 0
 child_item := class(base_item):
+    ChildMarker:int = 0
 Choose(Kind:subtype(base_item)):int = 1
 Choose(Kind:subtype(child_item)):int = 2
 "#,
@@ -77,7 +78,9 @@ Choose(Kind:subtype(child_item)):int = 2
             "castable subtype overlaps plain subtype family",
             r#"
 base_tag := class<abstract><unique>:
+    Marker:int = 0
 castable_tag := class<concrete><castable>(base_tag):
+    Value:int = 0
 Choose(Kind:subtype(base_tag)):int = 1
 Choose(Kind:castable_subtype(base_tag)):int = 2
 "#,
@@ -87,7 +90,9 @@ Choose(Kind:castable_subtype(base_tag)):int = 2
             "concrete castable subtype overlaps castable subtype family",
             r#"
 base_tag := class<abstract><unique>:
+    Marker:int = 0
 castable_tag := class<concrete><castable>(base_tag):
+    Value:int = 0
 Choose(Kind:castable_subtype(base_tag)):int = 1
 Choose(Kind:concrete_subtype(castable_subtype(base_tag))):int = 2
 "#,
@@ -97,7 +102,9 @@ Choose(Kind:concrete_subtype(castable_subtype(base_tag))):int = 2
             "type value exact kind and bounded type value overlap",
             r#"
 base_item := class:
+    Marker:int = 0
 child_item := class(base_item):
+    ChildMarker:int = 0
 Choose(Kind:type):int = 1
 Choose(Kind:type(child_item, base_item)):int = 2
 "#,
