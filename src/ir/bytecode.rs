@@ -8242,7 +8242,7 @@ impl<'semantic> Lowerer<'semantic> {
                 value
             } else {
                 let value_expr = field.default.as_ref().ok_or(UnsupportedBytecode)?;
-                self.lower_expr(value_expr, state)?
+                self.lower_default_field_value(field, value_expr, state)?
             };
             fields.push((field.name.clone(), field.mutable, value));
         }
@@ -8261,6 +8261,23 @@ impl<'semantic> Lowerer<'semantic> {
             span,
         });
         Ok(ValueOperand::Register(dest))
+    }
+
+    fn lower_default_field_value(
+        &mut self,
+        field: &StructField,
+        expr: &Expr,
+        state: &mut ChunkState,
+    ) -> Result<ValueOperand, UnsupportedBytecode> {
+        if matches!(expr.kind, ExprKind::External) {
+            Ok(self.emit_external(
+                self.external_runtime_type_name(field.annotation.as_ref(), expr),
+                state,
+                expr.span,
+            ))
+        } else {
+            self.lower_expr(expr, state)
+        }
     }
 
     fn archetype_type_value_external_type_name(&self, callee: &Expr) -> Option<TypeName> {

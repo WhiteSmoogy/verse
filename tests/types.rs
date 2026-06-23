@@ -1591,6 +1591,38 @@ Stack.Evaluate(2)
 }
 
 #[test]
+fn evaluates_type_function_external_aggregate_field_defaults_runtime_surface() {
+    let source = r#"
+DataTypes<public> := module:
+    ModifierOf<public>(Item:type):type = modifier(Item)
+    StackOf<public>(Item:type):type = modifier_stack(Item)
+
+add := class(DataTypes.ModifierOf(int)):
+    Amount:int
+    Evaluate<override>(InValue:int):int =
+        InValue + Amount
+
+holder := class:
+    Stack:DataTypes.StackOf(int) = external {}
+
+record := struct:
+    Stack:DataTypes.StackOf(int) = external {}
+
+Item := holder{}
+Item.Stack.AddModifier(add{Amount := 40}, 0)
+StructItem := record{}
+StructItem.Stack.AddModifier(add{Amount := 20}, 0)
+Item.Stack.Evaluate(2) + StructItem.Stack.Evaluate(0)
+"#;
+
+    assert_eq!(eval(source), Value::Int(62));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_official_event_result_archetype_surface() {
     let source = r#"
 EventOf(Payload:type):type = event(Payload)
