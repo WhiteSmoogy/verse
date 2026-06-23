@@ -86,7 +86,6 @@ Result
 }
 
 #[test]
-#[ignore = "planned column: nested mutable values roll back through structs"]
 fn rolls_back_struct_contained_mutable_values_in_failure_contexts() {
     assert_runtime_cases(&[
         (
@@ -144,7 +143,7 @@ bag := struct<computes>:
 
 var Maybe:?bag = option{bag{Items := array{1}}}
 Result := if:
-    Current := Maybe?
+    var Current:bag = Maybe?
     set Current.Items[0] = 40
     set Maybe = option{Current}
     false?
