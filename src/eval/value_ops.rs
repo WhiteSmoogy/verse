@@ -14,6 +14,7 @@ pub(super) fn value_copy(value: &Value) -> Value {
         Value::String(value) => Value::String(value.clone()),
         Value::Diagnostic(value) => Value::Diagnostic(value.clone()),
         Value::External => Value::External,
+        Value::ExternalFunction { .. } => value.clone(),
         Value::None => Value::None,
         Value::Pending => Value::Pending,
         Value::Suspended(suspension) => Value::Suspended(suspension.clone()),

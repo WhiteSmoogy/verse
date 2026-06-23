@@ -335,6 +335,21 @@ Fn(21)
 }
 
 #[test]
+fn evaluates_external_function_typed_value_runtime_surface() {
+    let source = r#"
+Handler:type{_(:int):int} = external {}
+Handler(21)
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_function_parameters_with_type_annotations() {
     let source = r#"
 Apply(F:type{_(:int):int}, Value:int):int = F(Value)

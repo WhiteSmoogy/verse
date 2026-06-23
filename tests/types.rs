@@ -2458,6 +2458,23 @@ Handler(21)
 }
 
 #[test]
+fn evaluates_type_function_function_signature_external_runtime_surface() {
+    let source = r#"
+HandlerOf(Result:type):type = type{_(:int):Result}
+
+Handler:HandlerOf(int) = external {}
+Handler(21)
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_type_function_type_literal_signed_non_number_result_annotation() {
     let source = r#"
 Pick():type = type{+"ready"}

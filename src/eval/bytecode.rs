@@ -216,6 +216,15 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
         }
         TypeName::Tuple(items) => Value::Tuple(vec![Value::External; items.len()]),
         TypeName::Option(_) => Value::Option(None),
+        TypeName::FunctionSignature {
+            params,
+            effects,
+            return_type,
+        } => Value::ExternalFunction {
+            params: params.clone(),
+            effects: effects.clone(),
+            return_type: return_type.clone(),
+        },
         _ => Value::External,
     }
 }

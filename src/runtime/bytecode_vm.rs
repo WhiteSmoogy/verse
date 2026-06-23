@@ -3150,6 +3150,39 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         )),
                     };
                 }
+                if let Value::ExternalFunction {
+                    params,
+                    return_type,
+                    ..
+                } = value
+                {
+                    if !named_args.is_empty() {
+                        return Err(VerseError::runtime_at(
+                            "external function calls should lower named arguments before runtime",
+                            span,
+                        ));
+                    }
+                    if params.len() != args.len() {
+                        return Err(VerseError::runtime_at(
+                            format!(
+                                "external function expected {} arguments, got {}",
+                                params.len(),
+                                args.len()
+                            ),
+                            span,
+                        ));
+                    }
+                    let _args = args
+                        .into_iter()
+                        .map(|arg| into_runtime(arg, span))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let value = if matches!(return_type.as_ref(), TypeName::None) {
+                        Value::None
+                    } else {
+                        bytecode_external_value(&return_type)
+                    };
+                    return Ok(CallOutcome::Value(VmValue::Runtime(value)));
+                }
                 if let Value::NativeFunction {
                     name,
                     arity,
@@ -3636,6 +3669,9 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 "IsAlmostZero" => expected_arity == 1,
                 _ => false,
             },
+            VmValue::Runtime(Value::ExternalFunction { params, .. }) => {
+                params.len() == expected_arity
+            }
             VmValue::Runtime(Value::External) => true,
             VmValue::Runtime(Value::NativeFunction { arity, .. }) => {
                 arity.is_none_or(|arity| arity == expected_arity)
@@ -4002,7 +4038,9 @@ fn vm_value_matches_type(value: &VmValue, expected: Option<&TypeName>) -> bool {
             VmValue::Function(_)
                 | VmValue::BoundMethod(_)
                 | VmValue::NumberMethod(_)
-                | VmValue::Runtime(Value::NativeFunction { .. } | Value::External)
+                | VmValue::Runtime(
+                    Value::NativeFunction { .. } | Value::ExternalFunction { .. } | Value::External,
+                )
         ),
         _ => match value {
             VmValue::Runtime(value) => runtime_value_matches_type_name(value, expected),
@@ -4094,7 +4132,10 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
         TypeName::Tuple(_) => matches!(value, Value::Tuple(_)),
         TypeName::Option(_) => matches!(value, Value::Option(_)),
         TypeName::Function | TypeName::FunctionSignature { .. } => {
-            matches!(value, Value::NativeFunction { .. } | Value::External)
+            matches!(
+                value,
+                Value::NativeFunction { .. } | Value::ExternalFunction { .. } | Value::External
+            )
         }
     }
 }
@@ -4747,6 +4788,7 @@ fn copy_runtime_value(value: &Value) -> Value {
         | Value::String(_)
         | Value::Diagnostic(_)
         | Value::External
+        | Value::ExternalFunction { .. }
         | Value::None
         | Value::Pending
         | Value::Suspended(_)

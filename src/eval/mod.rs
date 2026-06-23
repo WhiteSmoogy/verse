@@ -122,6 +122,11 @@ pub enum Value {
     String(String),
     Diagnostic(String),
     External,
+    ExternalFunction {
+        params: Vec<TypeName>,
+        effects: Vec<String>,
+        return_type: Box<TypeName>,
+    },
     None,
     Pending,
     Suspended(RuntimeSuspension),
@@ -434,6 +439,22 @@ impl PartialEq for Value {
             }
             (Self::Diagnostic(left), Self::Diagnostic(right)) => left == right,
             (Self::External, Self::External) => true,
+            (
+                Self::ExternalFunction {
+                    params: left_params,
+                    effects: left_effects,
+                    return_type: left_return_type,
+                },
+                Self::ExternalFunction {
+                    params: right_params,
+                    effects: right_effects,
+                    return_type: right_return_type,
+                },
+            ) => {
+                left_params == right_params
+                    && left_effects == right_effects
+                    && left_return_type == right_return_type
+            }
             (Self::None, Self::None) => true,
             (Self::Pending, Self::Pending) | (Self::Suspended(_), Self::Suspended(_)) => true,
             (Self::Session, Self::Session) => true,
@@ -708,6 +729,9 @@ impl fmt::Display for Value {
             Self::String(value) => write!(formatter, "{value}"),
             Self::Diagnostic(_) => write!(formatter, "<diagnostic>"),
             Self::External => write!(formatter, "<external>"),
+            Self::ExternalFunction { params, .. } => {
+                write!(formatter, "<external function/{}>", params.len())
+            }
             Self::None => write!(formatter, "none"),
             Self::Pending => write!(formatter, "<pending>"),
             Self::Suspended(_) => write!(formatter, "<suspended>"),
@@ -2207,6 +2231,7 @@ fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
                 | Value::NativeModifierMethod { .. }
                 | Value::NativeCancelMethod { .. }
                 | Value::NativeSubscriptionCancelMethod { .. }
+                | Value::ExternalFunction { .. }
                 | Value::External
         ),
     }

@@ -82,6 +82,7 @@ fn player_map_value_size_inner(value: &Value, depth: usize) -> Option<usize> {
         | Value::ClassifiableSubsetVar { .. }
         | Value::Diagnostic(_)
         | Value::External
+        | Value::ExternalFunction { .. }
         | Value::Session
         | Value::Range { .. }
         | Value::EnumType { .. }
