@@ -81,6 +81,20 @@ else:
 }
 
 #[test]
+fn evaluates_external_array_as_empty_runtime_value() {
+    let source = r#"
+Values:[]int = external {}
+Values.Length
+"#;
+
+    assert_eq!(eval(source), Value::Int(0));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_single_array_parameter_variadic_calls() {
     let source = r#"
 Sum(Items:[]int)<transacts>:int = {

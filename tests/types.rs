@@ -1448,6 +1448,30 @@ Accept(SessionTable(int))
 }
 
 #[test]
+fn evaluates_type_function_container_external_runtime_surface() {
+    let source = r#"
+ListOf(Kind:type):type = []Kind
+Table(Key:subtype(comparable), Value:type):type = [Key]Value
+SessionTable(Value:type):type = weak_map(session, Value)
+
+Values:ListOf(int) = external {}
+Scores:Table(string, int) = external {}
+Saved:SessionTable(int) = external {}
+
+ArrayPart := Values.Length
+MapPart := Scores.Length
+WeakPart := if (Value := Saved[GetSession()]). Value else. 40
+ArrayPart + MapPart + WeakPart + 2
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_option_type_former_result_annotation() {
     let source = r#"
 Maybe(Kind:type):type = ?Kind

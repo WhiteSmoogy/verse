@@ -3464,6 +3464,11 @@ impl<'semantic> Lowerer<'semantic> {
                 ) && args.len() == 1 =>
             {
                 let expected = bytecode_type_constraint_payload_head(&args[0])?;
+                if expected == "comparable" {
+                    return self
+                        .bytecode_type_name_is_comparable(arg, type_params)
+                        .then_some(4);
+                }
                 let actuals = self.bytecode_type_arg_runtime_heads(arg, type_params);
                 actuals
                     .into_iter()
@@ -3479,6 +3484,73 @@ impl<'semantic> Lowerer<'semantic> {
             }
             _ => None,
         }
+    }
+
+    fn bytecode_type_name_is_comparable(
+        &self,
+        type_name: &TypeName,
+        type_params: &[TypeParam],
+    ) -> bool {
+        match type_name {
+            TypeName::Int
+            | TypeName::Float
+            | TypeName::Rational
+            | TypeName::Number
+            | TypeName::Bool
+            | TypeName::String
+            | TypeName::Message
+            | TypeName::Char
+            | TypeName::Char8
+            | TypeName::Char32
+            | TypeName::None
+            | TypeName::Any
+            | TypeName::Comparable
+            | TypeName::IntRange { .. }
+            | TypeName::FloatRange(_) => true,
+            TypeName::Named(name) => {
+                if let Some(param) = type_params.iter().find(|param| param.name == *name) {
+                    return match &param.constraint {
+                        TypeParamConstraint::Type => false,
+                        TypeParamConstraint::Subtype(parent) => {
+                            self.bytecode_type_name_is_comparable(parent, type_params)
+                        }
+                        TypeParamConstraint::TypeBounds { upper, .. } => {
+                            self.bytecode_type_name_is_comparable(upper, type_params)
+                        }
+                    };
+                }
+                self.runtime_type_head_is_comparable(name)
+            }
+            TypeName::Array(Some(item)) | TypeName::Option(item) => {
+                self.bytecode_type_name_is_comparable(item, type_params)
+            }
+            TypeName::Map(key, value) => {
+                self.bytecode_type_name_is_comparable(key, type_params)
+                    && self.bytecode_type_name_is_comparable(value, type_params)
+            }
+            TypeName::Tuple(items) => items
+                .iter()
+                .all(|item| self.bytecode_type_name_is_comparable(item, type_params)),
+            TypeName::Applied { name, args } if name == "classifiable_subset_key" => {
+                args.len() == 1
+            }
+            TypeName::Applied { name, .. } => self.runtime_type_head_is_comparable(name),
+            TypeName::Type
+            | TypeName::TypeBounds { .. }
+            | TypeName::Array(None)
+            | TypeName::WeakMap(_, _)
+            | TypeName::Function
+            | TypeName::FunctionSignature { .. } => false,
+        }
+    }
+
+    fn runtime_type_head_is_comparable(&self, name: &str) -> bool {
+        matches!(name, "session" | "player" | "team")
+            || self.class_layouts.iter().any(|(runtime_name, layout)| {
+                runtime_names_match(name, runtime_name)
+                    && matches!(layout.object_kind, ObjectKind::Class)
+                    && layout.unique
+            })
     }
 
     fn bytecode_type_arg_runtime_heads(
@@ -10172,6 +10244,19 @@ fn bytecode_type_constraint_payload_head(type_name: &TypeName) -> Option<String>
             bytecode_type_constraint_payload_head(&args[0])
         }
         TypeName::TypeBounds { upper, .. } => bytecode_type_constraint_payload_head(upper),
+        TypeName::Int => Some("int".to_string()),
+        TypeName::Float => Some("float".to_string()),
+        TypeName::Rational => Some("rational".to_string()),
+        TypeName::Number => Some("number".to_string()),
+        TypeName::Bool => Some("logic".to_string()),
+        TypeName::String => Some("string".to_string()),
+        TypeName::Message => Some("message".to_string()),
+        TypeName::Char => Some("char".to_string()),
+        TypeName::Char8 => Some("char8".to_string()),
+        TypeName::Char32 => Some("char32".to_string()),
+        TypeName::None => Some("void".to_string()),
+        TypeName::Any => Some("any".to_string()),
+        TypeName::Comparable => Some("comparable".to_string()),
         TypeName::Named(name) | TypeName::Applied { name, .. } => Some(name.clone()),
         _ => None,
     }
@@ -10305,7 +10390,14 @@ fn bytecode_expr_to_type_name(expr: &Expr) -> Option<TypeName> {
                     bytecode_expr_to_type_name(expr)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(TypeName::Applied { name, args })
+            match name.as_str() {
+                "tuple" if args.len() >= 2 => Some(TypeName::Tuple(args)),
+                "weak_map" if args.len() == 2 => Some(TypeName::WeakMap(
+                    Box::new(args[0].clone()),
+                    Box::new(args[1].clone()),
+                )),
+                _ => Some(TypeName::Applied { name, args }),
+            }
         }
         ExprKind::TypeAnnotationLiteral { annotation } => Some(annotation.name.clone()),
         ExprKind::Tuple(items) => Some(TypeName::Tuple(

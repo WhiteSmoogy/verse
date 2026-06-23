@@ -81,6 +81,35 @@ else:
 }
 
 #[test]
+fn evaluates_external_map_as_empty_runtime_value() {
+    let source = r#"
+Scores:[string]int = external {}
+Missing := if (Score := Scores["ada"]). Score else. 40
+Missing + Scores.Length + 2
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_weak_map_as_empty_runtime_value() {
+    let source = r#"
+Scores:weak_map(session, int) = external {}
+if (Score := Scores[GetSession()]). Score else. 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_subtype_comparable_constraint_for_equality_and_map_key() {
     let source = r#"
 Same(Left:t, Right:t where t:subtype(comparable))<decides><transacts>:t =
