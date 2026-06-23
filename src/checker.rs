@@ -1468,6 +1468,10 @@ fn is_concatenate_callee(callee: &Expr) -> bool {
     matches!(&callee.kind, ExprKind::Ident(name) if name == "Concatenate")
 }
 
+fn is_replace_callee(callee: &Expr) -> bool {
+    matches!(&callee.kind, ExprKind::Ident(name) if name == "Replace")
+}
+
 fn is_make_classifiable_subset_callee(callee: &Expr) -> bool {
     matches!(&callee.kind, ExprKind::Ident(name) if name == "MakeClassifiableSubset")
 }
@@ -1513,6 +1517,80 @@ fn is_concatenate_function_type(callee_type: &Type) -> bool {
         } if matches!(param_types.as_slice(), [Type::Array(item)] if matches!(item.as_ref(), Type::Array(_)))
             && matches!(return_type.as_ref(), Type::Array(_))
     )
+}
+
+fn is_replace_function_type(callee_type: &Type) -> bool {
+    matches!(
+        callee_type,
+        Type::Function {
+            arity: Some(4),
+            effects,
+            param_types: Some(param_types),
+            return_type,
+            ..
+        } if has_effect(effects, "computes")
+            && has_effect(effects, "decides")
+            && matches!(
+                param_types.as_slice(),
+                [Type::Array(_), Type::Int, Type::Int, Type::Array(_)]
+            )
+            && matches!(return_type.as_ref(), Type::Array(_))
+    )
+}
+
+fn replace_arg_positions(args: &[CallArg], span: Span) -> Result<[usize; 4], VerseError> {
+    let param_names = ["Input", "StartIndex", "StopIndex", "ElementsToReplaceWith"];
+    let mut positions = [None; 4];
+    let mut next_positional = 0usize;
+
+    for (arg_index, arg) in args.iter().enumerate() {
+        match arg {
+            CallArg::Positional(expr) => {
+                let Some(param_index) =
+                    (next_positional..param_names.len()).find(|index| positions[*index].is_none())
+                else {
+                    return Err(VerseError::check_at(
+                        "positional argument does not match any positional parameter",
+                        expr.span,
+                    ));
+                };
+                positions[param_index] = Some(arg_index);
+                next_positional = param_index + 1;
+            }
+            CallArg::Named {
+                name,
+                optional,
+                span,
+                ..
+            } => {
+                let Some(param_index) = param_names.iter().position(|param| param == name) else {
+                    let rendered = rendered_argument_name(name, *optional);
+                    return Err(VerseError::check_at(
+                        format!("unknown named argument `{rendered}`"),
+                        *span,
+                    ));
+                };
+                if *optional {
+                    return Err(VerseError::check_at(
+                        format!("parameter `{name}` is not a named parameter"),
+                        *span,
+                    ));
+                }
+                if positions[param_index].is_some() {
+                    return Err(VerseError::check_at(
+                        format!("duplicate argument for parameter `{name}`"),
+                        *span,
+                    ));
+                }
+                positions[param_index] = Some(arg_index);
+            }
+        }
+    }
+
+    let [Some(input), Some(start), Some(stop), Some(replacement)] = positions else {
+        return Err(VerseError::check_at("`Replace` expected 4 arguments", span));
+    };
+    Ok([input, start, stop, replacement])
 }
 
 fn infer_concatenate_item_type(

@@ -11774,6 +11774,7 @@ fn bytecode_native_function_name(name: &str) -> bool {
             | "Shuffle"
             | "Round"
             | "Concatenate"
+            | "Replace"
             | "ConcatenateMaps"
             | "MakeClassifiableSubset"
             | "MakeClassifiableSubsetVar"
@@ -11824,6 +11825,12 @@ fn bytecode_native_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Log" => vec![vec!["B"], vec!["X"]],
         "IsAlmostEqual" => vec![vec!["Val1"], vec!["Val2"], vec!["AbsoluteTolerance"]],
         "Concatenate" => vec![vec!["Arrays"]],
+        "Replace" => vec![
+            vec!["Input"],
+            vec!["StartIndex"],
+            vec!["StopIndex"],
+            vec!["ElementsToReplaceWith"],
+        ],
         "GetCastableFinalSuperClass" => vec![vec!["base_type"], vec!["Instance"]],
         "GetCastableFinalSuperClassFromType" => vec![vec!["base_type"], vec!["sub_type"]],
         "Sleep" => vec![vec!["Seconds"]],

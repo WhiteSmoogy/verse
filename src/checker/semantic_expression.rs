@@ -191,6 +191,12 @@ impl Checker {
                     return self.check_concatenate_call(args, &arg_types, expr.span);
                 }
 
+                if is_replace_callee(callee) && is_replace_function_type(&callee_type) {
+                    self.ensure_callee_type_effects_allowed(&callee_type, expr.span)?;
+                    self.ensure_failable_expression_allowed(expr.span)?;
+                    return self.check_replace_call(args, &arg_types, expr.span);
+                }
+
                 if is_make_classifiable_subset_callee(callee)
                     && is_make_classifiable_subset_function_type(&callee_type)
                 {
@@ -3333,6 +3339,11 @@ impl Checker {
             return self.check_concatenate_call(args, &arg_types, span);
         }
 
+        if is_replace_callee(callee) && is_replace_function_type(&callee_type) {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, span)?;
+            return self.check_replace_call(args, &arg_types, span);
+        }
+
         if is_make_classifiable_subset_callee(callee)
             && is_make_classifiable_subset_function_type(&callee_type)
         {
@@ -3495,6 +3506,12 @@ impl Checker {
         if is_fits_in_player_map_callee(callee) {
             ensure_exact_arg_count("FitsInPlayerMap", args, 1, callee.span)?;
             return Ok(arg_types[0].clone());
+        }
+
+        if is_replace_callee(callee) && is_replace_function_type(&callee_type) {
+            self.ensure_callee_type_failure_context_allowed(&callee_type, callee.span)?;
+            let call_args = positional_call_args(args);
+            return self.check_replace_call(&call_args, &arg_types, callee.span);
         }
 
         match callee_type {
@@ -4769,6 +4786,54 @@ impl Checker {
         Ok(Type::Array(Box::new(item_type)))
     }
 
+    pub(super) fn check_replace_call(
+        &mut self,
+        args: &[CallArg],
+        arg_types: &[Type],
+        span: Span,
+    ) -> Result<Type, VerseError> {
+        let positions = replace_arg_positions(args, span)?;
+        let input_expr = call_arg_expr(&args[positions[0]]);
+        let start_expr = call_arg_expr(&args[positions[1]]);
+        let stop_expr = call_arg_expr(&args[positions[2]]);
+        let replacement_expr = call_arg_expr(&args[positions[3]]);
+        ensure_int_index_type(
+            &arg_types[positions[1]],
+            "`Replace` StartIndex",
+            start_expr.span,
+        )?;
+        ensure_int_index_type(
+            &arg_types[positions[2]],
+            "`Replace` StopIndex",
+            stop_expr.span,
+        )?;
+
+        let item_type = match &arg_types[positions[0]] {
+            Type::Array(item_type) => item_type.as_ref().clone(),
+            Type::Unknown | Type::Any => Type::Unknown,
+            other => {
+                return Err(VerseError::check_at(
+                    format!("argument `Input` expected `array`, got `{other}`"),
+                    input_expr.span,
+                ));
+            }
+        };
+        let expected_replacement = Type::Array(Box::new(item_type.clone()));
+        self.ensure_expr_assignable(
+            &expected_replacement,
+            &arg_types[positions[3]],
+            replacement_expr,
+            || {
+                format!(
+                    "argument `ElementsToReplaceWith` expected `{expected_replacement}`, got `{}`",
+                    arg_types[positions[3]]
+                )
+            },
+        )?;
+
+        Ok(Type::Array(Box::new(item_type)))
+    }
+
     pub(super) fn check_make_classifiable_subset_call(
         &self,
         args: &[CallArg],
@@ -4958,6 +5023,13 @@ impl Checker {
             ensure_exact_arg_count("FitsInPlayerMap", args, 1, callee.span)?;
             self.ensure_failable_expression_allowed(call.span)?;
             return Ok(arg_types[0].clone());
+        }
+
+        if is_replace_callee(callee) && is_replace_function_type(&callee_type) {
+            self.ensure_callee_type_effects_allowed(&callee_type, callee.span)?;
+            self.ensure_failable_expression_allowed(call.span)?;
+            let call_args = positional_call_args(args);
+            return self.check_replace_call(&call_args, &arg_types, callee.span);
         }
 
         match callee_type {

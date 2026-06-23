@@ -1548,6 +1548,7 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
         "GetRandomInt" => (Some(2), false, native_get_random_int),
         "Shuffle" => (Some(1), false, native_shuffle),
         "Concatenate" => (None, false, native_concatenate),
+        "Replace" => (Some(4), true, native_replace),
         "ConcatenateMaps" => (Some(2), false, native_concatenate_maps),
         "MakeClassifiableSubset" => (Some(1), false, native_make_classifiable_subset),
         "MakeClassifiableSubsetVar" => (Some(1), false, native_make_classifiable_subset_var),
@@ -1630,6 +1631,7 @@ pub(crate) fn bytecode_native_function_value(name: &str) -> Option<Value> {
             "GetRandomInt" => "GetRandomInt",
             "Shuffle" => "Shuffle",
             "Concatenate" => "Concatenate",
+            "Replace" => "Replace",
             "ConcatenateMaps" => "ConcatenateMaps",
             "MakeClassifiableSubset" => "MakeClassifiableSubset",
             "MakeClassifiableSubsetVar" => "MakeClassifiableSubsetVar",
@@ -1990,6 +1992,12 @@ fn native_named_param_aliases(name: &str) -> Option<Vec<Vec<&'static str>>> {
         "Localize" => vec![vec!["Message"]],
         "Join" => vec![vec!["Strings", "Messages"], vec!["Separator"]],
         "Concatenate" => vec![vec!["Arrays"]],
+        "Replace" => vec![
+            vec!["Input"],
+            vec!["StartIndex"],
+            vec!["StopIndex"],
+            vec!["ElementsToReplaceWith"],
+        ],
         "GetRandomFloat" | "GetRandomInt" => vec![vec!["Low"], vec!["High"]],
         "Shuffle" => vec![vec!["Input"]],
         "GetCastableFinalSuperClass" => vec![vec!["base_type"], vec!["Instance"]],
@@ -2717,6 +2725,38 @@ fn concatenate_packed_array_args(args: Vec<Value>, span: Span) -> Result<NativeR
         }
     }
 
+    Ok(NativeResult::Value(array_value(result)))
+}
+
+fn native_replace(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
+    let [input, start, stop, replacement]: [Value; 4] =
+        args.try_into().expect("arity checked by caller");
+    let Value::Array(input) = input else {
+        return Err(VerseError::runtime_at(
+            "`Replace` Input expected an array argument",
+            span,
+        ));
+    };
+    let Some(start) = array_position_value(&start, "`Replace` StartIndex", span)? else {
+        return Ok(NativeResult::Failure("start index is negative"));
+    };
+    let Some(stop) = array_position_value(&stop, "`Replace` StopIndex", span)? else {
+        return Ok(NativeResult::Failure("stop index is negative"));
+    };
+    let Value::Array(replacement) = tuple_value_to_array(replacement) else {
+        return Err(VerseError::runtime_at(
+            "`Replace` ElementsToReplaceWith expected an array argument",
+            span,
+        ));
+    };
+
+    let input = input.borrow();
+    if !valid_slice_range(start, stop, input.len()) {
+        return Ok(NativeResult::Failure("invalid replacement range"));
+    }
+    let mut result: Vec<Value> = input[..start].iter().map(value_copy).collect();
+    result.extend(replacement.borrow().iter().map(value_copy));
+    result.extend(input[stop..].iter().map(value_copy));
     Ok(NativeResult::Value(array_value(result)))
 }
 

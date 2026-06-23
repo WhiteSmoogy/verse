@@ -308,6 +308,22 @@ impl Checker {
             )),
         );
         globals.insert(
+            "Replace".to_string(),
+            Symbol::immutable(native_function_type(
+                &["computes", "decides"],
+                vec![
+                    ("Input", Type::Array(Box::new(Type::Unknown))),
+                    ("StartIndex", Type::Int),
+                    ("StopIndex", Type::Int),
+                    (
+                        "ElementsToReplaceWith",
+                        Type::Array(Box::new(Type::Unknown)),
+                    ),
+                ],
+                Type::Array(Box::new(Type::Unknown)),
+            )),
+        );
+        globals.insert(
             "ConcatenateMaps".to_string(),
             Symbol::immutable(Type::Function {
                 arity: Some(2),
