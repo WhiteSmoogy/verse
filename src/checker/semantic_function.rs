@@ -1890,11 +1890,18 @@ impl Checker {
                             tuple_items: None,
                         })
                         .collect::<Vec<_>>();
-                    let return_value_type = self.annotation_to_type(Some(return_type))?;
-                    Ok((param_types, param_specs, return_value_type))
+                    // This pass is speculative; ordinary zero-arg runtime functions can look like
+                    // type functions until their return annotation resolves.
+                    let Ok(return_value_type) = self.annotation_to_type(Some(return_type)) else {
+                        return Ok(None);
+                    };
+                    Ok(Some((param_types, param_specs, return_value_type)))
                 })();
                 self.pop_type_param_scope();
-                let (param_types, param_specs, return_value_type) = signature_parts?;
+                let Some((param_types, param_specs, return_value_type)) = signature_parts? else {
+                    pending[index] = false;
+                    continue;
+                };
                 if !type_can_be_used_as_type_value(&return_value_type) {
                     pending[index] = false;
                     continue;
