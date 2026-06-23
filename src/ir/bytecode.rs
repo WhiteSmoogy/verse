@@ -1501,7 +1501,20 @@ impl ChunkState {
                 .iter()
                 .rev()
                 .find_map(|scope| scope.get(&qualified).copied())
-        })
+            })
+    }
+
+    fn binding_is_global_ref(&self, binding: Binding) -> bool {
+        matches!(
+            binding.operand,
+            ValueOperand::Constant(index)
+                if matches!(self.chunk.constants().get(index), Some(Constant::GlobalRef(_)))
+        )
+    }
+
+    fn callable_name_uses_local_binding(&self, name: &str) -> bool {
+        self.lookup(name)
+            .is_some_and(|binding| !self.binding_is_global_ref(binding))
     }
 
     fn import(&mut self, module: String) {
@@ -7985,9 +7998,13 @@ impl<'semantic> Lowerer<'semantic> {
         let await_sequence = call_uses_await_sequence(callee);
         let has_named_args = args.iter().any(|arg| matches!(arg, CallArg::Named { .. }));
         let direct_callee_name = callable_lookup_name(callee);
+        let direct_callee_uses_local_binding = direct_callee_name
+            .as_deref()
+            .is_some_and(|name| state.callable_name_uses_local_binding(name));
         let selected_function = direct_callee_name
             .as_deref()
             .filter(|name| !bytecode_native_function_name(name))
+            .filter(|_| !direct_callee_uses_local_binding)
             .and_then(|name| self.select_function_descriptor_for_call(name, args));
 
         let callee = if let Some(name) = implicit_self_member {

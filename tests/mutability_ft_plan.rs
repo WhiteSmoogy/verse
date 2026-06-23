@@ -22,7 +22,6 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-#[ignore = "planned Mutability FT column: non-local mutation runtime"]
 fn evaluates_mutability_column_non_local_mutation_runtime() {
     assert_runtime_cases(&[
         (
