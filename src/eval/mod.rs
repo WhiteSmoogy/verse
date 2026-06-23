@@ -2240,6 +2240,9 @@ fn runtime_named_value_matches(value: &Value, expected: &str) -> bool {
         | Value::ClassType { name, .. }
         | Value::InterfaceType { name, .. }
         | Value::Module { name, .. } => runtime_names_match(name, expected),
+        Value::Type(TypeName::Named(name) | TypeName::Applied { name, .. }) => {
+            runtime_names_match(name, expected)
+        }
         Value::Result {
             succeeded: true, ..
         } => expected == "result" || expected == "success_result",

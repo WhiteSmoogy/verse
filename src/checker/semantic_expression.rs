@@ -4066,6 +4066,11 @@ impl Checker {
             {
                 true
             }
+            (Type::CastableSubtype(expected), Type::TypeValueOf(actual))
+                if self.type_value_classifiable_subset_query_is_assignable(expected, actual) =>
+            {
+                true
+            }
             (Type::Subtype(expected), Type::ClassType(actual)) => {
                 self.class_type_value_satisfies_subtype(actual, expected)
             }
@@ -4074,6 +4079,15 @@ impl Checker {
             }
             (Type::ConcreteSubtype(expected), Type::ClassType(actual)) => {
                 self.class_type_value_is_concrete_subtype(actual, expected)
+            }
+            (Type::Subtype(expected), Type::TypeValueOf(actual)) => {
+                self.type_value_class_satisfies_subtype(actual, expected)
+            }
+            (Type::CastableSubtype(expected), Type::TypeValueOf(actual)) => {
+                self.type_value_is_castable_subtype(actual, expected)
+            }
+            (Type::ConcreteSubtype(expected), Type::TypeValueOf(actual)) => {
+                self.type_value_is_concrete_subtype(actual, expected)
             }
             (Type::Subtype(expected), Type::Subtype(actual)) => {
                 self.subtype_constraint_implies(actual, expected)
@@ -4179,6 +4193,16 @@ impl Checker {
             )
     }
 
+    fn type_value_classifiable_subset_query_is_assignable(
+        &self,
+        expected: &Type,
+        actual: &Type,
+    ) -> bool {
+        Self::type_value_class_name(actual).is_some_and(|actual| {
+            self.classifiable_subset_query_class_value_is_assignable(expected, actual)
+        })
+    }
+
     fn is_type_value_type(actual: &Type) -> bool {
         matches!(
             actual,
@@ -4192,6 +4216,29 @@ impl Checker {
                 | Type::CastableSubtype(_)
                 | Type::ConcreteSubtype(_)
         )
+    }
+
+    fn type_value_class_name(actual: &Type) -> Option<&str> {
+        match actual {
+            Type::Class(name) | Type::ClassType(name) => Some(name),
+            Type::TypeValueOf(item) => Self::type_value_class_name(item),
+            _ => None,
+        }
+    }
+
+    fn type_value_class_satisfies_subtype(&self, actual: &Type, expected: &Type) -> bool {
+        Self::type_value_class_name(actual)
+            .is_some_and(|actual| self.class_type_value_satisfies_subtype(actual, expected))
+    }
+
+    fn type_value_is_castable_subtype(&self, actual: &Type, expected: &Type) -> bool {
+        Self::type_value_class_name(actual)
+            .is_some_and(|actual| self.class_type_value_is_castable_subtype(actual, expected))
+    }
+
+    fn type_value_is_concrete_subtype(&self, actual: &Type, expected: &Type) -> bool {
+        Self::type_value_class_name(actual)
+            .is_some_and(|actual| self.class_type_value_is_concrete_subtype(actual, expected))
     }
 
     pub(super) fn class_type_value_is_castable_subtype(

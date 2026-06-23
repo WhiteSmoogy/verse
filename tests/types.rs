@@ -1842,6 +1842,58 @@ Box.Read()
 }
 
 #[test]
+fn evaluates_type_function_parametric_class_result_classifiable_subset_runtime() {
+    let source = r#"
+box(t:type) := class<castable>(tag):
+    Marker:int = 0
+
+BoxOf(Kind:type):type = box(Kind)
+
+BoxKind:castable_subtype(tag) = BoxOf(int)
+PlainKind:castable_subtype(tag) = box(int)
+
+SetFromFunction:classifiable_subset(tag) = MakeClassifiableSubset(array{BoxKind})
+HasPlain := if (SetFromFunction.Contains[PlainKind]). 20 else. 0
+
+SetFromPlain:classifiable_subset(tag) = MakeClassifiableSubset(array{PlainKind})
+HasFunction := if (SetFromPlain.Contains[BoxKind]). 22 else. 0
+
+HasPlain + HasFunction
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_type_function_parametric_class_result_subtype_value_parameters_runtime() {
+    let source = r#"
+base_item := class:
+    Value:int = 0
+
+box(t:type) := class<concrete><castable>(base_item):
+    Marker:int = 0
+
+BoxOf(Kind:type):type = box(Kind)
+
+UseSubtype(Kind:subtype(base_item)):int = 10
+UseCastable(Kind:castable_subtype(base_item)):int = 20
+UseConcrete(Kind:concrete_subtype(castable_subtype(base_item))):int = 12
+
+UseSubtype(BoxOf(int)) + UseCastable(BoxOf(int)) + UseConcrete(BoxOf(int))
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_parametric_struct_result_archetype_surface() {
     let source = r#"
 point(t:type) := struct:
