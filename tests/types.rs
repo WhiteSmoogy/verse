@@ -1536,6 +1536,24 @@ Value(0)
 }
 
 #[test]
+fn evaluates_type_function_tuple_external_runtime_surface() {
+    let source = r#"
+Pair(Left:type, Right:type):type = tuple(Left, Right)
+
+Value:Pair(int, int) = external {}
+Value(0)
+Value(1)
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_tuple_type_former_value_call() {
     let source = r#"
 Pair(Left:type, Right:type):type = (Left, Right)

@@ -66,6 +66,22 @@ Add(40, 2) + Add(Args)
 }
 
 #[test]
+fn evaluates_external_tuple_as_runtime_value() {
+    let source = r#"
+Pair:tuple(int, int) = external {}
+Pair(0)
+Pair(1)
+42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_destructured_tuple_parameters() {
     let source = r#"
 Add(A:int, (B:int, C:int), D:int):int = A + B + C + D

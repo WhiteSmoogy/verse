@@ -214,6 +214,7 @@ pub(crate) fn bytecode_external_value(type_name: &TypeName) -> Value {
         TypeName::Map(_, _) | TypeName::WeakMap(_, _) => {
             Value::Map(Rc::new(RefCell::new(Vec::new())))
         }
+        TypeName::Tuple(items) => Value::Tuple(vec![Value::External; items.len()]),
         TypeName::Option(_) => Value::Option(None),
         _ => Value::External,
     }
