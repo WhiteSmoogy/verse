@@ -214,8 +214,7 @@ counter := class:
 }
 
 #[test]
-#[ignore = "planned Classes/interfaces column: generic and qualified interface dispatch"]
-fn planned_generic_qualified_interface_dispatch() {
+fn evaluates_generic_qualified_interface_dispatch() {
     assert_runtime_cases(&[
         (
             "parametric interface default method dispatches through override",
