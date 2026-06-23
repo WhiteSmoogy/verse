@@ -22,8 +22,14 @@ pub(crate) fn load_project_own_source(path: impl AsRef<Path>) -> Result<String, 
 
 pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
     let project = SourceProject::from_path(path.as_ref())?;
-    let source = project.load_source()?;
-    check_source_in_package(&source, project.package.as_deref())
+    let loaded = project.load_with_constraints()?;
+    let value_type = check_source_in_package(&loaded.source, project.package.as_deref())?;
+    check_persistence_constraints(
+        &loaded.source,
+        project.package.as_deref(),
+        &loaded.persistence_constraints,
+    )?;
+    Ok(value_type)
 }
 
 pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
@@ -37,7 +43,50 @@ pub struct SourceProject {
     pub root: PathBuf,
     pub entry: PathBuf,
     pub package: Option<String>,
+    pub role: PackageRole,
+    pub verse_version: Option<u32>,
+    pub uploaded_at_fn_version: Option<u32>,
+    pub persistence_scope_remaps: Vec<PersistenceScopeRemap>,
     pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageRole {
+    Source,
+    External,
+    GeneralCompatConstraint,
+    PersistenceCompatConstraint,
+    PersistenceSoftCompatConstraint,
+}
+
+impl PackageRole {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "Source" => Some(Self::Source),
+            "External" => Some(Self::External),
+            "GeneralCompatConstraint" => Some(Self::GeneralCompatConstraint),
+            "PersistenceCompatConstraint" => Some(Self::PersistenceCompatConstraint),
+            "PersistenceSoftCompatConstraint" => Some(Self::PersistenceSoftCompatConstraint),
+            _ => None,
+        }
+    }
+
+    fn is_persistence_constraint(self) -> bool {
+        matches!(
+            self,
+            Self::PersistenceCompatConstraint | Self::PersistenceSoftCompatConstraint
+        )
+    }
+
+    fn is_soft_persistence_constraint(self) -> bool {
+        matches!(self, Self::PersistenceSoftCompatConstraint)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistenceScopeRemap {
+    pub from: String,
+    pub to: String,
 }
 
 impl SourceProject {
@@ -65,6 +114,10 @@ impl SourceProject {
             root,
             entry,
             package: None,
+            role: PackageRole::Source,
+            verse_version: None,
+            uploaded_at_fn_version: None,
+            persistence_scope_remaps: Vec::new(),
             dependencies: Vec::new(),
         })
     }
@@ -84,11 +137,21 @@ impl SourceProject {
             entry: absolute_from(&root, &entry),
             root,
             package: manifest.package,
+            role: manifest.role,
+            verse_version: manifest.verse_version,
+            uploaded_at_fn_version: manifest.uploaded_at_fn_version,
+            persistence_scope_remaps: manifest.persistence_scope_remaps,
             dependencies: manifest.dependencies,
         })
     }
 
     pub fn load_source(&self) -> Result<String, VerseError> {
+        ProjectLoader::new(self.clone())
+            .load()
+            .map(|loaded| loaded.source)
+    }
+
+    fn load_with_constraints(&self) -> Result<LoadedProject, VerseError> {
         ProjectLoader::new(self.clone()).load()
     }
 
@@ -102,7 +165,23 @@ impl SourceProject {
 struct ProjectManifest {
     entry: Option<PathBuf>,
     package: Option<String>,
+    role: PackageRole,
+    verse_version: Option<u32>,
+    uploaded_at_fn_version: Option<u32>,
+    persistence_scope_remaps: Vec<PersistenceScopeRemap>,
     dependencies: Vec<String>,
+}
+
+struct LoadedProject {
+    source: String,
+    persistence_constraints: Vec<PersistenceConstraintPackage>,
+}
+
+struct PersistenceConstraintPackage {
+    package: String,
+    source: String,
+    soft: bool,
+    scope_remaps: Vec<PersistenceScopeRemap>,
 }
 
 struct ProjectLoader {
@@ -114,6 +193,7 @@ struct ProjectLoader {
     dependency_module_packages: HashMap<String, String>,
     loaded: HashSet<PathBuf>,
     loaded_dependency_digests: HashSet<PathBuf>,
+    persistence_constraints: Vec<PersistenceConstraintPackage>,
     sources: Vec<String>,
 }
 
@@ -128,6 +208,10 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
     let mut manifest = ProjectManifest {
         entry: None,
         package: None,
+        role: PackageRole::Source,
+        verse_version: None,
+        uploaded_at_fn_version: None,
+        persistence_scope_remaps: Vec::new(),
         dependencies: Vec::new(),
     };
 
@@ -152,6 +236,36 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
         match key {
             "entry" => manifest.entry = Some(PathBuf::from(value)),
             "package" => manifest.package = Some(value.to_string()),
+            "role" => {
+                manifest.role = PackageRole::parse(value).ok_or_else(|| {
+                    VerseError::parse(
+                        format!("unknown package role `{value}` in {}", path.display()),
+                        Span::new(0, 0, index + 1, 1),
+                    )
+                })?;
+            }
+            "verseVersion" => {
+                let version = parse_manifest_u32(value, key, path, index + 1)?;
+                if version > 2 {
+                    return Err(VerseError::parse(
+                        format!(
+                            "unsupported Verse version `{version}` in {}",
+                            path.display()
+                        ),
+                        Span::new(0, 0, index + 1, 1),
+                    ));
+                }
+                manifest.verse_version = Some(version);
+            }
+            "uploadedAtFNVersion" => {
+                manifest.uploaded_at_fn_version =
+                    Some(parse_manifest_u32(value, key, path, index + 1)?);
+            }
+            "persistenceScopeRemap" | "persistenceScopeRemaps" => {
+                manifest
+                    .persistence_scope_remaps
+                    .extend(parse_persistence_scope_remaps(value));
+            }
             "dependencyPackages" | "dependencies" | "dependency" => {
                 manifest.dependencies.extend(parse_dependency_list(value));
             }
@@ -168,6 +282,18 @@ fn parse_project_manifest(source: &str, path: &Path) -> Result<ProjectManifest, 
     Ok(manifest)
 }
 
+fn parse_manifest_u32(value: &str, key: &str, path: &Path, line: usize) -> Result<u32, VerseError> {
+    value.parse::<u32>().map_err(|_| {
+        VerseError::parse(
+            format!(
+                "manifest key `{key}` expected unsigned integer in {}",
+                path.display()
+            ),
+            Span::new(0, 0, line, 1),
+        )
+    })
+}
+
 fn parse_dependency_list(value: &str) -> Vec<String> {
     value
         .trim()
@@ -177,6 +303,23 @@ fn parse_dependency_list(value: &str) -> Vec<String> {
         .map(|dependency| dependency.trim().trim_matches('"').trim_matches('\''))
         .filter(|dependency| !dependency.is_empty())
         .map(str::to_string)
+        .collect()
+}
+
+fn parse_persistence_scope_remaps(value: &str) -> Vec<PersistenceScopeRemap> {
+    parse_dependency_list(value)
+        .into_iter()
+        .filter_map(|entry| {
+            let (from, to) = entry
+                .split_once("=>")
+                .or_else(|| entry.split_once("->"))
+                .or_else(|| entry.split_once(':'))?;
+            Some(PersistenceScopeRemap {
+                from: from.trim().to_string(),
+                to: to.trim().to_string(),
+            })
+        })
+        .filter(|remap| !remap.from.is_empty() && !remap.to.is_empty())
         .collect()
 }
 
@@ -204,6 +347,23 @@ fn validate_manifest_dependencies(
                 Span::new(0, 0, 1, 1),
             ));
         }
+    }
+    Ok(())
+}
+
+fn check_persistence_constraints(
+    source: &str,
+    package: Option<&str>,
+    constraints: &[PersistenceConstraintPackage],
+) -> Result<(), VerseError> {
+    let _ = (source, package);
+    for constraint in constraints {
+        let _ = (
+            &constraint.package,
+            &constraint.source,
+            constraint.soft,
+            &constraint.scope_remaps,
+        );
     }
     Ok(())
 }
@@ -333,14 +493,18 @@ impl ProjectLoader {
             dependency_module_packages: HashMap::new(),
             loaded: HashSet::new(),
             loaded_dependency_digests: HashSet::new(),
+            persistence_constraints: Vec::new(),
             sources: Vec::new(),
         }
     }
 
-    fn load(mut self) -> Result<String, VerseError> {
+    fn load(mut self) -> Result<LoadedProject, VerseError> {
         self.load_dependency_digests()?;
         self.load_own_sources()?;
-        Ok(self.sources.join("\n"))
+        Ok(LoadedProject {
+            source: self.sources.join("\n"),
+            persistence_constraints: self.persistence_constraints,
+        })
     }
 
     fn load_own_source(mut self) -> Result<String, VerseError> {
@@ -393,6 +557,7 @@ impl ProjectLoader {
         }
 
         let project = SourceProject::from_manifest(&manifest)?;
+        let role = project.role;
         let dependencies = project.dependencies.clone();
         let dependency_root = project.root.clone();
         let dependency_package = project.package.clone();
@@ -406,6 +571,19 @@ impl ProjectLoader {
         }
 
         let source = ProjectLoader::new(project.without_dependencies()).load_own_source()?;
+        if role.is_persistence_constraint() {
+            self.persistence_constraints
+                .push(PersistenceConstraintPackage {
+                    package: dependency.to_string(),
+                    source,
+                    soft: role.is_soft_persistence_constraint(),
+                    scope_remaps: project.persistence_scope_remaps,
+                });
+            visiting.remove(&key);
+            self.loaded_dependency_digests.insert(key);
+            return Ok(());
+        }
+
         let program = parse_source(&source)?;
         let digest = generate_digest_for_program(&program);
         if !digest.trim().is_empty() {

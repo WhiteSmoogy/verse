@@ -4,12 +4,7 @@
 mod common;
 use common::*;
 
-fn write_profile_project(
-    root: &std::path::Path,
-    package: &str,
-    role: Option<&str>,
-    source: &str,
-) {
+fn write_profile_project(root: &std::path::Path, package: &str, role: Option<&str>, source: &str) {
     let role = role
         .map(|role| format!("role = {role}\nverseVersion = 1\nuploadedAtFNVersion = 3430\n"))
         .unwrap_or_default();
@@ -30,7 +25,6 @@ fn assert_project_check_error(path: std::path::PathBuf, expected: &str) {
 }
 
 #[test]
-#[ignore = "planned Persistence/evolution FT column"]
 fn checks_persistence_evolution_column_constraint_package_loading_and_versions() {
     let root = temp_project_dir("persistence_evolution_constraints");
     write_profile_project(
@@ -41,7 +35,7 @@ fn checks_persistence_evolution_column_constraint_package_loading_and_versions()
 Profile<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:int = 0
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 "#,
     );
     write_profile_project(
@@ -53,7 +47,7 @@ Profile<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:int = 0
         Level<public>:int = 1
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 Profile.profile_data{XP := 40, Level := 2}.XP + 2
 "#,
     );
@@ -103,7 +97,7 @@ fn checks_persistence_evolution_column_scope_remapped_schema_paths() {
 Data<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:int = 0
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 "#,
     );
     write_profile_project(
@@ -115,7 +109,7 @@ PlayerData<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:int = 0
         Coins<public>:int = 0
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 PlayerData.profile_data{XP := 40, Coins := 2}.XP + 2
 "#,
     );
@@ -147,7 +141,7 @@ Profile<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:int = 0
         Snapshot<public>:snapshot = snapshot{}
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 "#,
     );
     write_profile_project(
@@ -164,7 +158,7 @@ Profile<public> := module:
         XP<public>:int = 0
         Snapshot<public>:snapshot = snapshot{}
         Title<public>:string = ""
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 Profile.profile_data{XP := 42}.XP
 "#,
     );
@@ -190,7 +184,7 @@ Profile<public> := module:
     profile_data<public> := class<final><persistable>:
         XP<public>:float = 0.0
         Snapshot<public>:snapshot = snapshot{}
-    var Saved<public>:weak_map(player, profile_data) = map{}
+    var Saved:weak_map(player, profile_data) = map{}
 42
 "#,
     );
