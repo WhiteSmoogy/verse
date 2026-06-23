@@ -84,8 +84,7 @@ else:
 }
 
 #[test]
-#[ignore = "planned Types FT column: official float-only numeric decides surfaces"]
-fn planned_types_column_float_only_numeric_decides_surfaces() {
+fn evaluates_types_column_float_only_numeric_decides_surfaces() {
     assert_runtime_cases(&[(
         "float decides helpers still run",
         r#"

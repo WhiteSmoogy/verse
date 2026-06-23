@@ -4253,7 +4253,7 @@ fn parse_qualified_member_name(name: &str) -> (Option<&str>, &str) {
 }
 
 fn number_method_value(object: &Value, name: &str) -> Option<VmValue> {
-    if !matches!(object, Value::Int(_) | Value::Float(_) | Value::Rational(_)) {
+    if !matches!(object, Value::Float(_)) {
         return None;
     }
     let name = match name {
@@ -4280,11 +4280,7 @@ fn call_number_method(
                     span,
                 ));
             }
-            let finite = match &method.receiver {
-                Value::Float(value) => value.is_finite(),
-                Value::Int(_) | Value::Rational(_) => true,
-                _ => false,
-            };
+            let finite = expect_float_ref(&method.receiver, "`IsFinite` Val", span)?.is_finite();
             Ok(finite.then_some(method.receiver))
         }
         "IsAlmostZero" => {
@@ -4294,13 +4290,22 @@ fn call_number_method(
                     span,
                 )
             })?;
-            let value = expect_number_ref(&method.receiver, "`IsAlmostZero` Val", span)?;
-            let tolerance =
-                expect_number_ref(&tolerance, "`IsAlmostZero` AbsoluteTolerance", span)?;
+            let value = expect_float_ref(&method.receiver, "`IsAlmostZero` Val", span)?;
+            let tolerance = expect_float_ref(&tolerance, "`IsAlmostZero` AbsoluteTolerance", span)?;
             Ok((value.abs() <= tolerance).then_some(Value::None))
         }
         _ => Err(VerseError::runtime_at(
             format!("unknown number method `{}`", method.name),
+            span,
+        )),
+    }
+}
+
+fn expect_float_ref(value: &Value, context: &str, span: Span) -> Result<f64, VerseError> {
+    match value {
+        Value::Float(value) => Ok(*value),
+        other => Err(VerseError::runtime_at(
+            format!("{context} expected `float`, got {other}"),
             span,
         )),
     }

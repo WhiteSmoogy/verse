@@ -5204,11 +5204,13 @@ impl Checker {
         match name {
             "IsFinite" => {
                 ensure_exact_arg_count(name, args, 0, span)?;
-                Ok(receiver_type.clone())
+                self.ensure_float_method_receiver(name, receiver_type, span)?;
+                Ok(Type::Float)
             }
             "IsAlmostZero" => {
                 ensure_exact_arg_count(name, args, 1, span)?;
-                ensure_number_like(
+                self.ensure_float_method_receiver(name, receiver_type, span)?;
+                self.ensure_float_like(
                     &arg_types[0],
                     "`IsAlmostZero` AbsoluteTolerance",
                     args[0].span,
@@ -5217,6 +5219,30 @@ impl Checker {
             }
             _ => Err(VerseError::check_at(
                 format!("unknown number method `{name}`"),
+                span,
+            )),
+        }
+    }
+
+    fn ensure_float_method_receiver(
+        &self,
+        name: &str,
+        receiver_type: &Type,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        self.ensure_float_like(receiver_type, &format!("`{name}` receiver"), span)
+    }
+
+    fn ensure_float_like(
+        &self,
+        value_type: &Type,
+        context: &str,
+        span: Span,
+    ) -> Result<(), VerseError> {
+        match value_type {
+            Type::Float | Type::FloatRange(_) | Type::Unknown | Type::Any => Ok(()),
+            other => Err(VerseError::check_at(
+                format!("{context} expected `float`, got `{other}`"),
                 span,
             )),
         }

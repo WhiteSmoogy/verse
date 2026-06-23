@@ -602,9 +602,9 @@ impl Checker {
             Symbol::immutable(native_function_type(
                 &["decides", "computes"],
                 vec![
-                    ("Val1", Type::Number),
-                    ("Val2", Type::Number),
-                    ("AbsoluteTolerance", Type::Number),
+                    ("Val1", Type::Float),
+                    ("Val2", Type::Float),
+                    ("AbsoluteTolerance", Type::Float),
                 ],
                 Type::None,
             )),

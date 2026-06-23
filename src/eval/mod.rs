@@ -3633,13 +3633,23 @@ fn native_sgn(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> 
 
 fn native_is_almost_equal(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [left, right, tolerance]: [Value; 3] = args.try_into().expect("arity checked by caller");
-    let left = expect_number(&left, "`IsAlmostEqual` Val1", span)?;
-    let right = expect_number(&right, "`IsAlmostEqual` Val2", span)?;
-    let tolerance = expect_number(&tolerance, "`IsAlmostEqual` AbsoluteTolerance", span)?;
+    let left = expect_float(&left, "`IsAlmostEqual` Val1", span)?;
+    let right = expect_float(&right, "`IsAlmostEqual` Val2", span)?;
+    let tolerance = expect_float(&tolerance, "`IsAlmostEqual` AbsoluteTolerance", span)?;
     if (left - right).abs() <= tolerance {
         Ok(NativeResult::Value(Value::None))
     } else {
         Ok(NativeResult::Failure("values are not within tolerance"))
+    }
+}
+
+fn expect_float(value: &Value, context: &str, span: Span) -> Result<f64, VerseError> {
+    match value {
+        Value::Float(value) => Ok(*value),
+        other => Err(VerseError::runtime_at(
+            format!("{context} expected `float`, got {other}"),
+            span,
+        )),
     }
 }
 

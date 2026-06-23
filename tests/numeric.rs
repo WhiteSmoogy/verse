@@ -423,13 +423,13 @@ fn rejects_is_almost_zero_with_parentheses() {
 }
 
 #[test]
-fn rejects_is_almost_zero_non_numeric_tolerance() {
+fn rejects_is_almost_zero_non_float_tolerance() {
     let error = check_source(r#"(0.0).IsAlmostZero["near"]"#).expect_err("source should fail");
 
     assert!(
         error
             .to_string()
-            .contains("`IsAlmostZero` AbsoluteTolerance expected `number`")
+            .contains("`IsAlmostZero` AbsoluteTolerance expected `float`")
     );
 }
 
