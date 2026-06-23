@@ -1435,6 +1435,67 @@ Item.Current + Item.Read() + 42
 }
 
 #[test]
+fn evaluates_external_parametric_class_nested_field_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+holder(t:type) := class:
+    Child:box(t)
+
+Item:holder(int) = external {}
+Item.Child.Value + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_class_nested_tuple_field_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+holder(t:type) := class:
+    Pair:tuple(box(t), int)
+
+Item:holder(int) = external {}
+Pair := Item.Pair
+Pair(0).Value + Pair(1) + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_interface_nested_field_runtime_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Current:t
+
+view(t:type) := interface:
+    Child:reader(t)
+
+Item:view(int) = external {}
+Item.Child.Current + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_external_parametric_class_method_aggregate_return_runtime_surface() {
     let source = r#"
 box(t:type) := class:
@@ -1497,6 +1558,27 @@ box(t:type) := class:
 Item:box(int) = external {}
 Read := Item.MakeReader()
 Read() + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_class_method_function_aggregate_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+factory(t:type) := class:
+    MakeBox():type{_():box(t)} = external {}
+
+Item:factory(int) = external {}
+Make := Item.MakeBox()
+Make().Value + 42
 "#;
 
     assert_eq!(eval(source), Value::Int(42));

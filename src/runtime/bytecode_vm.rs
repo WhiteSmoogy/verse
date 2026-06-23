@@ -1607,7 +1607,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 .get(constant)
                 .map(|constant| match constant {
                     Constant::GlobalRef(name) => VmValue::Ref(self.global_ref(name)),
-                    _ => value_from_constant(constant),
+                    _ => self.value_from_constant(constant),
                 })
                 .ok_or_else(|| {
                     VerseError::runtime_at("bytecode constant index out of range", span)
@@ -1622,6 +1622,66 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             .entry(name.to_string())
             .or_insert_with(|| Rc::new(RefCell::new(VmValue::Uninitialized)))
             .clone()
+    }
+
+    fn value_from_constant(&self, constant: &Constant) -> VmValue {
+        match constant {
+            Constant::ExternalAggregate {
+                class_name,
+                unique,
+                object_kind,
+                fields,
+            } => match object_kind {
+                ObjectKind::Class => VmValue::Runtime(bytecode_class_instance_value(
+                    class_name.clone(),
+                    *unique,
+                    fields
+                        .iter()
+                        .map(|(name, mutable, type_name)| {
+                            let mut visiting = Vec::new();
+                            (
+                                name.clone(),
+                                *mutable,
+                                self.program_external_return_value(type_name, &mut visiting),
+                            )
+                        })
+                        .collect(),
+                )),
+                ObjectKind::Struct { computes } => VmValue::Runtime(Value::StructInstance {
+                    struct_name: class_name.clone(),
+                    computes: *computes,
+                    fields: fields
+                        .iter()
+                        .map(|(name, _, type_name)| {
+                            let mut visiting = Vec::new();
+                            (
+                                name.clone(),
+                                self.program_external_return_value(type_name, &mut visiting),
+                            )
+                        })
+                        .collect(),
+                }),
+            },
+            Constant::ExternalInterface {
+                interface_name,
+                fields,
+            } => VmValue::Runtime(bytecode_class_instance_value(
+                interface_name.clone(),
+                false,
+                fields
+                    .iter()
+                    .map(|(name, mutable, type_name)| {
+                        let mut visiting = Vec::new();
+                        (
+                            name.clone(),
+                            *mutable,
+                            self.program_external_return_value(type_name, &mut visiting),
+                        )
+                    })
+                    .collect(),
+            )),
+            _ => value_from_constant(constant),
+        }
     }
 
     fn ensure_vm_task(&mut self, task: Rc<RuntimeTask>, parent: Option<usize>) {
@@ -3188,7 +3248,8 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         .into_iter()
                         .map(|arg| into_runtime(arg, span))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let value = bytecode_external_return_value(&return_type);
+                    let mut visiting = Vec::new();
+                    let value = self.program_external_return_value(&return_type, &mut visiting);
                     return Ok(CallOutcome::Value(VmValue::Runtime(value)));
                 }
                 if let Value::NativeFunction {
@@ -3789,9 +3850,39 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         type_name: &TypeName,
         visiting: &mut Vec<String>,
     ) -> Value {
-        self.external_aggregate_return_value(type_name, visiting)
-            .or_else(|| self.external_interface_return_value(type_name, visiting))
-            .unwrap_or_else(|| bytecode_external_return_value(type_name))
+        if let Some(value) = self.external_aggregate_return_value(type_name, visiting) {
+            return value;
+        }
+        if let Some(value) = self.external_interface_return_value(type_name, visiting) {
+            return value;
+        }
+        match type_name {
+            TypeName::Tuple(items) => Value::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.program_external_return_value(item, visiting))
+                    .collect(),
+            ),
+            TypeName::Applied { name, args } if name == "result" && args.len() == 2 => {
+                Value::Result {
+                    succeeded: true,
+                    value: Box::new(self.program_external_return_value(&args[0], visiting)),
+                }
+            }
+            TypeName::Applied { name, args } if name == "success_result" && args.len() == 1 => {
+                Value::Result {
+                    succeeded: true,
+                    value: Box::new(self.program_external_return_value(&args[0], visiting)),
+                }
+            }
+            TypeName::Applied { name, args } if name == "error_result" && args.len() == 1 => {
+                Value::Result {
+                    succeeded: false,
+                    value: Box::new(self.program_external_return_value(&args[0], visiting)),
+                }
+            }
+            _ => bytecode_external_return_value(type_name),
+        }
     }
 
     fn external_aggregate_return_value(
