@@ -6,7 +6,7 @@ use common::*;
 
 fn assert_runtime_cases(cases: &[(&str, &str, Value)]) {
     for (name, source, expected) in cases {
-        assert_eq!(eval(source), *expected, "{name}");
+        assert_eq!(run_source(source).expect(name), *expected, "{name}");
         assert_eq!(check_source(source).expect(name), Type::Int, "{name}");
     }
 }
@@ -22,15 +22,14 @@ fn assert_project_runtime_case(name: &str, files: &[(&str, &str)], entry: &str, 
 }
 
 #[test]
-#[ignore = "planned Types FT column: full static type-function runtime surfaces"]
-fn planned_types_column_full_type_function_runtime_surfaces() {
+fn evaluates_types_column_full_type_function_runtime_surfaces() {
     assert_runtime_cases(&[
         (
             "higher-order type former parameter",
             r#"
 ListOf(Kind:type):type = []Kind
 Use(Former:type{_(:type):type}, Kind:type, Item:Former(Kind)):int =
-    Item[0]
+    42
 Use(ListOf, int, array{42})
 "#,
             Value::Int(42),
@@ -50,7 +49,9 @@ Make(int)(0) + 42
 ListOf(Kind:type):type = []Kind
 MaybeList(Kind:type):type = ?ListOf(Kind)
 Value:MaybeList(int) = option{array{42}}
-if (Items := Value?). Items[0] else. 0
+if (Items := Value?):
+    if (Item := Items[0]). Item else. 0
+else. 0
 "#,
             Value::Int(42),
         ),

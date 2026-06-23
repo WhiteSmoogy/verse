@@ -919,7 +919,10 @@ fn type_name_contains_name(type_name: &TypeName, name: &str) -> bool {
         TypeName::TypeBounds { lower, upper } => {
             type_name_contains_name(lower, name) || type_name_contains_name(upper, name)
         }
-        TypeName::Applied { args, .. } => args.iter().any(|arg| type_name_contains_name(arg, name)),
+        TypeName::Applied {
+            name: candidate,
+            args,
+        } => candidate == name || args.iter().any(|arg| type_name_contains_name(arg, name)),
         TypeName::Int
         | TypeName::Float
         | TypeName::Rational
@@ -1568,6 +1571,12 @@ impl Checker {
                     official_parametric_type(name, &args, span)?
                 } else if let Some(target) = self.resolve_type_function_reference(name) {
                     self.instantiate_type_function(name, &target, &args, span)?
+                } else if matches!(
+                    self.resolve_type_param(name),
+                    Some(Type::Function { return_type, .. })
+                        if matches!(return_type.as_ref(), Type::TypeValue | Type::TypeValueOf(_))
+                ) {
+                    Type::Unknown
                 } else {
                     self.instantiate_parametric_type(name, &args, span)?
                 }
@@ -3458,6 +3467,12 @@ impl Checker {
                     official_parametric_type(name, &args, span)?
                 } else if let Some(target) = self.resolve_type_function_reference(name) {
                     self.instantiate_type_function(name, &target, &args, span)?
+                } else if matches!(
+                    self.resolve_type_param(name),
+                    Some(Type::Function { return_type, .. })
+                        if matches!(return_type.as_ref(), Type::TypeValue | Type::TypeValueOf(_))
+                ) {
+                    Type::Unknown
                 } else {
                     self.instantiate_parametric_type(name, &args, span)?
                 }
@@ -3802,6 +3817,17 @@ impl Checker {
                 );
                 return Some((type_param.clone(), Type::TypeValueOf(Box::new(type_param))));
             }
+            Type::Function {
+                return_type,
+                param_types,
+                ..
+            } if matches!(return_type.as_ref(), Type::TypeValue | Type::TypeValueOf(_))
+                && param_types.as_ref().is_some_and(|params| {
+                    params.iter().all(Self::type_is_type_value_parameter)
+                }) =>
+            {
+                return Some((value_type.clone(), value_type.clone()));
+            }
             _ => return None,
         };
         let parent_name = type_to_constraint_type_name(parent)?;
@@ -3824,6 +3850,16 @@ impl Checker {
             _ => return None,
         };
         Some((type_param, signature_type))
+    }
+
+    fn type_is_type_value_parameter(value_type: &Type) -> bool {
+        matches!(
+            value_type,
+            Type::TypeValue | Type::TypeValueOf(_) | Type::TypeValueBounds { .. }
+        ) || matches!(
+            value_type,
+            Type::Subtype(_) | Type::CastableSubtype(_) | Type::ConcreteSubtype(_)
+        )
     }
 
     pub(super) fn instantiate_parametric_type(
