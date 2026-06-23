@@ -2999,12 +2999,15 @@ impl Checker {
         statements: &[Stmt],
     ) -> Result<Type, VerseError> {
         let mut last = Type::None;
-        let mut unreachable_after: Option<(&'static str, Span)> = None;
+        let mut unreachable_after: Option<(TerminationKind, Span)> = None;
 
         for statement in statements {
-            if let Some((message, span)) = unreachable_after {
+            if let Some((termination, span)) = unreachable_after {
                 last = Type::Never;
-                self.warn_unreachable(message, span.through(statement.span));
+                self.warn_unreachable(
+                    termination.unreachable_message(),
+                    span.through(statement.span),
+                );
                 break;
             }
             last = match &statement.kind {
@@ -3049,9 +3052,11 @@ impl Checker {
                 StmtKind::Expr(expr) => self.check_failure_expr(expr)?,
                 _ => self.check_stmt(statement)?,
             };
-            if last == Type::Never || self.statement_never_completes(statement) {
-                unreachable_after =
-                    Some((unreachable_statement_message(statement), statement.span));
+            if let Some(termination) = self
+                .statement_termination(statement)
+                .or_else(|| (last == Type::Never).then_some(TerminationKind::Never))
+            {
+                unreachable_after = Some((termination, statement.span));
             }
         }
 
@@ -3096,107 +3101,109 @@ impl Checker {
         Ok(checked_type)
     }
 
-    pub(super) fn statement_never_completes(&self, statement: &Stmt) -> bool {
+    pub(super) fn statement_termination(&self, statement: &Stmt) -> Option<TerminationKind> {
         match &statement.kind {
-            StmtKind::Return(_) | StmtKind::Break => true,
+            StmtKind::Return(_) => Some(TerminationKind::Return),
+            StmtKind::Break => Some(TerminationKind::Break),
             StmtKind::Let { expr, .. } | StmtKind::Var { expr, .. } | StmtKind::Expr(expr) => {
-                self.expr_never_completes(expr)
+                self.expr_termination(expr)
             }
-            StmtKind::Set { target, expr, .. } => {
-                self.expr_never_completes(target) || self.expr_never_completes(expr)
-            }
+            StmtKind::Set { target, expr, .. } => self
+                .expr_termination(target)
+                .or_else(|| self.expr_termination(expr)),
             StmtKind::Using { .. }
             | StmtKind::ParametricType { .. }
             | StmtKind::ParametricTypeAlias { .. }
             | StmtKind::TypeAlias { .. }
             | StmtKind::ScopedAccessLevel { .. }
             | StmtKind::ExtensionMethod(_)
-            | StmtKind::Defer(_) => false,
+            | StmtKind::Defer(_) => None,
         }
     }
 
-    pub(super) fn expr_never_completes(&self, expr: &Expr) -> bool {
+    pub(super) fn expr_termination(&self, expr: &Expr) -> Option<TerminationKind> {
         match &expr.kind {
-            ExprKind::Unary { expr, .. } => self.expr_never_completes(expr),
-            ExprKind::Binary { left, op, right } => {
-                self.expr_never_completes(left)
-                    || (!matches!(op, BinaryOp::And | BinaryOp::Or)
-                        && self.expr_never_completes(right))
-            }
+            ExprKind::Unary { expr, .. } => self.expr_termination(expr),
+            ExprKind::Binary { left, op, right } => self.expr_termination(left).or_else(|| {
+                (!matches!(op, BinaryOp::And | BinaryOp::Or))
+                    .then(|| self.expr_termination(right))
+                    .flatten()
+            }),
             ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => {
-                self.expr_never_completes(condition)
-                    || else_branch.as_deref().is_some_and(|else_branch| {
-                        self.expr_never_completes(then_branch)
-                            && self.expr_never_completes(else_branch)
-                    })
+            } => self.expr_termination(condition).or_else(|| {
+                let then_termination = self.expr_termination(then_branch)?;
+                let else_termination = self.expr_termination(else_branch.as_deref()?)?;
+                Some(then_termination.merge(else_termination))
+            }),
+            ExprKind::FailureBind { expr, .. } => self.expr_termination(expr),
+            ExprKind::FailureSequence(items) => {
+                items.first().and_then(|item| self.expr_termination(item))
             }
-            ExprKind::FailureBind { expr, .. } => self.expr_never_completes(expr),
-            ExprKind::FailureSequence(items) => items
-                .first()
-                .is_some_and(|item| self.expr_never_completes(item)),
-            ExprKind::Set { target, expr, .. } => {
-                self.expr_never_completes(target) || self.expr_never_completes(expr)
-            }
-            ExprKind::Var { expr, .. } => self.expr_never_completes(expr),
-            ExprKind::TypeLiteral { expr } => self.expr_never_completes(expr),
-            ExprKind::TypeAnnotationLiteral { .. } => false,
+            ExprKind::Set { target, expr, .. } => self
+                .expr_termination(target)
+                .or_else(|| self.expr_termination(expr)),
+            ExprKind::Var { expr, .. } => self.expr_termination(expr),
+            ExprKind::TypeLiteral { expr } => self.expr_termination(expr),
+            ExprKind::TypeAnnotationLiteral { .. } => None,
             ExprKind::For { clauses, .. } => clauses
                 .iter()
-                .any(|clause| self.for_clause_expr_never_completes(clause)),
-            ExprKind::Profile { description, body } => {
-                self.expr_never_completes(description) || self.expr_never_completes(body)
-            }
+                .find_map(|clause| self.for_clause_termination(clause)),
+            ExprKind::Profile { description, body } => self
+                .expr_termination(description)
+                .or_else(|| self.expr_termination(body)),
             ExprKind::Block(statements) | ExprKind::ColonBlock(statements) => statements
-                .last()
-                .is_some_and(|statement| self.statement_never_completes(statement)),
-            ExprKind::Call { callee, args } => {
-                self.expr_never_completes(callee)
-                    || args
-                        .iter()
-                        .any(|arg| self.expr_never_completes(call_arg_expr(arg)))
-                    || self.callee_returns_never(callee)
-            }
-            ExprKind::BracketCall { callee, args } => {
-                self.expr_never_completes(callee)
-                    || args.iter().any(|arg| self.expr_never_completes(arg))
-                    || self.callee_returns_never(callee)
-            }
+                .iter()
+                .find_map(|statement| self.statement_termination(statement)),
+            ExprKind::Call { callee, args } => self
+                .expr_termination(callee)
+                .or_else(|| {
+                    args.iter()
+                        .find_map(|arg| self.expr_termination(call_arg_expr(arg)))
+                })
+                .or_else(|| {
+                    self.callee_returns_never(callee)
+                        .then_some(TerminationKind::Never)
+                }),
+            ExprKind::BracketCall { callee, args } => self
+                .expr_termination(callee)
+                .or_else(|| args.iter().find_map(|arg| self.expr_termination(arg)))
+                .or_else(|| {
+                    self.callee_returns_never(callee)
+                        .then_some(TerminationKind::Never)
+                }),
             ExprKind::Array(items) | ExprKind::Tuple(items) => {
-                items.iter().any(|item| self.expr_never_completes(item))
+                items.iter().find_map(|item| self.expr_termination(item))
             }
-            ExprKind::Map(entries) => entries.iter().any(|(key, value)| {
-                self.expr_never_completes(key) || self.expr_never_completes(value)
+            ExprKind::Map(entries) => entries.iter().find_map(|(key, value)| {
+                self.expr_termination(key)
+                    .or_else(|| self.expr_termination(value))
             }),
             ExprKind::Archetype {
                 callee, entries, ..
-            } => {
-                self.expr_never_completes(callee)
-                    || entries
-                        .iter()
-                        .any(|entry| self.archetype_entry_never_completes(entry))
-            }
-            ExprKind::Case { subject, arms } => {
-                self.expr_never_completes(subject)
-                    || (case_arms_have_wildcard(arms)
-                        && arms.iter().all(|arm| self.expr_never_completes(&arm.expr)))
-            }
+            } => self.expr_termination(callee).or_else(|| {
+                entries
+                    .iter()
+                    .find_map(|entry| self.archetype_entry_termination(entry))
+            }),
+            ExprKind::Case { subject, arms } => self
+                .expr_termination(subject)
+                .or_else(|| self.case_arms_termination(subject, arms)),
             ExprKind::Option(Some(value)) | ExprKind::UnwrapOption(value) => {
-                self.expr_never_completes(value)
+                self.expr_termination(value)
             }
-            ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match part {
-                InterpolatedStringPart::Text(_) => false,
-                InterpolatedStringPart::Expr(expr) => self.expr_never_completes(expr),
+            ExprKind::InterpolatedString(parts) => parts.iter().find_map(|part| match part {
+                InterpolatedStringPart::Text(_) => None,
+                InterpolatedStringPart::Expr(expr) => self.expr_termination(expr),
             }),
             ExprKind::Member { object, .. } | ExprKind::QualifiedMember { object, .. } => {
-                self.expr_never_completes(object)
+                self.expr_termination(object)
             }
-            ExprKind::Index { collection, index } => {
-                self.expr_never_completes(collection) || self.expr_never_completes(index)
-            }
+            ExprKind::Index { collection, index } => self
+                .expr_termination(collection)
+                .or_else(|| self.expr_termination(index)),
             ExprKind::Number { .. }
             | ExprKind::Char { .. }
             | ExprKind::Bool(_)
@@ -3214,28 +3221,92 @@ impl Checker {
             | ExprKind::InterfaceDefinition { .. }
             | ExprKind::ModuleDefinition { .. }
             | ExprKind::Option(None)
-            | ExprKind::QualifiedName { .. } => false,
+            | ExprKind::QualifiedName { .. } => None,
         }
     }
 
-    pub(super) fn for_clause_expr_never_completes(&self, clause: &ForClause) -> bool {
+    pub(super) fn for_clause_termination(&self, clause: &ForClause) -> Option<TerminationKind> {
         match clause {
             ForClause::Generator { iterable, .. }
             | ForClause::Let { expr: iterable, .. }
             | ForClause::RangeOrLet { expr: iterable, .. }
-            | ForClause::Filter(iterable) => self.expr_never_completes(iterable),
+            | ForClause::Filter(iterable) => self.expr_termination(iterable),
         }
     }
 
-    pub(super) fn archetype_entry_never_completes(&self, entry: &ArchetypeEntry) -> bool {
+    pub(super) fn archetype_entry_termination(
+        &self,
+        entry: &ArchetypeEntry,
+    ) -> Option<TerminationKind> {
         match entry {
-            ArchetypeEntry::Field(field) => self.expr_never_completes(&field.expr),
-            ArchetypeEntry::Let(binding) => self.expr_never_completes(&binding.expr),
-            ArchetypeEntry::Block(block) => self.expr_never_completes(block),
+            ArchetypeEntry::Field(field) => self.expr_termination(&field.expr),
+            ArchetypeEntry::Let(binding) => self.expr_termination(&binding.expr),
+            ArchetypeEntry::Block(block) => self.expr_termination(block),
             ArchetypeEntry::ConstructorCall(call) => call
                 .args
                 .iter()
-                .any(|arg| self.expr_never_completes(call_arg_expr(arg))),
+                .find_map(|arg| self.expr_termination(call_arg_expr(arg))),
+        }
+    }
+
+    pub(super) fn case_arms_termination(
+        &self,
+        subject: &Expr,
+        arms: &[CaseArm],
+    ) -> Option<TerminationKind> {
+        if !self.case_arms_cover_all_paths(subject, arms) {
+            return None;
+        }
+
+        let mut termination: Option<TerminationKind> = None;
+        for arm in arms {
+            let next = self.expr_termination(&arm.expr)?;
+            termination = Some(match termination {
+                Some(current) => current.merge(next),
+                None => next,
+            });
+        }
+        termination
+    }
+
+    pub(super) fn case_arms_cover_all_paths(&self, subject: &Expr, arms: &[CaseArm]) -> bool {
+        if case_arms_have_wildcard(arms) {
+            return true;
+        }
+
+        match self.semantic_facts.expression_type(subject.span) {
+            Some(Type::Bool) => {
+                let mut saw_true = false;
+                let mut saw_false = false;
+                for arm in arms {
+                    if let CasePattern::Expr(pattern) = &arm.pattern
+                        && let ExprKind::Bool(value) = &pattern.kind
+                    {
+                        if *value {
+                            saw_true = true;
+                        } else {
+                            saw_false = true;
+                        }
+                    }
+                }
+                saw_true && saw_false
+            }
+            Some(Type::Enum(enum_name)) => {
+                let Some(info) = self.enum_types.get(enum_name) else {
+                    return false;
+                };
+                !info.open
+                    && info.variants.iter().all(|variant| {
+                        arms.iter().any(|arm| {
+                            if let CasePattern::Expr(pattern) = &arm.pattern {
+                                enum_case_variant(pattern, enum_name) == Some(variant.as_str())
+                            } else {
+                                false
+                            }
+                        })
+                    })
+            }
+            _ => false,
         }
     }
 

@@ -3,12 +3,15 @@ use super::*;
 impl Checker {
     pub(super) fn check_statements(&mut self, statements: &[Stmt]) -> Result<Type, VerseError> {
         let mut last = Type::None;
-        let mut unreachable_after: Option<(&'static str, Span)> = None;
+        let mut unreachable_after: Option<(TerminationKind, Span)> = None;
 
         for statement in statements {
-            if let Some((message, span)) = unreachable_after {
+            if let Some((termination, span)) = unreachable_after {
                 last = Type::Never;
-                self.warn_unreachable(message, span.through(statement.span));
+                self.warn_unreachable(
+                    termination.unreachable_message(),
+                    span.through(statement.span),
+                );
                 break;
             }
             let statement_snapshot = if self.recovering {
@@ -28,9 +31,11 @@ impl Checker {
                     Type::Unknown
                 }
             };
-            if last == Type::Never || self.statement_never_completes(statement) {
-                unreachable_after =
-                    Some((unreachable_statement_message(statement), statement.span));
+            if let Some(termination) = self
+                .statement_termination(statement)
+                .or_else(|| (last == Type::Never).then_some(TerminationKind::Never))
+            {
+                unreachable_after = Some((termination, statement.span));
             }
         }
 

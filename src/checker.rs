@@ -375,6 +375,27 @@ fn type_returns_never(value_type: &Type) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminationKind {
+    Return,
+    Break,
+    Never,
+}
+
+impl TerminationKind {
+    fn merge(self, other: Self) -> Self {
+        if self == other { self } else { Self::Never }
+    }
+
+    fn unreachable_message(self) -> &'static str {
+        match self {
+            Self::Return => "unreachable code after `return`",
+            Self::Break => "unreachable code after `break`",
+            Self::Never => "unreachable code after never-returning expression",
+        }
+    }
+}
+
 fn spawn_body_expr(body: &Expr) -> Result<&Expr, VerseError> {
     let ExprKind::Block(statements) = &body.kind else {
         return Err(VerseError::check_at(
@@ -677,14 +698,6 @@ fn failure_statement_has_failable_expr(statement: &Stmt) -> bool {
         | StmtKind::ParametricTypeAlias { .. }
         | StmtKind::ExtensionMethod(_) => false,
         StmtKind::Break => false,
-    }
-}
-
-fn unreachable_statement_message(statement: &Stmt) -> &'static str {
-    match &statement.kind {
-        StmtKind::Return(_) => "unreachable code after `return`",
-        StmtKind::Break => "unreachable code after `break`",
-        _ => "unreachable code after never-returning expression",
     }
 }
 
