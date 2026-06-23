@@ -109,7 +109,6 @@ Run()
 }
 
 #[test]
-#[ignore = "planned Prediction/host FT column: predicts boundaries and ordinary fields"]
 fn rejects_prediction_host_column_invalid_predicts_boundaries() {
     assert_check_rejects(&[
         (
