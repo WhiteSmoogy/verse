@@ -111,7 +111,7 @@ pub struct ClassDescriptor {
     final_super: bool,
     concrete: bool,
     castable: bool,
-    fields: Vec<String>,
+    fields: Vec<FieldDescriptor>,
     methods: Vec<ClassMethodDescriptor>,
     blocks: Vec<ClassBlockDescriptor>,
 }
@@ -120,6 +120,27 @@ pub struct ClassDescriptor {
 pub enum ObjectKind {
     Class,
     Struct { computes: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDescriptor {
+    name: String,
+    mutable: bool,
+    type_name: TypeName,
+}
+
+impl FieldDescriptor {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn mutable(&self) -> bool {
+        self.mutable
+    }
+
+    pub fn type_name(&self) -> &TypeName {
+        &self.type_name
+    }
 }
 
 impl ClassDescriptor {
@@ -167,7 +188,7 @@ impl ClassDescriptor {
         self.castable
     }
 
-    pub fn fields(&self) -> &[String] {
+    pub fn fields(&self) -> &[FieldDescriptor] {
         &self.fields
     }
 
@@ -184,7 +205,7 @@ impl ClassDescriptor {
 pub struct InterfaceDescriptor {
     name: String,
     type_params: Vec<String>,
-    fields: Vec<String>,
+    fields: Vec<FieldDescriptor>,
     methods: Vec<ClassMethodDescriptor>,
 }
 
@@ -197,7 +218,7 @@ impl InterfaceDescriptor {
         &self.type_params
     }
 
-    pub fn fields(&self) -> &[String] {
+    pub fn fields(&self) -> &[FieldDescriptor] {
         &self.fields
     }
 
@@ -3115,6 +3136,27 @@ impl<'semantic> Lowerer<'semantic> {
         Some((layout, substitutions))
     }
 
+    fn field_descriptors(&self, fields: &[StructField]) -> Vec<FieldDescriptor> {
+        fields
+            .iter()
+            .map(|field| {
+                let type_name = field
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| {
+                        self.resolve_static_type_function_type_name(&annotation.name, &[], 0)
+                            .unwrap_or_else(|| annotation.name.clone())
+                    })
+                    .unwrap_or(TypeName::Any);
+                FieldDescriptor {
+                    name: field.name.clone(),
+                    mutable: field.mutable,
+                    type_name,
+                }
+            })
+            .collect()
+    }
+
     fn register_class_layout(
         &mut self,
         local_name: String,
@@ -3248,10 +3290,7 @@ impl<'semantic> Lowerer<'semantic> {
                 .any(|specifier| specifier == "final_super"),
             concrete: specifiers.iter().any(|specifier| specifier == "concrete"),
             castable: specifiers.iter().any(|specifier| specifier == "castable"),
-            fields: layout_fields
-                .iter()
-                .map(|field| field.name.clone())
-                .collect(),
+            fields: self.field_descriptors(&layout_fields),
             methods: method_descriptors,
             blocks: block_descriptors,
         };
@@ -3371,11 +3410,7 @@ impl<'semantic> Lowerer<'semantic> {
         let descriptor = InterfaceDescriptor {
             name: runtime_name.clone(),
             type_params: type_param_names,
-            fields: layout
-                .fields
-                .iter()
-                .map(|field| field.name.clone())
-                .collect(),
+            fields: self.field_descriptors(&layout.fields),
             methods: method_descriptors,
         };
         self.interface_layouts.insert(local_name, layout.clone());
@@ -3912,11 +3947,22 @@ impl<'semantic> Lowerer<'semantic> {
             state.define_extension(extension.clone());
         }
         if decides {
-            let (value, mut failure_jumps) = self.lower_failable_annotated_return_value(
-                method.return_type.as_ref(),
-                body,
-                &mut state,
-            )?;
+            let (value, mut failure_jumps) = if matches!(body.kind, ExprKind::External) {
+                (
+                    self.emit_external_raw_return(
+                        self.external_runtime_type_name(method.return_type.as_ref(), body),
+                        &mut state,
+                        body.span,
+                    ),
+                    Vec::new(),
+                )
+            } else {
+                self.lower_failable_annotated_return_value(
+                    method.return_type.as_ref(),
+                    body,
+                    &mut state,
+                )?
+            };
             state.chunk.emit(Instruction::Return {
                 value,
                 span: body.span,
@@ -3937,8 +3983,15 @@ impl<'semantic> Lowerer<'semantic> {
             );
         }
 
-        let value =
-            self.lower_annotated_return_value(method.return_type.as_ref(), body, &mut state)?;
+        let value = if matches!(body.kind, ExprKind::External) {
+            self.emit_external_raw_return(
+                self.external_runtime_type_name(method.return_type.as_ref(), body),
+                &mut state,
+                body.span,
+            )
+        } else {
+            self.lower_annotated_return_value(method.return_type.as_ref(), body, &mut state)?
+        };
         state.chunk.emit(Instruction::Return {
             value,
             span: body.span,
@@ -4628,6 +4681,18 @@ impl<'semantic> Lowerer<'semantic> {
             .or_else(|| self.external_interface_constant(&value_type, state))
             .unwrap_or(Constant::ExternalReturn(value_type));
         let source = state.constant(constant);
+        let dest = state.allocate_register(span);
+        state.chunk.emit(Instruction::Move { dest, source, span });
+        ValueOperand::Register(dest)
+    }
+
+    fn emit_external_raw_return(
+        &mut self,
+        value_type: TypeName,
+        state: &mut ChunkState,
+        span: Span,
+    ) -> ValueOperand {
+        let source = state.constant(Constant::ExternalReturn(value_type));
         let dest = state.allocate_register(span);
         state.chunk.emit(Instruction::Move { dest, source, span });
         ValueOperand::Register(dest)

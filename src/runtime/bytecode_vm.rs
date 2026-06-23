@@ -21,8 +21,8 @@ use crate::eval::{
     replace_string_byte_failable,
 };
 use crate::ir::bytecode::{
-    BytecodeChunk, BytecodeProgram, ClassDescriptor, ClassMethodDescriptor, Constant, Instruction,
-    InterfaceDescriptor, ObjectKind, RegisterIndex, ValueOperand,
+    BytecodeChunk, BytecodeProgram, ClassDescriptor, ClassMethodDescriptor, Constant,
+    FieldDescriptor, Instruction, InterfaceDescriptor, ObjectKind, RegisterIndex, ValueOperand,
 };
 use crate::runtime::host::{Host, MockHost, PendingToken};
 use crate::token::{CharacterKind, Span};
@@ -3085,7 +3085,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                     })?;
                 match self.run_chunk(descriptor.chunk(), call_args, span, current_task, None)? {
                     ChunkOutcome::Value(value) => Ok(CallOutcome::Value(
-                        materialize_external_bound_method_return(
+                        self.materialize_external_bound_method_return(
                             &method.self_value,
                             candidate,
                             value,
@@ -3746,6 +3746,127 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         })
     }
 
+    fn materialize_external_bound_method_return(
+        &self,
+        self_value: &Value,
+        candidate: &VmBoundMethodCandidate,
+        value: VmValue,
+    ) -> VmValue {
+        if !matches!(value, VmValue::Runtime(Value::External)) {
+            return value;
+        }
+        let Some(return_type) = candidate.external_return_type.as_ref() else {
+            return value;
+        };
+        let return_type = self
+            .bound_method_return_substitutions(self_value, candidate)
+            .map(|substitutions| substitute_runtime_type_name_params(return_type, &substitutions))
+            .unwrap_or_else(|| return_type.clone());
+        let mut visiting = Vec::new();
+        VmValue::Runtime(self.program_external_return_value(&return_type, &mut visiting))
+    }
+
+    fn bound_method_return_substitutions(
+        &self,
+        self_value: &Value,
+        candidate: &VmBoundMethodCandidate,
+    ) -> Option<HashMap<String, TypeName>> {
+        let Value::ClassInstance { class_name, .. } = self_value else {
+            return None;
+        };
+        let args = runtime_type_args(class_name)?;
+        let substitutions = candidate
+            .owner_type_params
+            .iter()
+            .cloned()
+            .zip(args)
+            .collect::<HashMap<_, _>>();
+        (!substitutions.is_empty()).then_some(substitutions)
+    }
+
+    fn program_external_return_value(
+        &self,
+        type_name: &TypeName,
+        visiting: &mut Vec<String>,
+    ) -> Value {
+        self.external_aggregate_return_value(type_name, visiting)
+            .or_else(|| self.external_interface_return_value(type_name, visiting))
+            .unwrap_or_else(|| bytecode_external_return_value(type_name))
+    }
+
+    fn external_aggregate_return_value(
+        &self,
+        type_name: &TypeName,
+        visiting: &mut Vec<String>,
+    ) -> Option<Value> {
+        let (name, args) = runtime_aggregate_type_name_parts(type_name)?;
+        let class = self.program_class_by_runtime_name(&name)?;
+        let runtime_name = rendered_runtime_aggregate_name(class.name(), &args)?;
+        if visiting.iter().any(|name| name == &runtime_name) {
+            return None;
+        }
+        visiting.push(runtime_name.clone());
+        let fields =
+            self.external_descriptor_fields(class.fields(), class.type_params(), &args, visiting);
+        visiting.pop();
+        Some(bytecode_class_instance_value(
+            runtime_name,
+            class.unique(),
+            fields,
+        ))
+    }
+
+    fn external_interface_return_value(
+        &self,
+        type_name: &TypeName,
+        visiting: &mut Vec<String>,
+    ) -> Option<Value> {
+        let (name, args) = runtime_aggregate_type_name_parts(type_name)?;
+        let interface = self.program_interface_by_runtime_name(&name)?;
+        let runtime_name = rendered_runtime_aggregate_name(interface.name(), &args)?;
+        if visiting.iter().any(|name| name == &runtime_name) {
+            return None;
+        }
+        visiting.push(runtime_name.clone());
+        let fields = self.external_descriptor_fields(
+            interface.fields(),
+            interface.type_params(),
+            &args,
+            visiting,
+        );
+        visiting.pop();
+        Some(bytecode_class_instance_value(runtime_name, false, fields))
+    }
+
+    fn external_descriptor_fields(
+        &self,
+        fields: &[FieldDescriptor],
+        type_params: &[String],
+        args: &[TypeName],
+        visiting: &mut Vec<String>,
+    ) -> Vec<(String, bool, Value)> {
+        let substitutions = type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        fields
+            .iter()
+            .map(|field| {
+                let field_type = if substitutions.is_empty() {
+                    field.type_name().clone()
+                } else {
+                    substitute_runtime_type_name_params(field.type_name(), &substitutions)
+                };
+                (
+                    field.name().to_string(),
+                    field.mutable(),
+                    self.program_external_return_value(&field_type, visiting),
+                )
+            })
+            .collect()
+    }
+
     fn runtime_cast_target(&self, value: &Value) -> Option<RuntimeCastTarget> {
         match value {
             Value::ClassType { name, .. } => Some(RuntimeCastTarget::Class(name.clone())),
@@ -3901,36 +4022,6 @@ fn bytecode_method_candidate(
         field_count: method.field_count(),
         decides: method.decides(),
     }
-}
-
-fn materialize_external_bound_method_return(
-    self_value: &Value,
-    candidate: &VmBoundMethodCandidate,
-    value: VmValue,
-) -> VmValue {
-    if !matches!(value, VmValue::Runtime(Value::External)) {
-        return value;
-    }
-    let Some(return_type) = candidate.external_return_type.as_ref() else {
-        return value;
-    };
-    let Value::ClassInstance { class_name, .. } = self_value else {
-        return value;
-    };
-    let Some(args) = runtime_type_args(class_name) else {
-        return value;
-    };
-    let substitutions = candidate
-        .owner_type_params
-        .iter()
-        .cloned()
-        .zip(args)
-        .collect::<HashMap<_, _>>();
-    if substitutions.is_empty() {
-        return value;
-    }
-    let return_type = substitute_runtime_type_name_params(return_type, &substitutions);
-    VmValue::Runtime(bytecode_external_return_value(&return_type))
 }
 
 fn parse_qualified_member_name(name: &str) -> (Option<&str>, &str) {
@@ -4132,6 +4223,32 @@ fn runtime_type_args(name: &str) -> Option<Vec<TypeName>> {
     )
 }
 
+fn runtime_aggregate_type_name_parts(type_name: &TypeName) -> Option<(String, Vec<TypeName>)> {
+    match type_name {
+        TypeName::Applied { name, args } => Some((name.clone(), args.clone())),
+        TypeName::Named(name) => parse_runtime_parametric_name(name)
+            .map(|(head, args)| {
+                (
+                    head,
+                    args.into_iter().map(parse_runtime_type_name).collect(),
+                )
+            })
+            .or_else(|| Some((name.clone(), Vec::new()))),
+        _ => None,
+    }
+}
+
+fn rendered_runtime_aggregate_name(name: &str, args: &[TypeName]) -> Option<String> {
+    if args.is_empty() {
+        return Some(name.to_string());
+    }
+    let args = args
+        .iter()
+        .map(render_runtime_type_name_from_type_name)
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("{name}({})", args.join(", ")))
+}
+
 fn split_runtime_type_args(args: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut paren_depth = 0usize;
@@ -4225,6 +4342,78 @@ fn parse_runtime_parametric_name(name: &str) -> Option<(String, Vec<&str>)> {
     Some((head.to_string(), split_runtime_type_args(args)))
 }
 
+fn render_runtime_type_name_from_type_name(name: &TypeName) -> Option<String> {
+    Some(match name {
+        TypeName::Int => "int".to_string(),
+        TypeName::Float => "float".to_string(),
+        TypeName::Rational => "rational".to_string(),
+        TypeName::Number => "number".to_string(),
+        TypeName::Bool => "bool".to_string(),
+        TypeName::String => "string".to_string(),
+        TypeName::Message => "message".to_string(),
+        TypeName::Char => "char".to_string(),
+        TypeName::Char8 => "char8".to_string(),
+        TypeName::Char32 => "char32".to_string(),
+        TypeName::None => "none".to_string(),
+        TypeName::Any => "any".to_string(),
+        TypeName::Comparable => "comparable".to_string(),
+        TypeName::Type => "type".to_string(),
+        TypeName::TypeBounds { lower, upper } => format!(
+            "type({}, {})",
+            render_runtime_type_name_from_type_name(lower)?,
+            render_runtime_type_name_from_type_name(upper)?
+        ),
+        TypeName::IntRange { min, max } => {
+            format!("type{{_X:int where {min} <= _X, _X <= {max}}}")
+        }
+        TypeName::FloatRange(range) => format!(
+            "type{{_X:float where {} <= _X, _X <= {}}}",
+            range.min.render(),
+            range.max.render()
+        ),
+        TypeName::Array(Some(item)) => {
+            format!("array<{}>", render_runtime_type_name_from_type_name(item)?)
+        }
+        TypeName::Array(None) => "array<unknown>".to_string(),
+        TypeName::Map(key, value) => format!(
+            "map<{}, {}>",
+            render_runtime_type_name_from_type_name(key)?,
+            render_runtime_type_name_from_type_name(value)?
+        ),
+        TypeName::WeakMap(key, value) => format!(
+            "weak_map<{}, {}>",
+            render_runtime_type_name_from_type_name(key)?,
+            render_runtime_type_name_from_type_name(value)?
+        ),
+        TypeName::Tuple(items) => {
+            let items = items
+                .iter()
+                .map(render_runtime_type_name_from_type_name)
+                .collect::<Option<Vec<_>>>()?;
+            format!("tuple({})", items.join(", "))
+        }
+        TypeName::Option(item) => format!("?{}", render_runtime_type_name_from_type_name(item)?),
+        TypeName::Function => "function".to_string(),
+        TypeName::FunctionSignature { .. } => return None,
+        TypeName::Applied { name, args } => {
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1
+            {
+                render_runtime_type_name_from_type_name(&args[0])?
+            } else {
+                let args = args
+                    .iter()
+                    .map(render_runtime_type_name_from_type_name)
+                    .collect::<Option<Vec<_>>>()?;
+                format!("{name}({})", args.join(", "))
+            }
+        }
+        TypeName::Named(name) => name.clone(),
+    })
+}
+
 fn substitute_runtime_type_name_params(
     type_name: &TypeName,
     substitutions: &HashMap<String, TypeName>,
@@ -4278,10 +4467,22 @@ fn substitute_runtime_type_name_params(
                 .map(|arg| substitute_runtime_type_name_params(arg, substitutions))
                 .collect(),
         },
-        TypeName::Named(name) => substitutions
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| TypeName::Named(name.clone())),
+        TypeName::Named(name) => {
+            if let Some(replacement) = substitutions.get(name) {
+                replacement.clone()
+            } else if let Some((head, args)) = parse_runtime_parametric_name(name) {
+                TypeName::Applied {
+                    name: head,
+                    args: args
+                        .into_iter()
+                        .map(parse_runtime_type_name)
+                        .map(|arg| substitute_runtime_type_name_params(&arg, substitutions))
+                        .collect(),
+                }
+            } else {
+                TypeName::Named(name.clone())
+            }
+        }
         other => other.clone(),
     }
 }

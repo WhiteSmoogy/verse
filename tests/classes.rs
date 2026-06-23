@@ -1435,6 +1435,42 @@ Item.Current + Item.Read() + 42
 }
 
 #[test]
+fn evaluates_external_parametric_class_method_aggregate_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+    Next():box(t) = external {}
+
+Item:box(int) = external {}
+Item.Next().Value + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_parametric_interface_method_aggregate_return_runtime_surface() {
+    let source = r#"
+reader(t:type) := interface:
+    Current:t
+    Next():reader(t) = external {}
+
+Item:reader(int) = external {}
+Item.Next().Current + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_shared_constraint_parametric_class_instance_methods() {
     let source = r#"
 pair_box(t&u:type) := class:
