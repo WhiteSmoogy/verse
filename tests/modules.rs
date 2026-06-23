@@ -1244,6 +1244,59 @@ Value.Value
 }
 
 #[test]
+fn evaluates_public_module_where_inferred_type_function_class_parent_runtime() {
+    let source = r#"
+DataTypes<public> := module:
+    base_box<public>(t:type) := class:
+        Value<public>:t
+        Read<public>():t = Value
+
+    BoxSubtype<public>(Element:type):type = subtype(base_box(Element))
+    BoxOf<public>(Kind:BoxSubtype(t) where t:type):type = base_box(t)
+
+child_box(t:type) := class(DataTypes.BoxOf(DataTypes.base_box(t))):
+    Extra:int = 2
+
+Item := child_box(int){Value := 40}
+Item.Read() + Item.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_public_module_where_inferred_type_function_interface_parent_runtime() {
+    let source = r#"
+Contracts<public> := module:
+    base_reader<public>(t:type) := interface:
+        Read<public>():t
+
+    ReaderSubtype<public>(Element:type):type = subtype(base_reader(Element))
+    ReaderOf<public>(Kind:ReaderSubtype(t) where t:type):type = base_reader(t)
+
+child_reader(t:type) := interface(Contracts.ReaderOf(Contracts.base_reader(t))):
+    Extra():int = 2
+
+box := class(child_reader(int)):
+    Value:int = 40
+    Read<override>():int = Value
+
+Item:child_reader(int) = box{}
+Item.Read() + Item.Extra()
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn rejects_internal_module_type_function_as_type_annotation() {
     let source = r#"
 DataTypes<public> := module:

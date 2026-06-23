@@ -1830,7 +1830,13 @@ impl Checker {
                     continue;
                 }
 
-                let StmtKind::Let { name, expr, .. } = &statement.kind else {
+                let StmtKind::Let {
+                    name,
+                    specifiers,
+                    expr,
+                    ..
+                } = &statement.kind
+                else {
                     pending[index] = false;
                     continue;
                 };
@@ -1914,6 +1920,11 @@ impl Checker {
                             return_type: Box::new(return_value_type),
                         },
                     });
+                self.record_current_module_member_access(
+                    name,
+                    module_member_specifiers(specifiers, expr),
+                    statement.span,
+                )?;
                 pending[index] = false;
                 progressed = true;
             }

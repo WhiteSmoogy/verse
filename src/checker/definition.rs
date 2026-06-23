@@ -2795,6 +2795,18 @@ impl Checker {
         Ok(substitute_type_name_params(&info.target, &inferred))
     }
 
+    fn with_type_function_module_path<T>(
+        &mut self,
+        info: &TypeFunctionInfo,
+        action: impl FnOnce(&mut Self) -> Result<T, VerseError>,
+    ) -> Result<T, VerseError> {
+        let previous_module_path =
+            std::mem::replace(&mut self.module_path, info.module_path.clone());
+        let result = action(self);
+        self.module_path = previous_module_path;
+        result
+    }
+
     pub(super) fn select_type_function_candidate(
         &mut self,
         display_name: &str,
@@ -2814,18 +2826,24 @@ impl Checker {
                     span,
                 ));
             }
-            let inferred = self.infer_type_function_type_params(display_name, &info, args, span)?;
+            let inferred = self.with_type_function_module_path(&info, |checker| {
+                checker.infer_type_function_type_params(display_name, &info, args, span)
+            })?;
             return Ok((info, inferred));
         }
 
         let mut matches = Vec::new();
         for info in infos.iter().filter(|info| info.params.len() == args.len()) {
             let mut checker = self.clone();
-            if let Ok(inferred) =
-                checker.infer_type_function_type_params(display_name, info, args, span)
+            if let Ok((_inferred, score)) =
+                checker.with_type_function_module_path(info, |checker| {
+                    let inferred =
+                        checker.infer_type_function_type_params(display_name, info, args, span)?;
+                    let score =
+                        checker.type_function_candidate_match_score(info, args, &inferred, span)?;
+                    Ok((inferred, score))
+                })
             {
-                let score =
-                    checker.type_function_candidate_match_score(info, args, &inferred, span)?;
                 matches.push((score, info.clone()));
             }
         }
@@ -2865,7 +2883,9 @@ impl Checker {
             }
         };
 
-        let inferred = self.infer_type_function_type_params(display_name, &info, args, span)?;
+        let inferred = self.with_type_function_module_path(&info, |checker| {
+            checker.infer_type_function_type_params(display_name, &info, args, span)
+        })?;
         Ok((info, inferred))
     }
 
@@ -3133,7 +3153,9 @@ impl Checker {
             }
             let mut checker = self.clone();
             let inferred = checker
-                .infer_type_function_type_params("", info, args, Span::new(0, 0, 0, 0))
+                .with_type_function_module_path(info, |checker| {
+                    checker.infer_type_function_type_params("", info, args, Span::new(0, 0, 0, 0))
+                })
                 .ok()?;
             return Some((info.clone(), inferred));
         }
@@ -3144,11 +3166,14 @@ impl Checker {
             .filter(|info| info.params.len() == args.len())
             .filter_map(|info| {
                 let mut checker = self.clone();
-                let inferred = checker
-                    .infer_type_function_type_params("", info, args, span)
-                    .ok()?;
-                let score = checker
-                    .type_function_candidate_match_score(info, args, &inferred, span)
+                let (inferred, score) = checker
+                    .with_type_function_module_path(info, |checker| {
+                        let inferred =
+                            checker.infer_type_function_type_params("", info, args, span)?;
+                        let score = checker
+                            .type_function_candidate_match_score(info, args, &inferred, span)?;
+                        Ok((inferred, score))
+                    })
                     .ok()?;
                 Some((score, info.clone(), inferred))
             })
