@@ -4,7 +4,7 @@ use crate::ast::{
     ArchetypeConstructorCall, ArchetypeEntry, AssignOp, BinaryOp, CallArg, CaseArm, CasePattern,
     ClassBlock, ClassMethod, ConcurrentOp, EnumVariant, Expr, ExprKind, ExtensionMethod,
     ForBinding, ForClause, InterpolatedStringPart, Param, ParamPattern, Program, Stmt, StmtKind,
-    StructField, TypeAnnotation, TypeName, TypeParamConstraint, UnaryOp,
+    StructField, TypeAnnotation, TypeName, TypeParam, TypeParamConstraint, UnaryOp,
 };
 use crate::checker::{IntRange, ParametricTypeKind, Type};
 use crate::colors::NAMED_COLORS;
@@ -1518,8 +1518,14 @@ struct Lowerer<'semantic> {
 
 #[derive(Debug, Clone)]
 struct BytecodeTypeFunction {
-    params: Vec<String>,
+    params: Vec<BytecodeTypeFunctionParam>,
     target: TypeName,
+}
+
+#[derive(Debug, Clone)]
+struct BytecodeTypeFunctionParam {
+    name: String,
+    constraint: TypeName,
 }
 
 #[derive(Debug, Clone)]
@@ -1676,11 +1682,12 @@ impl<'semantic> Lowerer<'semantic> {
                     ..
                 } => {
                     if static_type_function_return_type(return_type.as_ref())
-                        && params.iter().all(static_type_function_param)
+                        && let Some(type_function_params) =
+                            params.iter().map(bytecode_type_function_param).collect()
                         && let Some(target) = bytecode_expr_to_type_name(body)
                     {
                         let info = BytecodeTypeFunction {
-                            params: params.iter().map(|param| param.name.clone()).collect(),
+                            params: type_function_params,
                             target,
                         };
                         self.type_functions
@@ -1831,6 +1838,7 @@ impl<'semantic> Lowerer<'semantic> {
                             runtime_name,
                             specifiers,
                             ObjectKind::Class,
+                            &[],
                             base.as_ref(),
                             interfaces,
                             fields.clone(),
@@ -1844,6 +1852,7 @@ impl<'semantic> Lowerer<'semantic> {
                             ObjectKind::Struct {
                                 computes: *computes,
                             },
+                            &[],
                             None,
                             &[],
                             fields.clone(),
@@ -1856,6 +1865,7 @@ impl<'semantic> Lowerer<'semantic> {
                         } => self.predeclare_interface_layout(
                             name.clone(),
                             runtime_name,
+                            &[],
                             parents,
                             fields.clone(),
                             methods.clone(),
@@ -1866,8 +1876,8 @@ impl<'semantic> Lowerer<'semantic> {
                 StmtKind::ParametricType {
                     name,
                     specifiers,
+                    params,
                     expr,
-                    ..
                 } => match &expr.kind {
                     ExprKind::ClassDefinition {
                         base,
@@ -1886,6 +1896,7 @@ impl<'semantic> Lowerer<'semantic> {
                             runtime_name,
                             &runtime_specifiers,
                             ObjectKind::Class,
+                            params,
                             base.as_ref(),
                             interfaces,
                             fields.clone(),
@@ -1910,6 +1921,7 @@ impl<'semantic> Lowerer<'semantic> {
                             ObjectKind::Struct {
                                 computes: *computes,
                             },
+                            &[],
                             None,
                             &[],
                             fields.clone(),
@@ -1927,6 +1939,7 @@ impl<'semantic> Lowerer<'semantic> {
                         self.predeclare_interface_layout(
                             name.clone(),
                             runtime_name,
+                            params,
                             parents,
                             fields.clone(),
                             methods.clone(),
@@ -1978,15 +1991,11 @@ impl<'semantic> Lowerer<'semantic> {
                 {
                     let mut runtime_specifiers = specifiers.clone();
                     runtime_specifiers.extend(class_specifiers.clone());
-                    let runtime_type_params = params
-                        .iter()
-                        .map(|param| param.name.clone())
-                        .collect::<Vec<_>>();
                     self.register_class_layout(
                         name.clone(),
                         name.clone(),
                         &runtime_specifiers,
-                        &runtime_type_params,
+                        params,
                         base.as_ref(),
                         interfaces,
                         fields.clone(),
@@ -2021,6 +2030,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.register_interface_layout(
                         name.clone(),
                         name.clone(),
+                        params,
                         parents,
                         fields.clone(),
                         methods.clone(),
@@ -2050,6 +2060,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
+                        &[],
                         None,
                         &[],
                         fields.clone(),
@@ -2139,6 +2150,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.register_interface_layout(
                         name.clone(),
                         name.clone(),
+                        &[],
                         parents,
                         fields.clone(),
                         methods.clone(),
@@ -2168,6 +2180,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
+                        &[],
                         None,
                         &[],
                         fields.clone(),
@@ -2451,15 +2464,11 @@ impl<'semantic> Lowerer<'semantic> {
                 {
                     let mut runtime_specifiers = specifiers.clone();
                     runtime_specifiers.extend(class_specifiers.clone());
-                    let runtime_type_params = params
-                        .iter()
-                        .map(|param| param.name.clone())
-                        .collect::<Vec<_>>();
                     self.register_class_layout(
                         name.clone(),
                         qualified.clone(),
                         &runtime_specifiers,
-                        &runtime_type_params,
+                        params,
                         base.as_ref(),
                         interfaces,
                         fields.clone(),
@@ -2492,6 +2501,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.register_interface_layout(
                         name.clone(),
                         qualified.clone(),
+                        params,
                         parents,
                         fields.clone(),
                         methods.clone(),
@@ -2520,6 +2530,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
+                        &[],
                         None,
                         &[],
                         fields.clone(),
@@ -2606,6 +2617,7 @@ impl<'semantic> Lowerer<'semantic> {
                     self.register_interface_layout(
                         name.clone(),
                         qualified.clone(),
+                        &[],
                         parents,
                         fields.clone(),
                         methods.clone(),
@@ -2634,6 +2646,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
+                        &[],
                         None,
                         &[],
                         fields.clone(),
@@ -2830,13 +2843,14 @@ impl<'semantic> Lowerer<'semantic> {
         runtime_name: String,
         specifiers: &[String],
         object_kind: ObjectKind,
+        type_params: &[TypeParam],
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
         fields: Vec<StructField>,
     ) {
         let (base_class, layout_fields) =
-            self.collect_class_layout_fields(base, interfaces, &fields);
-        let interface_names = self.class_interface_names(base, interfaces);
+            self.collect_class_layout_fields(base, interfaces, &fields, type_params);
+        let interface_names = self.class_interface_names(base, interfaces, type_params);
         let layout = ClassLayout {
             runtime_name: runtime_name.clone(),
             base_class,
@@ -2880,11 +2894,18 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         local_name: String,
         runtime_name: String,
+        type_params: &[TypeParam],
         parents: &[TypeAnnotation],
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
     ) {
-        let layout = self.collect_interface_layout(runtime_name.clone(), parents, fields, methods);
+        let layout = self.collect_interface_layout(
+            runtime_name.clone(),
+            parents,
+            fields,
+            methods,
+            type_params,
+        );
         self.interface_layouts.insert(local_name, layout.clone());
         self.interface_layouts.insert(runtime_name, layout);
     }
@@ -2894,9 +2915,10 @@ impl<'semantic> Lowerer<'semantic> {
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
         fields: &[StructField],
+        type_params: &[TypeParam],
     ) -> (Option<String>, Vec<StructField>) {
         let base_class_name = base
-            .and_then(|annotation| self.type_annotation_aggregate_name(annotation))
+            .and_then(|annotation| self.type_annotation_aggregate_name(annotation, type_params))
             .filter(|base_name| {
                 self.resolve_class_layout(base_name, &ChunkState::new("<class-base>"))
                     .is_some()
@@ -2908,7 +2930,7 @@ impl<'semantic> Lowerer<'semantic> {
         } else {
             Vec::new()
         };
-        for interface_name in self.class_interface_names(base, interfaces) {
+        for interface_name in self.class_interface_names(base, interfaces, type_params) {
             if let Some(interface) = self.resolve_interface_layout(&interface_name) {
                 merge_struct_fields(&mut layout_fields, interface.fields.clone());
             }
@@ -2932,11 +2954,12 @@ impl<'semantic> Lowerer<'semantic> {
         parents: &[TypeAnnotation],
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
+        type_params: &[TypeParam],
     ) -> InterfaceLayout {
         let mut layout_fields = Vec::new();
         let mut layout_methods = Vec::new();
         for parent in parents {
-            if let Some(parent_name) = self.type_annotation_aggregate_name(parent)
+            if let Some(parent_name) = self.type_annotation_aggregate_name(parent, type_params)
                 && let Some(parent_layout) = self.resolve_interface_layout(&parent_name)
             {
                 merge_struct_fields(&mut layout_fields, parent_layout.fields.clone());
@@ -2957,7 +2980,7 @@ impl<'semantic> Lowerer<'semantic> {
         local_name: String,
         runtime_name: String,
         specifiers: &[String],
-        type_params: &[String],
+        type_params: &[TypeParam],
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
         fields: Vec<StructField>,
@@ -2965,9 +2988,13 @@ impl<'semantic> Lowerer<'semantic> {
         blocks: &[ClassBlock],
         extension_methods: &[ExtensionMethod],
     ) -> Result<(), UnsupportedBytecode> {
+        let type_param_names = type_params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
         let (base_class_name, layout_fields) =
-            self.collect_class_layout_fields(base, interfaces, &fields);
-        let interface_names = self.class_interface_names(base, interfaces);
+            self.collect_class_layout_fields(base, interfaces, &fields, type_params);
+        let interface_names = self.class_interface_names(base, interfaces, type_params);
 
         let class_extensions = extension_methods
             .iter()
@@ -2989,7 +3016,7 @@ impl<'semantic> Lowerer<'semantic> {
             Vec::new()
         };
         let interface_default_methods = self
-            .class_interface_names(base, interfaces)
+            .class_interface_names(base, interfaces, type_params)
             .into_iter()
             .filter_map(|interface_name| self.resolve_interface_layout(&interface_name))
             .flat_map(|interface| interface.methods.clone())
@@ -3002,7 +3029,7 @@ impl<'semantic> Lowerer<'semantic> {
                 &class_extensions,
                 base_class_name.as_deref(),
                 &method,
-                type_params,
+                &type_param_names,
             )?;
             if let Some(existing) = method_descriptors.iter_mut().find(|candidate| {
                 candidate.name == descriptor.name
@@ -3025,7 +3052,7 @@ impl<'semantic> Lowerer<'semantic> {
                     &class_extensions,
                     base_class_name.as_deref(),
                     method,
-                    type_params,
+                    &type_param_names,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3160,17 +3187,28 @@ impl<'semantic> Lowerer<'semantic> {
         &mut self,
         local_name: String,
         runtime_name: String,
+        type_params: &[TypeParam],
         parents: &[TypeAnnotation],
         fields: Vec<StructField>,
         methods: Vec<ClassMethod>,
     ) {
-        let layout = self.collect_interface_layout(runtime_name.clone(), parents, fields, methods);
+        let layout = self.collect_interface_layout(
+            runtime_name.clone(),
+            parents,
+            fields,
+            methods,
+            type_params,
+        );
         self.interface_layouts.insert(local_name, layout.clone());
         self.interface_layouts.insert(runtime_name, layout);
     }
 
-    fn type_annotation_aggregate_name(&self, annotation: &TypeAnnotation) -> Option<String> {
-        self.resolve_static_type_function_type_name(&annotation.name, 0)
+    fn type_annotation_aggregate_name(
+        &self,
+        annotation: &TypeAnnotation,
+        type_params: &[TypeParam],
+    ) -> Option<String> {
+        self.resolve_static_type_function_type_name(&annotation.name, type_params, 0)
             .as_ref()
             .and_then(type_name_aggregate_head)
             .or_else(|| type_annotation_class_name(annotation))
@@ -3179,6 +3217,7 @@ impl<'semantic> Lowerer<'semantic> {
     fn resolve_static_type_function_type_name(
         &self,
         type_name: &TypeName,
+        type_params: &[TypeParam],
         depth: usize,
     ) -> Option<TypeName> {
         if depth > 16 {
@@ -3186,17 +3225,17 @@ impl<'semantic> Lowerer<'semantic> {
         }
         match type_name {
             TypeName::Applied { name, args } => {
-                if let Some(info) = self.select_bytecode_type_function(name, args.len()) {
+                if let Some(info) = self.select_bytecode_type_function(name, args, type_params) {
                     let substitutions = info
                         .params
                         .iter()
-                        .cloned()
+                        .map(|param| param.name.clone())
                         .zip(args.iter().cloned())
                         .collect::<HashMap<_, _>>();
                     let target =
                         substitute_bytecode_type_name_params(&info.target, &substitutions)?;
                     return self
-                        .resolve_static_type_function_type_name(&target, depth + 1)
+                        .resolve_static_type_function_type_name(&target, type_params, depth + 1)
                         .or(Some(target));
                 }
                 Some(TypeName::Applied {
@@ -3204,7 +3243,7 @@ impl<'semantic> Lowerer<'semantic> {
                     args: args
                         .iter()
                         .map(|arg| {
-                            self.resolve_static_type_function_type_name(arg, depth + 1)
+                            self.resolve_static_type_function_type_name(arg, type_params, depth + 1)
                                 .unwrap_or_else(|| arg.clone())
                         })
                         .collect(),
@@ -3212,28 +3251,28 @@ impl<'semantic> Lowerer<'semantic> {
             }
             TypeName::Array(item) => Some(TypeName::Array(match item.as_ref() {
                 Some(item) => Some(Box::new(
-                    self.resolve_static_type_function_type_name(item, depth + 1)
+                    self.resolve_static_type_function_type_name(item, type_params, depth + 1)
                         .unwrap_or_else(|| item.as_ref().clone()),
                 )),
                 None => None,
             })),
             TypeName::Map(key, value) => Some(TypeName::Map(
                 Box::new(
-                    self.resolve_static_type_function_type_name(key, depth + 1)
+                    self.resolve_static_type_function_type_name(key, type_params, depth + 1)
                         .unwrap_or_else(|| key.as_ref().clone()),
                 ),
                 Box::new(
-                    self.resolve_static_type_function_type_name(value, depth + 1)
+                    self.resolve_static_type_function_type_name(value, type_params, depth + 1)
                         .unwrap_or_else(|| value.as_ref().clone()),
                 ),
             )),
             TypeName::WeakMap(key, value) => Some(TypeName::WeakMap(
                 Box::new(
-                    self.resolve_static_type_function_type_name(key, depth + 1)
+                    self.resolve_static_type_function_type_name(key, type_params, depth + 1)
                         .unwrap_or_else(|| key.as_ref().clone()),
                 ),
                 Box::new(
-                    self.resolve_static_type_function_type_name(value, depth + 1)
+                    self.resolve_static_type_function_type_name(value, type_params, depth + 1)
                         .unwrap_or_else(|| value.as_ref().clone()),
                 ),
             )),
@@ -3241,22 +3280,22 @@ impl<'semantic> Lowerer<'semantic> {
                 items
                     .iter()
                     .map(|item| {
-                        self.resolve_static_type_function_type_name(item, depth + 1)
+                        self.resolve_static_type_function_type_name(item, type_params, depth + 1)
                             .unwrap_or_else(|| item.clone())
                     })
                     .collect(),
             )),
             TypeName::Option(item) => Some(TypeName::Option(Box::new(
-                self.resolve_static_type_function_type_name(item, depth + 1)
+                self.resolve_static_type_function_type_name(item, type_params, depth + 1)
                     .unwrap_or_else(|| item.as_ref().clone()),
             ))),
             TypeName::TypeBounds { lower, upper } => Some(TypeName::TypeBounds {
                 lower: Box::new(
-                    self.resolve_static_type_function_type_name(lower, depth + 1)
+                    self.resolve_static_type_function_type_name(lower, type_params, depth + 1)
                         .unwrap_or_else(|| lower.as_ref().clone()),
                 ),
                 upper: Box::new(
-                    self.resolve_static_type_function_type_name(upper, depth + 1)
+                    self.resolve_static_type_function_type_name(upper, type_params, depth + 1)
                         .unwrap_or_else(|| upper.as_ref().clone()),
                 ),
             }),
@@ -3267,22 +3306,161 @@ impl<'semantic> Lowerer<'semantic> {
     fn select_bytecode_type_function(
         &self,
         name: &str,
-        arity: usize,
+        args: &[TypeName],
+        type_params: &[TypeParam],
     ) -> Option<&BytecodeTypeFunction> {
         self.type_functions
             .get(name)?
             .iter()
-            .find(|info| info.params.len() == arity)
+            .filter(|info| info.params.len() == args.len())
+            .filter_map(|info| {
+                self.bytecode_type_function_match_score(info, args, type_params)
+                    .map(|score| (info, score))
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(info, _)| info)
+    }
+
+    fn bytecode_type_function_match_score(
+        &self,
+        info: &BytecodeTypeFunction,
+        args: &[TypeName],
+        type_params: &[TypeParam],
+    ) -> Option<usize> {
+        info.params
+            .iter()
+            .zip(args)
+            .try_fold(0usize, |score, (param, arg)| {
+                Some(
+                    score
+                        + self.bytecode_type_function_param_match_score(param, arg, type_params)?,
+                )
+            })
+    }
+
+    fn bytecode_type_function_param_match_score(
+        &self,
+        param: &BytecodeTypeFunctionParam,
+        arg: &TypeName,
+        type_params: &[TypeParam],
+    ) -> Option<usize> {
+        if let Some(score) =
+            self.bytecode_type_constraint_match_score(&param.constraint, arg, type_params)
+        {
+            return Some(score);
+        }
+        let resolved_constraint =
+            self.resolve_static_type_function_type_name(&param.constraint, type_params, 0)?;
+        self.bytecode_type_constraint_match_score(&resolved_constraint, arg, type_params)
+    }
+
+    fn bytecode_type_constraint_match_score(
+        &self,
+        constraint: &TypeName,
+        arg: &TypeName,
+        type_params: &[TypeParam],
+    ) -> Option<usize> {
+        if constraint == arg {
+            return Some(0);
+        }
+        match constraint {
+            TypeName::Type => Some(32),
+            TypeName::TypeBounds { upper, .. } => self
+                .bytecode_type_constraint_match_score(upper, arg, type_params)
+                .map(|score| score + 4),
+            TypeName::Applied { name, args }
+                if matches!(
+                    name.as_str(),
+                    "subtype"
+                        | "castable_subtype"
+                        | "concrete_subtype"
+                        | "castable_concrete_subtype"
+                ) && args.len() == 1 =>
+            {
+                let expected = bytecode_type_constraint_payload_head(&args[0])?;
+                let actuals = self.bytecode_type_arg_runtime_heads(arg, type_params);
+                actuals
+                    .into_iter()
+                    .filter(|actual| self.runtime_type_head_satisfies(&actual, &expected))
+                    .map(|actual| {
+                        if runtime_names_match(&actual, &expected) {
+                            1
+                        } else {
+                            2
+                        }
+                    })
+                    .min()
+            }
+            _ => None,
+        }
+    }
+
+    fn bytecode_type_arg_runtime_heads(
+        &self,
+        arg: &TypeName,
+        type_params: &[TypeParam],
+    ) -> Vec<String> {
+        if let TypeName::Named(name) = arg
+            && let Some(param) = type_params.iter().find(|param| param.name == *name)
+        {
+            match &param.constraint {
+                TypeParamConstraint::Type => Vec::new(),
+                TypeParamConstraint::Subtype(parent) => {
+                    bytecode_type_constraint_payload_head(parent)
+                        .into_iter()
+                        .collect()
+                }
+                TypeParamConstraint::TypeBounds { upper, .. } => {
+                    bytecode_type_constraint_payload_head(upper)
+                        .into_iter()
+                        .collect()
+                }
+            }
+        } else {
+            bytecode_type_constraint_payload_head(arg)
+                .into_iter()
+                .collect()
+        }
+    }
+
+    fn runtime_type_head_satisfies(&self, actual: &str, expected: &str) -> bool {
+        if expected == "any" || runtime_names_match(actual, expected) {
+            return true;
+        }
+        let mut current = Some(actual.to_string());
+        while let Some(name) = current {
+            if runtime_names_match(&name, expected) {
+                return true;
+            }
+            if self.class_layouts.get(&name).is_some_and(|layout| {
+                layout
+                    .interfaces
+                    .iter()
+                    .any(|interface| self.runtime_type_head_satisfies(interface, expected))
+            }) {
+                return true;
+            }
+            current = self
+                .class_layouts
+                .get(&name)
+                .and_then(|layout| layout.base_class.clone());
+        }
+        self.interface_layouts.contains_key(actual)
+            && self
+                .interface_layouts
+                .get(actual)
+                .is_some_and(|_| runtime_names_match(actual, expected))
     }
 
     fn class_interface_names(
         &self,
         base: Option<&TypeAnnotation>,
         interfaces: &[TypeAnnotation],
+        type_params: &[TypeParam],
     ) -> Vec<String> {
         let mut names = Vec::new();
         if let Some(base_name) =
-            base.and_then(|annotation| self.type_annotation_aggregate_name(annotation))
+            base.and_then(|annotation| self.type_annotation_aggregate_name(annotation, type_params))
             && self.resolve_interface_layout(&base_name).is_some()
         {
             names.push(base_name);
@@ -3290,7 +3468,9 @@ impl<'semantic> Lowerer<'semantic> {
         names.extend(
             interfaces
                 .iter()
-                .filter_map(|annotation| self.type_annotation_aggregate_name(annotation))
+                .filter_map(|annotation| {
+                    self.type_annotation_aggregate_name(annotation, type_params)
+                })
                 .filter(|name| self.resolve_interface_layout(name).is_some()),
         );
         names
@@ -9779,6 +9959,22 @@ fn type_name_aggregate_head(type_name: &TypeName) -> Option<String> {
     }
 }
 
+fn bytecode_type_constraint_payload_head(type_name: &TypeName) -> Option<String> {
+    match type_name {
+        TypeName::Applied { name, args }
+            if matches!(
+                name.as_str(),
+                "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+            ) && args.len() == 1 =>
+        {
+            bytecode_type_constraint_payload_head(&args[0])
+        }
+        TypeName::TypeBounds { upper, .. } => bytecode_type_constraint_payload_head(upper),
+        TypeName::Named(name) | TypeName::Applied { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
 fn static_type_function_return_type(return_type: Option<&TypeAnnotation>) -> bool {
     return_type.is_some_and(|annotation| {
         matches!(
@@ -9788,11 +9984,12 @@ fn static_type_function_return_type(return_type: Option<&TypeAnnotation>) -> boo
     })
 }
 
-fn static_type_function_param(param: &Param) -> bool {
-    param
-        .annotation
-        .as_ref()
-        .is_some_and(|annotation| static_type_function_param_type_name(&annotation.name))
+fn bytecode_type_function_param(param: &Param) -> Option<BytecodeTypeFunctionParam> {
+    let annotation = param.annotation.as_ref()?;
+    static_type_function_param_type_name(&annotation.name).then(|| BytecodeTypeFunctionParam {
+        name: param.name.clone(),
+        constraint: annotation.name.clone(),
+    })
 }
 
 fn static_type_function_param_type_name(type_name: &TypeName) -> bool {

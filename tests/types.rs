@@ -1810,6 +1810,39 @@ Item.Read() + Item.Extra
 }
 
 #[test]
+fn evaluates_overloaded_type_function_class_parent_by_constraint_runtime_surface() {
+    let source = r#"
+base_item := class:
+    Base:int = 0
+
+other_item := class:
+    Other:int = 0
+
+base_box(t:subtype(base_item)) := class:
+    BaseValue:int = 0
+
+other_box(t:subtype(other_item)) := class:
+    OtherValue:int = 40
+    Read():int = OtherValue
+
+BoxOf(Kind:subtype(base_item)):type = base_box(Kind)
+BoxOf(Kind:subtype(other_item)):type = other_box(Kind)
+
+child_box(t:subtype(other_item)) := class(BoxOf(t)):
+    Extra:int = 2
+
+Item := child_box(other_item){}
+Item.Read() + Item.Extra
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_call_in_official_parametric_surface() {
     let source = r#"
 Payload():type = int
