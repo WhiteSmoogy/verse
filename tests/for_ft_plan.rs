@@ -138,8 +138,7 @@ Use()<transacts>:?[]int = option{
 }
 
 #[test]
-#[ignore = "planned `for` column: body control-flow effect integration"]
-fn planned_for_body_control_flow_effect_integration() {
+fn evaluates_for_body_control_flow_effect_integration() {
     assert_runtime_cases(&[
         (
             "return inside for body exits enclosing function",
