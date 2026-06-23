@@ -3868,6 +3868,12 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             let Some(annotation) = param.annotation.as_ref() else {
                 continue;
             };
+            if type_value_parameter_annotation(&annotation.name)
+                && let VmValue::Runtime(value) = arg
+                && let Some(type_name) = runtime_type_value_payload(value)
+            {
+                substitutions.insert(param.name.clone(), type_name);
+            }
             let capture_names = param
                 .type_params
                 .iter()
@@ -4745,6 +4751,31 @@ fn runtime_value_type_name(value: &Value) -> Option<TypeName> {
         Value::Type(type_name) => Some(type_name.clone()),
         Value::NativeFunction { .. } | Value::ExternalFunction { .. } => Some(TypeName::Function),
         _ => None,
+    }
+}
+
+fn runtime_type_value_payload(value: &Value) -> Option<TypeName> {
+    match value {
+        Value::Type(type_name)
+        | Value::Subtype(type_name)
+        | Value::CastableSubtype(type_name)
+        | Value::ConcreteSubtype(type_name) => Some(type_name.clone()),
+        Value::EnumType { name, .. }
+        | Value::StructType { name, .. }
+        | Value::ClassType { name, .. }
+        | Value::InterfaceType { name, .. } => Some(parse_runtime_type_name(name)),
+        _ => None,
+    }
+}
+
+fn type_value_parameter_annotation(type_name: &TypeName) -> bool {
+    match type_name {
+        TypeName::Type | TypeName::TypeBounds { .. } => true,
+        TypeName::Applied { name, .. } => matches!(
+            name.as_str(),
+            "subtype" | "castable_subtype" | "concrete_subtype" | "castable_concrete_subtype"
+        ),
+        _ => false,
     }
 }
 

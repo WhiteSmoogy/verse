@@ -364,6 +364,37 @@ Make() + 42
 }
 
 #[test]
+fn evaluates_external_function_dependent_type_value_return_runtime_surface() {
+    let source = r#"
+Pick(Kind:type):Kind = external {}
+Pick(int) + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
+fn evaluates_external_function_dependent_type_value_aggregate_return_runtime_surface() {
+    let source = r#"
+box(t:type) := class:
+    Value:t
+
+Pick(Kind:type):Kind = external {}
+Pick(box(int)).Value + 42
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_function_parameters_with_type_annotations() {
     let source = r#"
 Apply(F:type{_(:int):int}, Value:int):int = F(Value)
