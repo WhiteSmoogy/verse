@@ -1657,6 +1657,30 @@ Item.Stack.Evaluate(2) + StructItem.Stack.Evaluate(0)
 }
 
 #[test]
+fn evaluates_type_function_external_function_return_runtime_surface() {
+    let source = r#"
+ModifierOf(Item:type):type = modifier(Item)
+StackOf(Item:type):type = modifier_stack(Item)
+
+add := class(ModifierOf(int)):
+    Amount:int
+    Evaluate<override>(InValue:int):int =
+        InValue + Amount
+
+Make():StackOf(int) = external {}
+Stack := Make()
+Stack.AddModifier(add{Amount := 40}, 0)
+Stack.Evaluate(2)
+"#;
+
+    assert_eq!(eval(source), Value::Int(42));
+    assert_eq!(
+        check_source(source).expect("source should check"),
+        Type::Int
+    );
+}
+
+#[test]
 fn evaluates_type_function_official_event_result_archetype_surface() {
     let source = r#"
 EventOf(Payload:type):type = event(Payload)

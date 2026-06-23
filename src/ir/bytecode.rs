@@ -2249,6 +2249,7 @@ impl<'semantic> Lowerer<'semantic> {
                 let value = if let ExprKind::Function {
                     params,
                     effects,
+                    return_type,
                     body,
                     ..
                 } = &expr.kind
@@ -2257,6 +2258,7 @@ impl<'semantic> Lowerer<'semantic> {
                         Some(name.clone()),
                         params,
                         effects,
+                        return_type.as_ref(),
                         body,
                         state,
                         expr.span,
@@ -2352,6 +2354,7 @@ impl<'semantic> Lowerer<'semantic> {
                     Some("__verse_defer_body".to_string()),
                     &[],
                     &[],
+                    None,
                     body,
                     &state.imports,
                     &state.extensions,
@@ -2697,6 +2700,7 @@ impl<'semantic> Lowerer<'semantic> {
                 let value = if let ExprKind::Function {
                     params,
                     effects,
+                    return_type,
                     body,
                     ..
                 } = &expr.kind
@@ -2705,6 +2709,7 @@ impl<'semantic> Lowerer<'semantic> {
                         Some(qualified.clone()),
                         params,
                         effects,
+                        return_type.as_ref(),
                         body,
                         state,
                         expr.span,
@@ -3801,9 +3806,18 @@ impl<'semantic> Lowerer<'semantic> {
             ExprKind::Function {
                 params,
                 effects,
+                return_type,
                 body,
                 ..
-            } => self.emit_function_value(None, params, effects, body, state, expr.span),
+            } => self.emit_function_value(
+                None,
+                params,
+                effects,
+                return_type.as_ref(),
+                body,
+                state,
+                expr.span,
+            ),
             ExprKind::Var {
                 name, expr: value, ..
             } => self.lower_var_expression(name, value, state, expr.span),
@@ -4674,8 +4688,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> Result<(), UnsupportedBytecode> {
         let field_annotation = self.field_annotation_for_object(object, name, state);
         let (object, writebacks) = self.lower_field_object_for_writeback(object, state)?;
-        let right_source =
-            self.lower_annotated_field_value(field_annotation.as_ref(), expr, state)?;
+        let right_source = self.lower_annotated_value(field_annotation.as_ref(), expr, state)?;
         let value = match op {
             AssignOp::Assign => right_source,
             AssignOp::AddAssign
@@ -5605,7 +5618,7 @@ impl<'semantic> Lowerer<'semantic> {
         let field_annotation = self.field_annotation_for_object(object, name, state);
         let (object, writebacks) = self.lower_field_object_for_writeback(object, state)?;
         let (right_source, failure_jumps) =
-            self.lower_failable_annotated_field_value(field_annotation.as_ref(), expr, state)?;
+            self.lower_failable_annotated_value(field_annotation.as_ref(), expr, state)?;
         let value = match op {
             AssignOp::Assign => right_source,
             AssignOp::AddAssign
@@ -8274,7 +8287,7 @@ impl<'semantic> Lowerer<'semantic> {
         expr: &Expr,
         state: &mut ChunkState,
     ) -> Result<ValueOperand, UnsupportedBytecode> {
-        self.lower_annotated_field_value(field.annotation.as_ref(), expr, state)
+        self.lower_annotated_value(field.annotation.as_ref(), expr, state)
     }
 
     fn lower_archetype_field_value(
@@ -8289,10 +8302,10 @@ impl<'semantic> Lowerer<'semantic> {
             .iter()
             .find(|field| field.name == name)
             .and_then(|field| field.annotation.as_ref());
-        self.lower_annotated_field_value(annotation, expr, state)
+        self.lower_annotated_value(annotation, expr, state)
     }
 
-    fn lower_annotated_field_value(
+    fn lower_annotated_value(
         &mut self,
         annotation: Option<&TypeAnnotation>,
         expr: &Expr,
@@ -8309,7 +8322,7 @@ impl<'semantic> Lowerer<'semantic> {
         }
     }
 
-    fn lower_failable_annotated_field_value(
+    fn lower_failable_annotated_value(
         &mut self,
         annotation: Option<&TypeAnnotation>,
         expr: &Expr,
@@ -8901,6 +8914,7 @@ impl<'semantic> Lowerer<'semantic> {
         name: Option<String>,
         params: &[Param],
         effects: &[String],
+        return_type: Option<&TypeAnnotation>,
         body: &Expr,
         state: &mut ChunkState,
         span: Span,
@@ -8910,6 +8924,7 @@ impl<'semantic> Lowerer<'semantic> {
             name,
             params,
             effects,
+            return_type,
             body,
             &state.imports,
             &state.extensions,
@@ -8976,7 +8991,7 @@ impl<'semantic> Lowerer<'semantic> {
         effects: &[String],
         body: &Expr,
     ) -> Result<usize, UnsupportedBytecode> {
-        self.lower_function_with_context(name, params, effects, body, &[], &[], &[])
+        self.lower_function_with_context(name, params, effects, None, body, &[], &[], &[])
     }
 
     fn lower_task_function_with_context(
@@ -9150,6 +9165,7 @@ impl<'semantic> Lowerer<'semantic> {
         name: Option<String>,
         params: &[Param],
         effects: &[String],
+        return_type: Option<&TypeAnnotation>,
         body: &Expr,
         imports: &[String],
         extensions: &[ExtensionBinding],
@@ -9169,7 +9185,8 @@ impl<'semantic> Lowerer<'semantic> {
         self.install_captures(captures, &mut state, body.span);
         state.begin_defer_scope(body.span);
         let value = if decides {
-            let (value, mut failure_jumps) = self.lower_failable_expr(body, &mut state)?;
+            let (value, mut failure_jumps) =
+                self.lower_failable_annotated_value(return_type, body, &mut state)?;
             state.end_defer_scope(body.span);
             state.chunk.emit(Instruction::Return {
                 value,
@@ -9192,7 +9209,7 @@ impl<'semantic> Lowerer<'semantic> {
                 decides,
             );
         } else {
-            self.lower_expr(body, &mut state)?
+            self.lower_annotated_value(return_type, body, &mut state)?
         };
         state.end_defer_scope(body.span);
         state.chunk.emit(Instruction::Return {
