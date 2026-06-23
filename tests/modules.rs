@@ -3520,13 +3520,18 @@ box := class(reader(int)):
 Pair:pair(int) = external {}
 Stored:holder(int) = external {}
 Item:reader(int) = box{}
-Pair.Left + Stored.Get() + Stored.Value + Item.Read() + Item.Current
+Stored.Get()
+Pair.Left + Stored.Value + Item.Read() + Item.Current
 "#,
     );
     let entry = root.join("main.verse");
     assert_eq!(
         check_project_file(&entry).expect("digest-backed project should check"),
         Type::Int
+    );
+    assert_eq!(
+        run_project_file(&entry).expect("digest-backed project should run"),
+        Value::Int(42)
     );
 }
 

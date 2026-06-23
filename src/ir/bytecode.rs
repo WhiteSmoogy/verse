@@ -395,6 +395,12 @@ pub enum Constant {
         params: Vec<String>,
     },
     External(TypeName),
+    ExternalAggregate {
+        class_name: String,
+        unique: bool,
+        object_kind: ObjectKind,
+        fields: Vec<(String, bool, TypeName)>,
+    },
     ExternalReturn(TypeName),
     GlobalRef(String),
 }
@@ -1553,6 +1559,7 @@ enum BytecodeTypeFunctionParamConstraintMatch {
 #[derive(Debug, Clone)]
 struct ClassLayout {
     runtime_name: String,
+    type_params: Vec<String>,
     base_class: Option<String>,
     interfaces: Vec<String>,
     object_kind: ObjectKind,
@@ -1592,6 +1599,7 @@ struct EnumLayout {
 #[derive(Debug, Clone)]
 struct InterfaceLayout {
     runtime_name: String,
+    type_params: Vec<String>,
     fields: Vec<StructField>,
     methods: Vec<ClassMethod>,
 }
@@ -1610,6 +1618,7 @@ const BUILTIN_RUNTIME_CLASS_NAMES: &[&str] = &[
 fn builtin_class_layout(name: &str) -> ClassLayout {
     ClassLayout {
         runtime_name: name.to_string(),
+        type_params: Vec::new(),
         base_class: None,
         interfaces: Vec::new(),
         object_kind: ObjectKind::Class,
@@ -1652,6 +1661,7 @@ impl<'semantic> Lowerer<'semantic> {
             "locale".to_string(),
             ClassLayout {
                 runtime_name: "locale".to_string(),
+                type_params: Vec::new(),
                 base_class: None,
                 interfaces: Vec::new(),
                 object_kind: ObjectKind::Struct { computes: false },
@@ -1953,7 +1963,7 @@ impl<'semantic> Lowerer<'semantic> {
                             ObjectKind::Struct {
                                 computes: *computes,
                             },
-                            &[],
+                            params,
                             None,
                             &[],
                             fields.clone(),
@@ -2092,7 +2102,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
-                        &[],
+                        params,
                         None,
                         &[],
                         fields.clone(),
@@ -2549,7 +2559,7 @@ impl<'semantic> Lowerer<'semantic> {
                         ObjectKind::Struct {
                             computes: *computes,
                         },
-                        &[],
+                        params,
                         None,
                         &[],
                         fields.clone(),
@@ -2858,6 +2868,7 @@ impl<'semantic> Lowerer<'semantic> {
         let interface_names = self.class_interface_names(base, interfaces, type_params);
         let layout = ClassLayout {
             runtime_name: runtime_name.clone(),
+            type_params: type_params.iter().map(|param| param.name.clone()).collect(),
             base_class,
             interfaces: interface_names,
             object_kind,
@@ -2935,9 +2946,14 @@ impl<'semantic> Lowerer<'semantic> {
         } else {
             Vec::new()
         };
-        for interface_name in self.class_interface_names(base, interfaces, type_params) {
-            if let Some(interface) = self.resolve_interface_layout(&interface_name) {
-                merge_struct_fields(&mut layout_fields, interface.fields.clone());
+        if let Some(base) = base
+            && let Some(fields) = self.instantiated_interface_fields(base, type_params)
+        {
+            merge_struct_fields(&mut layout_fields, fields);
+        }
+        for interface in interfaces {
+            if let Some(fields) = self.instantiated_interface_fields(interface, type_params) {
+                merge_struct_fields(&mut layout_fields, fields);
             }
         }
         for field in fields {
@@ -2964,20 +2980,75 @@ impl<'semantic> Lowerer<'semantic> {
         let mut layout_fields = Vec::new();
         let mut layout_methods = Vec::new();
         for parent in parents {
-            if let Some(parent_name) = self.type_annotation_aggregate_name(parent, type_params)
-                && let Some(parent_layout) = self.resolve_interface_layout(&parent_name)
-            {
-                merge_struct_fields(&mut layout_fields, parent_layout.fields.clone());
-                layout_methods.extend(parent_layout.methods.clone());
+            if let Some(fields) = self.instantiated_interface_fields(parent, type_params) {
+                merge_struct_fields(&mut layout_fields, fields);
+            }
+            if let Some(methods) = self.instantiated_interface_methods(parent, type_params) {
+                layout_methods.extend(methods);
             }
         }
         merge_struct_fields(&mut layout_fields, fields);
         layout_methods.extend(methods);
         InterfaceLayout {
             runtime_name,
+            type_params: type_params.iter().map(|param| param.name.clone()).collect(),
             fields: layout_fields,
             methods: layout_methods,
         }
+    }
+
+    fn instantiated_interface_fields(
+        &self,
+        annotation: &TypeAnnotation,
+        type_params: &[TypeParam],
+    ) -> Option<Vec<StructField>> {
+        let (layout, substitutions) = self.interface_annotation_layout(annotation, type_params)?;
+        Some(
+            layout
+                .fields
+                .iter()
+                .map(|field| substitute_struct_field_params(field, &substitutions))
+                .collect(),
+        )
+    }
+
+    fn instantiated_interface_methods(
+        &self,
+        annotation: &TypeAnnotation,
+        type_params: &[TypeParam],
+    ) -> Option<Vec<ClassMethod>> {
+        let (layout, substitutions) = self.interface_annotation_layout(annotation, type_params)?;
+        Some(
+            layout
+                .methods
+                .iter()
+                .map(|method| substitute_class_method_params(method, &substitutions))
+                .collect(),
+        )
+    }
+
+    fn interface_annotation_layout(
+        &self,
+        annotation: &TypeAnnotation,
+        type_params: &[TypeParam],
+    ) -> Option<(&InterfaceLayout, HashMap<String, TypeName>)> {
+        let type_name = self
+            .resolve_static_type_function_type_name(&annotation.name, type_params, 0)
+            .unwrap_or_else(|| annotation.name.clone());
+        let (name, args) = aggregate_type_name_parts(&type_name)?;
+        let layout = self.resolve_interface_layout(&name).or_else(|| {
+            let erased = erase_parametric_instance_name(&name);
+            (erased != name.as_str())
+                .then(|| self.resolve_interface_layout(erased))
+                .flatten()
+        })?;
+        let substitutions = layout
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args)
+            .collect::<HashMap<_, _>>();
+        Some((layout, substitutions))
     }
 
     fn register_class_layout(
@@ -3020,11 +3091,19 @@ impl<'semantic> Lowerer<'semantic> {
         } else {
             Vec::new()
         };
-        let interface_default_methods = self
-            .class_interface_names(base, interfaces, type_params)
+        let mut interface_default_methods = Vec::new();
+        if let Some(base) = base
+            && let Some(methods) = self.instantiated_interface_methods(base, type_params)
+        {
+            interface_default_methods.extend(methods);
+        }
+        for interface in interfaces {
+            if let Some(methods) = self.instantiated_interface_methods(interface, type_params) {
+                interface_default_methods.extend(methods);
+            }
+        }
+        let interface_default_methods = interface_default_methods
             .into_iter()
-            .filter_map(|interface_name| self.resolve_interface_layout(&interface_name))
-            .flat_map(|interface| interface.methods.clone())
             .filter(|method| method.body.is_some())
             .collect::<Vec<_>>();
         for method in interface_default_methods {
@@ -3113,6 +3192,7 @@ impl<'semantic> Lowerer<'semantic> {
         };
         let layout = ClassLayout {
             runtime_name: runtime_name.clone(),
+            type_params: type_param_names.clone(),
             base_class: base_class_name.clone(),
             interfaces: interface_names,
             object_kind: ObjectKind::Class,
@@ -3728,7 +3808,11 @@ impl<'semantic> Lowerer<'semantic> {
             state.define_extension(extension.clone());
         }
         if decides {
-            let (value, mut failure_jumps) = self.lower_failable_expr(body, &mut state)?;
+            let (value, mut failure_jumps) = self.lower_failable_annotated_return_value(
+                method.return_type.as_ref(),
+                body,
+                &mut state,
+            )?;
             state.chunk.emit(Instruction::Return {
                 value,
                 span: body.span,
@@ -3749,7 +3833,8 @@ impl<'semantic> Lowerer<'semantic> {
             );
         }
 
-        let value = self.lower_expr(body, &mut state)?;
+        let value =
+            self.lower_annotated_return_value(method.return_type.as_ref(), body, &mut state)?;
         state.chunk.emit(Instruction::Return {
             value,
             span: body.span,
@@ -4313,10 +4398,59 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> ValueOperand {
-        let source = state.constant(Constant::External(value_type));
+        let constant = self
+            .external_aggregate_constant(&value_type, state)
+            .unwrap_or(Constant::External(value_type));
+        let source = state.constant(constant);
         let dest = state.allocate_register(span);
         state.chunk.emit(Instruction::Move { dest, source, span });
         ValueOperand::Register(dest)
+    }
+
+    fn external_aggregate_constant(
+        &self,
+        value_type: &TypeName,
+        state: &ChunkState,
+    ) -> Option<Constant> {
+        let (name, args) = aggregate_type_name_parts(value_type)?;
+        if args.is_empty() {
+            return None;
+        }
+        let layout = self.resolve_class_layout(&name, state).or_else(|| {
+            let erased = erase_parametric_instance_name(&name);
+            (erased != name.as_str())
+                .then(|| self.resolve_class_layout(erased, state))
+                .flatten()
+        })?;
+        let substitutions = layout
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let fields = layout
+            .fields
+            .iter()
+            .map(|field| {
+                let field_type = field
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| annotation.name.clone())
+                    .unwrap_or(TypeName::Any);
+                let field_type = substitute_bytecode_type_name_params(&field_type, &substitutions)
+                    .unwrap_or(field_type);
+                let field_type = self
+                    .resolve_static_type_function_type_name(&field_type, &[], 0)
+                    .unwrap_or(field_type);
+                (field.name.clone(), field.mutable, field_type)
+            })
+            .collect();
+        Some(Constant::ExternalAggregate {
+            class_name: layout.runtime_name.clone(),
+            unique: layout.unique,
+            object_kind: layout.object_kind,
+            fields,
+        })
     }
 
     fn emit_external_return(
@@ -4325,7 +4459,10 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) -> ValueOperand {
-        let source = state.constant(Constant::ExternalReturn(value_type));
+        let constant = self
+            .external_aggregate_constant(&value_type, state)
+            .unwrap_or(Constant::ExternalReturn(value_type));
+        let source = state.constant(constant);
         let dest = state.allocate_register(span);
         state.chunk.emit(Instruction::Move { dest, source, span });
         ValueOperand::Register(dest)
@@ -10531,6 +10668,55 @@ fn substitute_bytecode_type_name_params(
     }
 }
 
+fn substitute_type_annotation_params(
+    annotation: &TypeAnnotation,
+    substitutions: &HashMap<String, TypeName>,
+) -> TypeAnnotation {
+    TypeAnnotation {
+        name: substitute_bytecode_type_name_params(&annotation.name, substitutions)
+            .unwrap_or_else(|| annotation.name.clone()),
+        span: annotation.span,
+    }
+}
+
+fn substitute_struct_field_params(
+    field: &StructField,
+    substitutions: &HashMap<String, TypeName>,
+) -> StructField {
+    let mut field = field.clone();
+    field.annotation = field
+        .annotation
+        .as_ref()
+        .map(|annotation| substitute_type_annotation_params(annotation, substitutions));
+    field
+}
+
+fn substitute_param_params(param: &Param, substitutions: &HashMap<String, TypeName>) -> Param {
+    let mut param = param.clone();
+    param.annotation = param
+        .annotation
+        .as_ref()
+        .map(|annotation| substitute_type_annotation_params(annotation, substitutions));
+    param
+}
+
+fn substitute_class_method_params(
+    method: &ClassMethod,
+    substitutions: &HashMap<String, TypeName>,
+) -> ClassMethod {
+    let mut method = method.clone();
+    method.params = method
+        .params
+        .iter()
+        .map(|param| substitute_param_params(param, substitutions))
+        .collect();
+    method.return_type = method
+        .return_type
+        .as_ref()
+        .map(|annotation| substitute_type_annotation_params(annotation, substitutions));
+    method
+}
+
 fn function_return_class_name(return_type: Option<&TypeAnnotation>, body: &Expr) -> Option<String> {
     return_type
         .and_then(type_annotation_class_name)
@@ -10663,15 +10849,109 @@ fn parse_parametric_instance_name(name: &str) -> Option<(String, Vec<String>)> {
     ))
 }
 
+fn aggregate_type_name_parts(type_name: &TypeName) -> Option<(String, Vec<TypeName>)> {
+    match type_name {
+        TypeName::Applied { name, args } => Some((name.clone(), args.clone())),
+        TypeName::Named(name) => parse_parametric_instance_name(name)
+            .map(|(head, args)| {
+                (
+                    head,
+                    args.iter()
+                        .map(|arg| parse_runtime_type_name(arg))
+                        .collect(),
+                )
+            })
+            .or_else(|| Some((name.clone(), Vec::new()))),
+        _ => None,
+    }
+}
+
+fn parse_runtime_type_name(name: &str) -> TypeName {
+    let name = name.trim();
+    if let Some(item) = name.strip_prefix('?').filter(|item| !item.is_empty()) {
+        return TypeName::Option(Box::new(parse_runtime_type_name(item)));
+    }
+    if let Some(item) = angle_wrapped_runtime_type(name, "array") {
+        return if item == "unknown" {
+            TypeName::Array(None)
+        } else {
+            TypeName::Array(Some(Box::new(parse_runtime_type_name(item))))
+        };
+    }
+    if let Some(items) = angle_wrapped_runtime_type(name, "map") {
+        let items = split_parametric_instance_args(items);
+        if let [key, value] = items.as_slice() {
+            return TypeName::Map(
+                Box::new(parse_runtime_type_name(key)),
+                Box::new(parse_runtime_type_name(value)),
+            );
+        }
+    }
+    if let Some(items) = angle_wrapped_runtime_type(name, "weak_map") {
+        let items = split_parametric_instance_args(items);
+        if let [key, value] = items.as_slice() {
+            return TypeName::WeakMap(
+                Box::new(parse_runtime_type_name(key)),
+                Box::new(parse_runtime_type_name(value)),
+            );
+        }
+    }
+    if let Some(items) = paren_wrapped_runtime_type(name, "tuple") {
+        return TypeName::Tuple(
+            split_parametric_instance_args(items)
+                .into_iter()
+                .map(parse_runtime_type_name)
+                .collect(),
+        );
+    }
+    if let Some(items) = paren_wrapped_runtime_type(name, "type") {
+        let items = split_parametric_instance_args(items);
+        if let [lower, upper] = items.as_slice() {
+            return TypeName::TypeBounds {
+                lower: Box::new(parse_runtime_type_name(lower)),
+                upper: Box::new(parse_runtime_type_name(upper)),
+            };
+        }
+    }
+    if let Some((head, args)) = parse_parametric_instance_name(name) {
+        return TypeName::Applied {
+            name: head,
+            args: args
+                .iter()
+                .map(|arg| parse_runtime_type_name(arg))
+                .collect(),
+        };
+    }
+    TypeName::parse(name.to_string())
+}
+
+fn angle_wrapped_runtime_type<'a>(name: &'a str, head: &str) -> Option<&'a str> {
+    name.strip_prefix(head)
+        .and_then(|rest| rest.strip_prefix('<'))
+        .and_then(|rest| rest.strip_suffix('>'))
+}
+
+fn paren_wrapped_runtime_type<'a>(name: &'a str, head: &str) -> Option<&'a str> {
+    name.strip_prefix(head)
+        .and_then(|rest| rest.strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'))
+}
+
 fn split_parametric_instance_args(args: &str) -> Vec<&str> {
     let mut items = Vec::new();
-    let mut depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut brace_depth = 0usize;
     let mut start = 0usize;
     for (index, ch) in args.char_indices() {
         match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && angle_depth == 0 && brace_depth == 0 => {
                 items.push(args[start..index].trim());
                 start = index + ch.len_utf8();
             }

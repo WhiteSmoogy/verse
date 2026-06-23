@@ -4429,6 +4429,37 @@ fn value_from_constant(constant: &Constant) -> VmValue {
             })
         }
         Constant::External(type_name) => VmValue::Runtime(bytecode_external_value(type_name)),
+        Constant::ExternalAggregate {
+            class_name,
+            unique,
+            object_kind,
+            fields,
+        } => match object_kind {
+            ObjectKind::Class => VmValue::Runtime(bytecode_class_instance_value(
+                class_name.clone(),
+                *unique,
+                fields
+                    .iter()
+                    .map(|(name, mutable, type_name)| {
+                        (
+                            name.clone(),
+                            *mutable,
+                            bytecode_external_return_value(type_name),
+                        )
+                    })
+                    .collect(),
+            )),
+            ObjectKind::Struct { computes } => VmValue::Runtime(Value::StructInstance {
+                struct_name: class_name.clone(),
+                computes: *computes,
+                fields: fields
+                    .iter()
+                    .map(|(name, _, type_name)| {
+                        (name.clone(), bytecode_external_return_value(type_name))
+                    })
+                    .collect(),
+            }),
+        },
         Constant::ExternalReturn(type_name) => {
             VmValue::Runtime(bytecode_external_return_value(type_name))
         }
