@@ -1,6 +1,6 @@
 [package]
 name = "verse-rs"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A Rust compiler and bytecode VM for a Verse-aligned language subset."
 license = "MIT"
