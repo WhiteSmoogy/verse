@@ -21,10 +21,14 @@ pub(super) fn expect_number(value: &Value, context: &str, span: Span) -> Result<
     }
 }
 
-pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result<i128, VerseError> {
+pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result<i64, VerseError> {
     match runtime_number(value) {
         Some(RuntimeNumber::Int(value)) => Ok(value),
-        Some(RuntimeNumber::Rational(value)) if value.is_integer() => Ok(value.numerator),
+        Some(RuntimeNumber::Rational(value)) if value.is_integer() => {
+            i64::try_from(value.numerator).map_err(|_| {
+                VerseError::runtime_at(format!("{context} integer is outside int64 range"), span)
+            })
+        }
         Some(number) => {
             let number = runtime_number_to_f64(number);
             if number.fract() != 0.0 {
@@ -33,7 +37,13 @@ pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result
                     span,
                 ));
             }
-            Ok(number as i128)
+            if number < i64::MIN as f64 || number >= I64_MAX_EXCLUSIVE_AS_F64 {
+                return Err(VerseError::runtime_at(
+                    format!("{context} integer is outside int64 range"),
+                    span,
+                ));
+            }
+            Ok(number as i64)
         }
         None => Err(VerseError::runtime_at(
             format!("{context} expected integer, got {value}"),
@@ -42,15 +52,15 @@ pub(super) fn expect_integer(value: &Value, context: &str, span: Span) -> Result
     }
 }
 
+const I64_MAX_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+
 pub(super) fn expect_index_integer(
     value: &Value,
     context: &str,
     span: Span,
 ) -> Result<i64, VerseError> {
     match value {
-        Value::Int(value) => i64::try_from(*value).map_err(|_| {
-            VerseError::runtime_at(format!("{context} expected index in int64 range"), span)
-        }),
+        Value::Int(value) => Ok(*value),
         _ => Err(VerseError::runtime_at(
             format!("{context} expected int, got {value}"),
             span,

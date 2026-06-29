@@ -1,6 +1,6 @@
 [package]
 name = "verse-rs-macros"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Procedural macros for verse-rs native API bindings."
 license = "MIT"
@@ -8,3 +8,6 @@ repository = "https://github.com/WhiteSmoogy/verse"
 
 [lib]
 proc-macro = true
+
+[dependencies]
+verse-rs = { version = "0.1.2", path = ".." }

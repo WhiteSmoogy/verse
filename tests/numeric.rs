@@ -13,7 +13,7 @@ fn evaluates_arithmetic_with_precedence() {
 fn preserves_i64_max_integer_precision() {
     let source = "9223372036854775807 + 0";
 
-    assert_eq!(eval(source), Value::Int(i128::from(i64::MAX)));
+    assert_eq!(eval(source), Value::Int(i64::MAX));
     assert_eq!(
         check_source(source).expect("source should check"),
         Type::Int
@@ -38,7 +38,7 @@ str(ModValue) + ":" + str(QuotientA) + ":" + str(QuotientB) + ":" + str(Clamp(12
 
 #[test]
 fn evaluates_official_numeric_helper_runtime_value_types() {
-    fn expect_int(source: &str, expected: i128) {
+    fn expect_int(source: &str, expected: i64) {
         match eval(source) {
             Value::Int(actual) => assert_eq!(actual, expected),
             other => panic!("expected int {expected}, got {other:?}"),

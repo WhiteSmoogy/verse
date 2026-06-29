@@ -11,8 +11,19 @@ impl Checker {
 
     fn check_expr_inner(&mut self, expr: &Expr) -> Result<Type, VerseError> {
         match &expr.kind {
-            ExprKind::Number { kind, .. } => match kind {
-                NumberKind::Int => Ok(Type::Int),
+            ExprKind::Number { value, kind } => match kind {
+                NumberKind::Int => {
+                    let NumberLiteral::Int(value) = value else {
+                        unreachable!("int number kind should carry int literal")
+                    };
+                    int_literal_value_to_i64(*value, false).ok_or_else(|| {
+                        VerseError::check_at(
+                            "integer literal is outside the 64-bit signed range",
+                            expr.span,
+                        )
+                    })?;
+                    Ok(Type::Int)
+                }
                 NumberKind::Float => Ok(Type::Float),
             },
             ExprKind::Char { kind, .. } => match kind {
@@ -2793,21 +2804,50 @@ impl Checker {
 
     fn type_literal_expr_to_type_name(&self, expr: &Expr) -> Result<TypeName, VerseError> {
         match &expr.kind {
-            ExprKind::Number { kind, .. } => match kind {
-                NumberKind::Int => Ok(TypeName::Int),
+            ExprKind::Number { value, kind } => match kind {
+                NumberKind::Int => {
+                    let NumberLiteral::Int(value) = value else {
+                        unreachable!("int number kind should carry int literal")
+                    };
+                    int_literal_value_to_i64(*value, false).ok_or_else(|| {
+                        VerseError::check_at(
+                            "integer literal is outside the 64-bit signed range",
+                            expr.span,
+                        )
+                    })?;
+                    Ok(TypeName::Int)
+                }
                 NumberKind::Float => Ok(TypeName::Float),
             },
             ExprKind::Unary {
-                op: UnaryOp::Positive | UnaryOp::Negate,
+                op: op @ (UnaryOp::Positive | UnaryOp::Negate),
                 expr: inner,
-            } => match self.type_literal_expr_to_type_name(inner)? {
-                TypeName::Int => Ok(TypeName::Int),
-                TypeName::Float => Ok(TypeName::Float),
-                _ => Err(VerseError::check_at(
-                    "static type literal sign can only be applied to a number",
-                    expr.span,
-                )),
-            },
+            } => {
+                if let ExprKind::Number {
+                    value: NumberLiteral::Int(value),
+                    kind: NumberKind::Int,
+                } = &inner.kind
+                {
+                    int_literal_value_to_i64(*value, matches!(op, UnaryOp::Negate)).ok_or_else(
+                        || {
+                            VerseError::check_at(
+                                "integer literal is outside the 64-bit signed range",
+                                expr.span,
+                            )
+                        },
+                    )?;
+                    return Ok(TypeName::Int);
+                }
+
+                match self.type_literal_expr_to_type_name(inner)? {
+                    TypeName::Int => Ok(TypeName::Int),
+                    TypeName::Float => Ok(TypeName::Float),
+                    _ => Err(VerseError::check_at(
+                        "static type literal sign can only be applied to a number",
+                        expr.span,
+                    )),
+                }
+            }
             ExprKind::Char { kind, .. } => match kind {
                 CharacterKind::Char => Ok(TypeName::Char),
                 CharacterKind::Char32 => Ok(TypeName::Char32),
@@ -6432,6 +6472,21 @@ impl Checker {
     }
 
     pub(super) fn check_unary(&mut self, op: UnaryOp, expr: &Expr) -> Result<Type, VerseError> {
+        if matches!(op, UnaryOp::Positive | UnaryOp::Negate)
+            && let ExprKind::Number {
+                value: NumberLiteral::Int(value),
+                kind: NumberKind::Int,
+            } = &expr.kind
+        {
+            int_literal_value_to_i64(*value, matches!(op, UnaryOp::Negate)).ok_or_else(|| {
+                VerseError::check_at(
+                    "integer literal is outside the 64-bit signed range",
+                    expr.span,
+                )
+            })?;
+            return Ok(Type::Int);
+        }
+
         let value = self.check_expr(expr)?;
         match op {
             UnaryOp::Positive => {

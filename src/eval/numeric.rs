@@ -29,9 +29,9 @@ impl RationalValue {
         }
     }
 
-    pub(crate) fn from_int(value: i128) -> Self {
+    pub(crate) fn from_int(value: impl Into<i128>) -> Self {
         Self {
-            numerator: value,
+            numerator: value.into(),
             denominator: 1,
         }
     }
@@ -97,7 +97,7 @@ impl fmt::Display for RationalValue {
 
 #[derive(Clone, Copy)]
 pub(super) enum RuntimeNumber {
-    Int(i128),
+    Int(i64),
     Float(f64),
     Rational(RationalValue),
 }
@@ -141,7 +141,11 @@ pub(super) fn numeric_values_equal(left: &Value, right: &Value) -> Option<bool> 
 
 pub(crate) fn rational_or_int(value: RationalValue) -> Value {
     if value.is_integer() {
-        Value::Int(value.numerator)
+        if let Ok(value) = i64::try_from(value.numerator) {
+            Value::Int(value)
+        } else {
+            Value::Rational(value)
+        }
     } else {
         Value::Rational(value)
     }

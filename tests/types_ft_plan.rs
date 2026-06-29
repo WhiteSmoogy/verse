@@ -42,45 +42,52 @@ fn assert_check_rejects(cases: &[(&str, &str, &str)]) {
 }
 
 #[test]
-fn evaluates_types_column_arbitrary_precision_numeric_runtime() {
-    assert_runtime_string_cases(&[
+fn evaluates_types_column_i64_numeric_runtime() {
+    for (name, source, expected_message) in [
         (
-            "big integer addition crosses i64 max",
-            "ToString(9223372036854775807 + 1)",
+            "integer addition crossing i64 max overflows",
+            "9223372036854775807 + 1",
+            "integer overflow",
+        ),
+        (
+            "integer multiplication crossing i64 max overflows",
+            "3037000500 * 3037000500",
+            "integer overflow",
+        ),
+    ] {
+        let error = run_source(source).expect_err(name);
+        assert!(
+            error.to_string().contains(expected_message),
+            "{name}: expected error containing `{expected_message}`, got {error}"
+        );
+    }
+
+    assert_check_rejects(&[
+        (
+            "integer literal above i64 max is rejected",
             "9223372036854775808",
+            "outside the 64-bit signed range",
         ),
         (
-            "big integer multiplication remains exact",
-            "ToString(3037000500 * 3037000500)",
-            "9223372037000250000",
-        ),
-        (
-            "big rational numerator reduces exactly",
-            r#"
-if:
-    Half := 9223372036854775808 / 2
-    Half = 4611686018427387904
-then:
-    "ok"
-else:
-    "bad"
-"#,
-            "ok",
-        ),
-        (
-            "minimum i128 rational numerator reduces exactly",
-            r#"
-if:
-    Half := (-170141183460469231731687303715884105727 - 1) / 2
-    Half = -85070591730234615865843651857942052864
-then:
-    "ok"
-else:
-    "bad"
-"#,
-            "ok",
+            "integer literal below i64 min is rejected",
+            "-9223372036854775809",
+            "outside the 64-bit signed range",
         ),
     ]);
+
+    assert_runtime_string_cases(&[(
+        "i64 rational numerator reduces exactly",
+        r#"
+if:
+    Half := 9223372036854775806 / 2
+    Half = 4611686018427387903
+then:
+    "ok"
+else:
+    "bad"
+"#,
+        "ok",
+    )]);
 }
 
 #[test]

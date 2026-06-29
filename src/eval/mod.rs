@@ -114,7 +114,7 @@ pub(crate) fn with_stable_runtime_epoch<T>(
 
 #[derive(Clone)]
 pub enum Value {
-    Int(i128),
+    Int(i64),
     Float(f64),
     Rational(RationalValue),
     Char(char),
@@ -1114,7 +1114,7 @@ fn eval_array_method(
                 .iter()
                 .position(|item| item == &needle)
                 .ok_or_else(|| VerseError::runtime_at("`Find` failed: element not found", span))?;
-            Ok(Value::Int(index as i128))
+            Ok(Value::Int(index as i64))
         }
         "RemoveFirstElement" => {
             let [needle]: [Value; 1] = args.try_into().map_err(|args: Vec<Value>| {
@@ -1282,7 +1282,7 @@ fn eval_array_method_failable(
             Ok(items
                 .iter()
                 .position(|item| item == &needle)
-                .map(|index| Value::Int(index as i128)))
+                .map(|index| Value::Int(index as i64)))
         }
         "RemoveFirstElement" => {
             let [needle]: [Value; 1] = args.try_into().map_err(|args: Vec<Value>| {
@@ -2184,7 +2184,7 @@ fn runtime_event_payload_matches(value: &Value, payload: &TypeName) -> bool {
         TypeName::Type | TypeName::TypeBounds { .. } => runtime_value_is_type_value(value),
         TypeName::Int => matches!(value, Value::Int(_)),
         TypeName::IntRange { min, max } => {
-            matches!(value, Value::Int(value) if i128::from(*min) <= *value && *value <= i128::from(*max))
+            matches!(value, Value::Int(value) if *min <= *value && *value <= *max)
         }
         TypeName::Float => matches!(value, Value::Int(_) | Value::Float(_)),
         TypeName::FloatRange(range) => match value {
@@ -3461,40 +3461,55 @@ fn verse_float_order(left: &f64, right: &f64) -> std::cmp::Ordering {
     }
 }
 
-fn float_integer_result(value: f64, context: &str, span: Span) -> Result<i128, VerseError> {
+fn float_integer_result(value: f64, context: &str, span: Span) -> Result<i64, VerseError> {
     if !value.is_finite() {
         return Err(VerseError::runtime_at(
             format!("{context} expected a finite value"),
             span,
         ));
     }
-    const I128_MAX_EXCLUSIVE_AS_F64: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
-    if value < i128::MIN as f64 || value >= I128_MAX_EXCLUSIVE_AS_F64 {
+    const I64_MAX_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+    if value < i64::MIN as f64 || value >= I64_MAX_EXCLUSIVE_AS_F64 {
         return Err(VerseError::runtime_at(
             format!("{context} result is outside int range"),
             span,
         ));
     }
-    Ok(value as i128)
+    Ok(value as i64)
 }
 
-fn rational_floor_to_int(value: RationalValue) -> i128 {
-    value.numerator.div_euclid(value.denominator)
+fn rational_floor_to_int(
+    value: RationalValue,
+    context: &str,
+    span: Span,
+) -> Result<i64, VerseError> {
+    i64::try_from(value.numerator.div_euclid(value.denominator))
+        .map_err(|_| VerseError::runtime_at(format!("{context} result is outside int range"), span))
 }
 
-fn rational_ceil_to_int(value: RationalValue) -> i128 {
-    let floor = rational_floor_to_int(value);
+fn rational_ceil_to_int(
+    value: RationalValue,
+    context: &str,
+    span: Span,
+) -> Result<i64, VerseError> {
+    let floor = value.numerator.div_euclid(value.denominator);
     if value.numerator.rem_euclid(value.denominator) == 0 {
-        floor
+        i64::try_from(floor).map_err(|_| {
+            VerseError::runtime_at(format!("{context} result is outside int range"), span)
+        })
     } else {
-        floor + 1
+        i64::try_from(floor + 1).map_err(|_| {
+            VerseError::runtime_at(format!("{context} result is outside int range"), span)
+        })
     }
 }
 
 fn native_ceil(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError> {
     let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
     if let Some(RuntimeNumber::Rational(value)) = runtime_number(&value) {
-        return Ok(NativeResult::Value(Value::Int(rational_ceil_to_int(value))));
+        return Ok(NativeResult::Value(Value::Int(rational_ceil_to_int(
+            value, "`Ceil`", span,
+        )?)));
     }
     let value = expect_number(&value, "`Ceil` value", span)?;
     if !value.is_finite() {
@@ -3511,8 +3526,8 @@ fn native_floor(args: Vec<Value>, span: Span) -> Result<NativeResult, VerseError
     let [value]: [Value; 1] = args.try_into().expect("arity checked by caller");
     if let Some(RuntimeNumber::Rational(value)) = runtime_number(&value) {
         return Ok(NativeResult::Value(Value::Int(rational_floor_to_int(
-            value,
-        ))));
+            value, "`Floor`", span,
+        )?)));
     }
     let value = expect_number(&value, "`Floor` value", span)?;
     if !value.is_finite() {

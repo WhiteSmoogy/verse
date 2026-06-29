@@ -453,7 +453,7 @@ impl BytecodeChunk {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
-    Int(i128),
+    Int(i64),
     Float(f64),
     Char {
         value: char,
@@ -4887,16 +4887,13 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
         span: Span,
     ) {
-        let begin_row = state.constant(Constant::Int(i128::from(span_position(span.line))));
-        let begin_column = state.constant(Constant::Int(i128::from(span_position(span.column))));
-        let end_row = state.constant(Constant::Int(i128::from(span_position(span.line))));
-        let end_column = state.constant(Constant::Int(
-            span_position(
-                span.column
-                    .saturating_add(span.end.saturating_sub(span.start)),
-            )
-            .into(),
-        ));
+        let begin_row = state.constant(Constant::Int(span_position(span.line)));
+        let begin_column = state.constant(Constant::Int(span_position(span.column)));
+        let end_row = state.constant(Constant::Int(span_position(span.line)));
+        let end_column = state.constant(Constant::Int(span_position(
+            span.column
+                .saturating_add(span.end.saturating_sub(span.start)),
+        )));
         state.chunk.emit(Instruction::EndProfileBlock {
             wall_time_start: ValueOperand::Register(wall_time_start),
             user_tag,
@@ -8788,9 +8785,9 @@ impl<'semantic> Lowerer<'semantic> {
         Ok(Some(self.emit_native_call(
             "MakeColorFromSRGBValues",
             vec![
-                state.constant(Constant::Int(i128::from(color.red))),
-                state.constant(Constant::Int(i128::from(color.green))),
-                state.constant(Constant::Int(i128::from(color.blue))),
+                state.constant(Constant::Int(i64::from(color.red))),
+                state.constant(Constant::Int(i64::from(color.green))),
+                state.constant(Constant::Int(i64::from(color.blue))),
             ],
             state,
             span,
@@ -9529,7 +9526,7 @@ impl<'semantic> Lowerer<'semantic> {
         state: &mut ChunkState,
     ) -> ValueOperand {
         let dest = state.allocate_register(span);
-        let index = state.constant(Constant::Int(index as i128));
+        let index = state.constant(Constant::Int(index as i64));
         state.chunk.emit(Instruction::Call {
             dest,
             callee: tuple,
@@ -12149,10 +12146,7 @@ fn lower_constant_expr(expr: &Expr) -> Result<Option<Constant>, UnsupportedBytec
             let Some(Constant::Int(end)) = lower_constant_expr(right)? else {
                 return Ok(None);
             };
-            Ok(Some(Constant::Range {
-                start: i64::try_from(start).map_err(|_| UnsupportedBytecode)?,
-                end: i64::try_from(end).map_err(|_| UnsupportedBytecode)?,
-            }))
+            Ok(Some(Constant::Range { start, end }))
         }
         _ => Ok(None),
     }
@@ -12163,7 +12157,9 @@ fn lower_number_literal(
     kind: NumberKind,
 ) -> Result<Constant, UnsupportedBytecode> {
     match (value, kind) {
-        (NumberLiteral::Int(value), NumberKind::Int) => Ok(Constant::Int(value)),
+        (NumberLiteral::Int(value), NumberKind::Int) => Ok(Constant::Int(
+            i64::try_from(value).map_err(|_| UnsupportedBytecode)?,
+        )),
         (NumberLiteral::Float(value), NumberKind::Float) => Ok(Constant::Float(value)),
         (NumberLiteral::Int(value), NumberKind::Float) => Ok(Constant::Float(value as f64)),
         (NumberLiteral::Float(value), NumberKind::Int) => Ok(Constant::Float(value)),

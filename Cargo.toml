@@ -1,6 +1,6 @@
 [package]
 name = "verse-rs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A Rust compiler and bytecode VM for a Verse-aligned language subset."
 license = "MIT"
@@ -9,7 +9,6 @@ repository = "https://github.com/WhiteSmoogy/verse"
 [dependencies]
 rand = "0.8"
 tokio = { version = "1", optional = true, features = ["rt", "time"] }
-verse-rs-macros = { version = "0.1.0", path = "verse-rs-macros" }
 
 [features]
 default = ["tokio-host"]

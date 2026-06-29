@@ -39,8 +39,8 @@ pub use ir::{
 };
 pub use native::{
     FromNativeValue, InjectedNativeApi, InjectedNativeFunction, IntoNativeValue, NativeApiBundle,
-    NativeCallContext, NativeCallResult, NativeError, NativeFunctionSignature, NativeRegistry,
-    NativeRegistryBuilder, NativeResult,
+    NativeCallContext, NativeCallResult, NativeError, NativeFunctionSignature, NativeInt,
+    NativeRegistry, NativeRegistryBuilder, NativeResult,
 };
 pub use parser::parse_source;
 pub use pipeline::{
@@ -61,5 +61,3 @@ pub use syntax::VstProgram;
 pub fn run_source(source: &str) -> Result<Value, VerseError> {
     pipeline::run_source(source)
 }
-
-pub use verse_rs_macros::native_api;

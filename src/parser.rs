@@ -373,10 +373,19 @@ impl Parser {
         self.consume_lparen("expected `(` after function name")?;
         let params = self.parse_param_list()?;
         effects.extend(self.parse_effect_specifiers()?);
+        let signature_end = self.previous_span();
         let return_type = self.parse_optional_type_annotation()?;
-        let definition_span =
-            self.consume_definition_operator("expected `=` or `:=` after function signature")?;
-        let body = self.parse_definition_body(definition_span)?;
+        let signature_end = return_type
+            .as_ref()
+            .map_or(signature_end, |annotation| annotation.span);
+        let body = if self.match_colon_equal() || self.match_equal() {
+            let definition_span = self.previous_span();
+            self.parse_definition_body(definition_span)?
+        } else if effects.iter().any(|effect| effect == "native") && self.at_statement_boundary() {
+            Expr::new(ExprKind::External, signature_end)
+        } else {
+            return Err(self.error_at_current("expected `=` or `:=` after function signature"));
+        };
         let span = name_span.through(body.span);
         Ok((
             name.clone(),
@@ -4114,17 +4123,20 @@ impl Parser {
             return false;
         }
 
-        let open_index = self.skip_specifiers_at(self.current + 1);
+        let specifier_start = self.current + 1;
+        let open_index = self.skip_specifiers_at(specifier_start);
         if !matches!(self.kind_at(open_index), Some(TokenKind::LParen)) {
             return false;
         }
 
+        let has_native_specifier = self.has_native_specifier_between(specifier_start, open_index);
         let Some(close_index) = self.find_matching_delimiter_at(open_index) else {
             return false;
         };
         let index = self.skip_effect_specifiers_at(close_index + 1);
         let index = self.skip_optional_type_annotation_at(index);
         self.is_definition_operator_at(index)
+            || (has_native_specifier && self.is_statement_boundary_at(index))
     }
 
     fn is_extension_method_definition(&self) -> bool {
@@ -4546,6 +4558,29 @@ impl Parser {
                 return index;
             }
         }
+    }
+
+    fn has_native_specifier_between(&self, mut index: usize, end: usize) -> bool {
+        while index < end {
+            if matches!(self.kind_at(index), Some(TokenKind::Less))
+                && matches!(self.kind_at(index + 1), Some(TokenKind::Ident(name)) if name == "native")
+                && matches!(self.kind_at(index + 2), Some(TokenKind::Greater))
+            {
+                return true;
+            }
+
+            if matches!(self.kind_at(index), Some(TokenKind::Less))
+                && matches!(self.kind_at(index + 1), Some(TokenKind::Ident(_)))
+                && matches!(self.kind_at(index + 2), Some(TokenKind::Greater))
+            {
+                index += 3;
+            } else if let Some(after_scoped) = self.skip_scoped_specifier_at(index) {
+                index = after_scoped;
+            } else {
+                index += 1;
+            }
+        }
+        false
     }
 
     fn skip_scoped_specifier_at(&self, index: usize) -> Option<usize> {

@@ -1582,7 +1582,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                 Instruction::BeginProfileBlock { dest, .. } => {
                     frame.set_register(
                         dest,
-                        VmValue::Runtime(Value::Int(i128::from(profile_wall_time_start()))),
+                        VmValue::Runtime(Value::Int(profile_wall_time_start())),
                     )?;
                 }
                 Instruction::EndProfileBlock {
@@ -5283,7 +5283,7 @@ fn runtime_value_matches_type_name(value: &Value, expected: &TypeName) -> bool {
     match expected {
         TypeName::Int => matches!(value, Value::Int(_)),
         TypeName::IntRange { min, max } => {
-            matches!(value, Value::Int(value) if i128::from(*min) <= *value && *value <= i128::from(*max))
+            matches!(value, Value::Int(value) if *min <= *value && *value <= *max)
         }
         TypeName::Float => matches!(value, Value::Float(_)),
         TypeName::FloatRange(range) => {
@@ -6351,7 +6351,7 @@ fn length_value(container: Value, span: Span) -> Result<Value, VerseError> {
             ));
         }
     };
-    Ok(Value::Int(length as i128))
+    Ok(Value::Int(length as i64))
 }
 
 fn array_value(values: Vec<Value>) -> Value {
@@ -6382,9 +6382,10 @@ fn divide_values(left: Value, right: Value, span: Span) -> Result<Value, VerseEr
     }
 
     match (left, right) {
-        (Value::Int(left), Value::Int(right)) => {
-            Ok(Value::Rational(RationalValue::new(left, right)))
-        }
+        (Value::Int(left), Value::Int(right)) => Ok(Value::Rational(RationalValue::new(
+            i128::from(left),
+            i128::from(right),
+        ))),
         (left, right)
             if matches!(left, Value::Int(_) | Value::Rational(_))
                 && matches!(right, Value::Int(_) | Value::Rational(_)) =>
@@ -6426,7 +6427,7 @@ fn numeric_values(
     left: Value,
     right: Value,
     span: Span,
-    int_op: fn(i128, i128) -> Option<i128>,
+    int_op: fn(i64, i64) -> Option<i64>,
     float_op: fn(f64, f64) -> f64,
     rational_op: fn(RationalValue, RationalValue) -> RationalValue,
 ) -> Result<Value, VerseError> {
@@ -6458,7 +6459,7 @@ fn numeric_values(
     )))
 }
 
-fn expect_int(value: Value, context: &str, span: Span) -> Result<i128, VerseError> {
+fn expect_int(value: Value, context: &str, span: Span) -> Result<i64, VerseError> {
     match value {
         Value::Int(value) => Ok(value),
         other => Err(VerseError::runtime_at(
@@ -6489,15 +6490,15 @@ fn numeric_is_zero(value: &Value) -> bool {
     }
 }
 
-fn checked_add(left: i128, right: i128) -> Option<i128> {
+fn checked_add(left: i64, right: i64) -> Option<i64> {
     left.checked_add(right)
 }
 
-fn checked_sub(left: i128, right: i128) -> Option<i128> {
+fn checked_sub(left: i64, right: i64) -> Option<i64> {
     left.checked_sub(right)
 }
 
-fn checked_mul(left: i128, right: i128) -> Option<i128> {
+fn checked_mul(left: i64, right: i64) -> Option<i64> {
     left.checked_mul(right)
 }
 
