@@ -41,11 +41,19 @@ pub fn analyze_source_with_native_apis(
     source: &str,
     apis: impl IntoIterator<Item = InjectedNativeApi>,
 ) -> Result<SemanticProgram, VerseError> {
-    let bundle = NativeApiBundle::from_apis(apis);
-    analyze_source_with_native_bundle(source, None, &bundle)
+    analyze_source_with_native_apis_in_package(source, None, apis)
 }
 
-fn analyze_source_with_native_bundle(
+pub fn analyze_source_with_native_apis_in_package(
+    source: &str,
+    package_name: Option<&str>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<SemanticProgram, VerseError> {
+    let bundle = NativeApiBundle::from_apis(apis);
+    analyze_source_with_native_bundle(source, package_name, &bundle)
+}
+
+pub(crate) fn analyze_source_with_native_bundle(
     source: &str,
     package_name: Option<&str>,
     bundle: &NativeApiBundle,
@@ -75,8 +83,24 @@ pub fn compile_source_with_native_apis(
     source: &str,
     apis: impl IntoIterator<Item = InjectedNativeApi>,
 ) -> Result<IrProgram, VerseError> {
+    compile_source_with_native_apis_in_package(source, None, apis)
+}
+
+pub fn compile_source_with_native_apis_in_package(
+    source: &str,
+    package_name: Option<&str>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<IrProgram, VerseError> {
     let bundle = NativeApiBundle::from_apis(apis);
-    let semantic = analyze_source_with_native_bundle(source, None, &bundle)?;
+    compile_source_with_native_bundle(source, package_name, &bundle)
+}
+
+pub(crate) fn compile_source_with_native_bundle(
+    source: &str,
+    package_name: Option<&str>,
+    bundle: &NativeApiBundle,
+) -> Result<IrProgram, VerseError> {
+    let semantic = analyze_source_with_native_bundle(source, package_name, bundle)?;
     IRGenerator::new()
         .with_injected_native_functions(bundle.functions())
         .generate(semantic)
@@ -98,11 +122,24 @@ pub fn run_source_with_native_apis(
     source: &str,
     apis: impl IntoIterator<Item = InjectedNativeApi>,
 ) -> Result<Value, VerseError> {
+    run_source_with_native_apis_in_package(source, None, apis)
+}
+
+pub fn run_source_with_native_apis_in_package(
+    source: &str,
+    package_name: Option<&str>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<Value, VerseError> {
     let bundle = NativeApiBundle::from_apis(apis);
-    let semantic = analyze_source_with_native_bundle(source, None, &bundle)?;
-    let ir = IRGenerator::new()
-        .with_injected_native_functions(bundle.functions())
-        .generate(semantic)?;
+    run_source_with_native_bundle(source, package_name, &bundle)
+}
+
+pub(crate) fn run_source_with_native_bundle(
+    source: &str,
+    package_name: Option<&str>,
+    bundle: &NativeApiBundle,
+) -> Result<Value, VerseError> {
+    let ir = compile_source_with_native_bundle(source, package_name, bundle)?;
     VerseVm::with_native_registry(bundle.registry().clone()).run_ir_program(&ir)
 }
 

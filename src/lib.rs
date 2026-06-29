@@ -44,15 +44,21 @@ pub use native::{
 };
 pub use parser::parse_source;
 pub use pipeline::{
-    analyze_source, analyze_source_in_package, analyze_source_with_native_apis, analyze_vst,
-    compile_source, compile_source_in_package, compile_source_with_native_apis, desugar_vst,
-    parse_vst_source, run_source_in_package, run_source_with_native_apis,
+    analyze_source, analyze_source_in_package, analyze_source_with_native_apis,
+    analyze_source_with_native_apis_in_package, analyze_vst, compile_source,
+    compile_source_in_package, compile_source_with_native_apis,
+    compile_source_with_native_apis_in_package, desugar_vst, parse_vst_source,
+    run_source_in_package, run_source_with_native_apis, run_source_with_native_apis_in_package,
 };
 #[cfg(feature = "tokio-host")]
 pub use pipeline::{run_source_with_tokio_host, run_source_with_tokio_host_in_package};
 #[cfg(feature = "tokio-host")]
 pub use project::run_project_file_with_tokio_host;
-pub use project::{SourceProject, check_project_file, load_project_source, run_project_file};
+pub use project::{
+    SourceProject, check_project_file, check_project_file_with_native_apis,
+    compile_project_file_with_native_apis, load_project_source, run_project_file,
+    run_project_file_with_native_apis,
+};
 pub use runtime::{Value, VerseVm};
 pub use semantic_analyzer::SemanticAnalyzer;
 pub use semantics::{SemanticProgram, TypedProgram};

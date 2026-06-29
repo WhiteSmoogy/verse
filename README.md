@@ -90,6 +90,19 @@ in-process mock host. Use `run_source_with_tokio_host(...)` or
 `run_project_file_with_tokio_host(...)` when you want Tokio-backed timers and
 futures.
 
+For native API embeddings, register each generated native module separately and
+pass all bindings into the run call. Use the project-file variant when the Verse
+program is split across a main file plus shared `.verse` modules:
+
+```rust
+use verse_rs::run_project_file_with_native_apis;
+
+let value = run_project_file_with_native_apis(
+    "scripts/main.verse",
+    [inventory_native::bind(inventory), ui_native::bind(ui)],
+)?;
+```
+
 The Tokio APIs are available behind the `tokio-host` feature, which is enabled
 by default:
 
@@ -164,7 +177,10 @@ File-mode CLI runs can load local module definitions from sibling
 `ModuleName.verse` files and `ModuleName/` folders. The project loader also
 supports package-aware checking/running through `SourceProject`,
 `check_project_file(...)`, `run_project_file(...)`, and
-`run_project_file_with_tokio_host(...)`.
+`run_project_file_with_tokio_host(...)`. Native embeddings can use
+`check_project_file_with_native_apis(...)` and
+`run_project_file_with_native_apis(...)` with the same main-file or `.vproject`
+entry point.
 
 Use digest generation when you need a stable representation of a checked source
 or project:

@@ -6,8 +6,13 @@ use crate::ast::{ExprKind, Program, Stmt, StmtKind, TypeName};
 use crate::checker::{Type, check_source_in_package};
 use crate::digest::generate_digest_for_program;
 use crate::error::VerseError;
+use crate::ir::IrProgram;
+use crate::native::{InjectedNativeApi, NativeApiBundle};
 use crate::parser::parse_source;
-use crate::pipeline::run_source_in_package;
+use crate::pipeline::{
+    analyze_source_with_native_bundle, compile_source_with_native_bundle, run_source_in_package,
+    run_source_with_native_bundle,
+};
 use crate::runtime::Value;
 use crate::token::Span;
 
@@ -33,10 +38,48 @@ pub fn check_project_file(path: impl AsRef<Path>) -> Result<Type, VerseError> {
     Ok(value_type)
 }
 
+pub fn check_project_file_with_native_apis(
+    path: impl AsRef<Path>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<Type, VerseError> {
+    let project = SourceProject::from_path(path.as_ref())?;
+    let loaded = project.load_with_constraints()?;
+    let bundle = NativeApiBundle::from_apis(apis);
+    let typed_program =
+        analyze_source_with_native_bundle(&loaded.source, project.package.as_deref(), &bundle)?;
+    check_persistence_constraints(
+        &loaded.source,
+        project.package.as_deref(),
+        &loaded.persistence_constraints,
+        &project.persistence_scope_remaps,
+    )?;
+    Ok(typed_program.value_type)
+}
+
+pub fn compile_project_file_with_native_apis(
+    path: impl AsRef<Path>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<IrProgram, VerseError> {
+    let project = SourceProject::from_path(path.as_ref())?;
+    let source = project.load_source()?;
+    let bundle = NativeApiBundle::from_apis(apis);
+    compile_source_with_native_bundle(&source, project.package.as_deref(), &bundle)
+}
+
 pub fn run_project_file(path: impl AsRef<Path>) -> Result<Value, VerseError> {
     let project = SourceProject::from_path(path.as_ref())?;
     let source = project.load_source()?;
     run_source_in_package(&source, project.package.as_deref())
+}
+
+pub fn run_project_file_with_native_apis(
+    path: impl AsRef<Path>,
+    apis: impl IntoIterator<Item = InjectedNativeApi>,
+) -> Result<Value, VerseError> {
+    let project = SourceProject::from_path(path.as_ref())?;
+    let source = project.load_source()?;
+    let bundle = NativeApiBundle::from_apis(apis);
+    run_source_with_native_bundle(&source, project.package.as_deref(), &bundle)
 }
 
 #[cfg(feature = "tokio-host")]
