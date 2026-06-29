@@ -120,7 +120,12 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "tokio",
+ "verse-rs-macros",
 ]
+
+[[package]]
+name = "verse-rs-macros"
+version = "0.1.0"
 
 [[package]]
 name = "wasi"

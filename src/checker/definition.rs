@@ -691,12 +691,25 @@ impl Checker {
             warnings: Vec::new(),
             semantic_facts: SemanticFacts::default(),
             package_name: None,
+            supported_absolute_using_paths: Vec::new(),
             recovering: false,
         }
     }
 
     pub fn with_package(mut self, package_name: Option<String>) -> Self {
         self.package_name = package_name;
+        self
+    }
+
+    pub fn with_supported_absolute_using_paths<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.supported_absolute_using_paths = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_string())
+            .collect();
         self
     }
 }
@@ -3284,6 +3297,18 @@ impl Checker {
         })
     }
 
+    pub(super) fn supports_absolute_using_path(&self, path: &str) -> bool {
+        is_supported_using_path(path)
+            || self
+                .supported_absolute_using_paths
+                .iter()
+                .any(|supported| path == supported || path.starts_with(&format!("{supported}/")))
+    }
+
+    pub(super) fn resolve_absolute_module_path(&self, path: &str) -> Option<String> {
+        absolute_module_import_path(path).and_then(|path| self.resolve_module_path(&path))
+    }
+
     pub(super) fn ensure_module_import_accessible(
         &self,
         module_name: &str,
@@ -3333,6 +3358,16 @@ impl Checker {
                 continue;
             };
             if is_absolute_module_path(path) {
+                if !self.supports_absolute_using_path(path) {
+                    return Err(VerseError::check_at(
+                        format!("unsupported module path `{path}`"),
+                        statement.span,
+                    ));
+                }
+                if let Some(module_name) = self.resolve_absolute_module_path(path) {
+                    self.ensure_module_import_accessible(&module_name, statement.span)?;
+                    self.add_current_import(module_name);
+                }
                 continue;
             }
             let Some(module_name) = self.resolve_module_path(path) else {

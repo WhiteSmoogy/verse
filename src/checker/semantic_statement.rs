@@ -71,11 +71,15 @@ impl Checker {
                     ));
                 }
                 if is_absolute_module_path(path) {
-                    if !is_supported_using_path(path) {
+                    if !self.supports_absolute_using_path(path) {
                         return Err(VerseError::check_at(
                             format!("unsupported module path `{path}`"),
                             statement.span,
                         ));
+                    }
+                    if let Some(module_name) = self.resolve_absolute_module_path(path) {
+                        self.ensure_module_import_accessible(&module_name, statement.span)?;
+                        self.add_current_import(module_name);
                     }
                     return Ok(Type::None);
                 }

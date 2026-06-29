@@ -8,6 +8,7 @@ pub mod error;
 pub mod eval;
 pub mod ir;
 pub mod lexer;
+pub mod native;
 pub mod parser;
 pub mod pipeline;
 pub mod project;
@@ -36,10 +37,16 @@ pub use ir::{
     BytecodeChunk, BytecodeProgram, Constant, IRGenerator, Instruction, IrProgram, Opcode,
     RegisterIndex, ValueOperand,
 };
+pub use native::{
+    FromNativeValue, InjectedNativeApi, InjectedNativeFunction, IntoNativeValue, NativeApiBundle,
+    NativeCallContext, NativeCallResult, NativeError, NativeFunctionSignature, NativeRegistry,
+    NativeRegistryBuilder, NativeResult,
+};
 pub use parser::parse_source;
 pub use pipeline::{
-    analyze_source, analyze_source_in_package, analyze_vst, compile_source,
-    compile_source_in_package, desugar_vst, parse_vst_source, run_source_in_package,
+    analyze_source, analyze_source_in_package, analyze_source_with_native_apis, analyze_vst,
+    compile_source, compile_source_in_package, compile_source_with_native_apis, desugar_vst,
+    parse_vst_source, run_source_in_package, run_source_with_native_apis,
 };
 #[cfg(feature = "tokio-host")]
 pub use pipeline::{run_source_with_tokio_host, run_source_with_tokio_host_in_package};
@@ -54,3 +61,5 @@ pub use syntax::VstProgram;
 pub fn run_source(source: &str) -> Result<Value, VerseError> {
     pipeline::run_source(source)
 }
+
+pub use verse_rs_macros::native_api;

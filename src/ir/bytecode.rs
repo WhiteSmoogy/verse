@@ -11,6 +11,7 @@ use crate::ast::{
 use crate::checker::{IntRange, ParametricTypeKind, Type};
 use crate::colors::NAMED_COLORS;
 use crate::error::VerseError;
+use crate::native::InjectedNativeFunction;
 use crate::semantics::{SemanticFacts, SemanticProgram};
 use crate::token::{CharacterKind, NumberKind, NumberLiteral, Span};
 
@@ -309,6 +310,7 @@ pub struct FunctionDescriptor {
     param_types: Vec<Option<Type>>,
     param_defaults: Vec<Option<Expr>>,
     external_return_type: Option<TypeName>,
+    injected_native: Option<InjectedNativeFunction>,
     chunk: usize,
     decides: bool,
     capture_names: Vec<String>,
@@ -337,6 +339,10 @@ impl FunctionDescriptor {
 
     pub fn external_return_type(&self) -> Option<&TypeName> {
         self.external_return_type.as_ref()
+    }
+
+    pub fn injected_native(&self) -> Option<&InjectedNativeFunction> {
+        self.injected_native.as_ref()
     }
 
     pub fn chunk(&self) -> usize {
@@ -1182,17 +1188,24 @@ impl Instruction {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BytecodeGenerator;
+#[derive(Debug, Default, Clone)]
+pub struct BytecodeGenerator {
+    injected_native_functions: Vec<InjectedNativeFunction>,
+}
 
 impl BytecodeGenerator {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_injected_native_functions(mut self, functions: &[InjectedNativeFunction]) -> Self {
+        self.injected_native_functions = functions.to_vec();
+        self
     }
 
     pub fn generate(self, semantic: &SemanticProgram) -> Result<BytecodeProgram, VerseError> {
         let program = &semantic.program;
-        let mut lowerer = Lowerer::new(semantic);
+        let mut lowerer = Lowerer::new(semantic, &self.injected_native_functions);
         if lowerer.lower_program(program).is_err() {
             return Err(VerseError::check(
                 "bytecode generation does not support this construct yet",
@@ -1473,6 +1486,13 @@ impl ChunkState {
             .insert(name.to_string());
     }
 
+    fn mark_global_callable(&mut self, name: &str) {
+        self.callable_scopes
+            .first_mut()
+            .expect("there should always be a root callable scope")
+            .insert(name.to_string());
+    }
+
     fn lookup_callable(&self, name: &str) -> bool {
         self.callable_scopes
             .iter()
@@ -1624,6 +1644,7 @@ struct Lowerer<'semantic> {
     type_functions: HashMap<String, Vec<BytecodeTypeFunction>>,
     function_return_classes: HashMap<(String, usize), String>,
     global_bindings: HashMap<String, GlobalBinding>,
+    injected_native_functions: HashMap<(String, usize), InjectedNativeFunction>,
     next_failure_context_id: usize,
 }
 
@@ -1757,7 +1778,10 @@ fn builtin_class_descriptor(name: &str) -> ClassDescriptor {
 }
 
 impl<'semantic> Lowerer<'semantic> {
-    fn new(semantic: &'semantic SemanticProgram) -> Self {
+    fn new(
+        semantic: &'semantic SemanticProgram,
+        injected_native_functions: &[InjectedNativeFunction],
+    ) -> Self {
         let mut class_layouts = HashMap::new();
         for name in BUILTIN_RUNTIME_CLASS_NAMES {
             class_layouts.insert((*name).to_string(), builtin_class_layout(name));
@@ -1796,6 +1820,15 @@ impl<'semantic> Lowerer<'semantic> {
             type_functions: HashMap::new(),
             function_return_classes: HashMap::new(),
             global_bindings: HashMap::new(),
+            injected_native_functions: injected_native_functions
+                .iter()
+                .map(|function| {
+                    (
+                        (function.runtime_name.clone(), function.arity),
+                        function.clone(),
+                    )
+                })
+                .collect(),
             next_failure_context_id: 0,
         }
     }
@@ -2114,7 +2147,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> Result<(), UnsupportedBytecode> {
         match &statement.kind {
             StmtKind::Using { path } => {
-                state.import(path.clone());
+                state.import(bytecode_import_path(path));
                 state.last_value = state.none();
                 Ok(())
             }
@@ -2573,7 +2606,7 @@ impl<'semantic> Lowerer<'semantic> {
     ) -> Result<(), UnsupportedBytecode> {
         match &statement.kind {
             StmtKind::Using { path } => {
-                state.import(path.clone());
+                state.import(bytecode_import_path(path));
                 state.last_value = state.none();
                 Ok(())
             }
@@ -2869,6 +2902,9 @@ impl<'semantic> Lowerer<'semantic> {
                 };
                 state.define_global(qualified, binding);
                 self.mark_binding_callable_if_needed(state, name, statement.span);
+                if matches!(expr.kind, ExprKind::Function { .. }) {
+                    state.mark_global_callable(&format!("{namespace}.{name}"));
+                }
                 state.last_value = state.none();
                 Ok(())
             }
@@ -3413,6 +3449,7 @@ impl<'semantic> Lowerer<'semantic> {
             matches!(body.kind, ExprKind::External).then(|| {
                 self.external_runtime_type_name(extension.method.return_type.as_ref(), body)
             }),
+            None,
             state,
             extension
                 .method
@@ -3989,6 +4026,7 @@ impl<'semantic> Lowerer<'semantic> {
             vec![None; register_params.len()],
             vec![None; register_params.len()],
             None,
+            None,
             state,
             false,
             Vec::new(),
@@ -4053,6 +4091,7 @@ impl<'semantic> Lowerer<'semantic> {
                 vec![None; register_params.len()],
                 vec![None; register_params.len()],
                 None,
+                None,
                 state,
                 decides,
                 Vec::new(),
@@ -4079,6 +4118,7 @@ impl<'semantic> Lowerer<'semantic> {
             method.params.clone(),
             vec![None; register_params.len()],
             vec![None; register_params.len()],
+            None,
             None,
             state,
             decides,
@@ -8018,7 +8058,7 @@ impl<'semantic> Lowerer<'semantic> {
         let selected_function = direct_callee_name
             .as_deref()
             .filter(|name| !bytecode_native_function_name(name))
-            .and_then(|name| self.select_function_descriptor_for_call(name, args));
+            .and_then(|name| self.select_function_descriptor_for_call_in_state(name, args, state));
         let selected_direct_function =
             selected_function.filter(|function| !self.functions[*function].captures());
 
@@ -8051,9 +8091,9 @@ impl<'semantic> Lowerer<'semantic> {
             } else if let Some(name) = direct_callee_name.as_ref() {
                 if bytecode_native_function_name(name) {
                     self.lower_native_call_arguments(args, state)?
-                } else if self.has_function_descriptor(name) {
+                } else if self.has_function_descriptor_in_state(name, state) {
                     (
-                        self.lower_named_call_arguments(name, args, state)?,
+                        self.lower_named_call_arguments_in_state(name, args, state)?,
                         Vec::new(),
                         Vec::new(),
                     )
@@ -8104,6 +8144,26 @@ impl<'semantic> Lowerer<'semantic> {
         self.function_descriptor_index(name).is_some()
     }
 
+    fn has_function_descriptor_in_state(&self, name: &str, state: &ChunkState) -> bool {
+        self.function_descriptor_name_in_state(name, state)
+            .is_some()
+    }
+
+    fn function_descriptor_name_in_state<'a>(
+        &'a self,
+        name: &'a str,
+        state: &'a ChunkState,
+    ) -> Option<String> {
+        if self.has_function_descriptor(name) {
+            return Some(name.to_string());
+        }
+        state.imports.iter().rev().find_map(|module| {
+            let qualified = format!("{module}.{name}");
+            self.has_function_descriptor(&qualified)
+                .then_some(qualified)
+        })
+    }
+
     fn function_descriptor_index(&self, name: &str) -> Option<usize> {
         self.functions
             .iter()
@@ -8123,6 +8183,20 @@ impl<'semantic> Lowerer<'semantic> {
             })
             .min_by_key(|(_, score)| *score)
             .map(|(index, _)| index)
+    }
+
+    fn select_function_descriptor_for_call_in_state(
+        &self,
+        name: &str,
+        args: &[CallArg],
+        state: &ChunkState,
+    ) -> Option<usize> {
+        self.select_function_descriptor_for_call(name, args)
+            .or_else(|| {
+                state.imports.iter().rev().find_map(|module| {
+                    self.select_function_descriptor_for_call(&format!("{module}.{name}"), args)
+                })
+            })
     }
 
     fn function_descriptor_call_score(
@@ -9272,7 +9346,7 @@ impl<'semantic> Lowerer<'semantic> {
         })
     }
 
-    fn lower_named_call_arguments(
+    fn lower_named_call_arguments_in_state(
         &mut self,
         callee_name: &str,
         args: &[CallArg],
@@ -9281,9 +9355,8 @@ impl<'semantic> Lowerer<'semantic> {
         if let Some(param_aliases) = bytecode_native_param_aliases(callee_name) {
             return self.lower_native_named_call_arguments(param_aliases, args, state);
         }
-
         let function = self
-            .select_function_descriptor_for_call(callee_name, args)
+            .select_function_descriptor_for_call_in_state(callee_name, args, state)
             .ok_or(UnsupportedBytecode)?;
         self.lower_function_call_arguments(function, args, state)
     }
@@ -9787,6 +9860,7 @@ impl<'semantic> Lowerer<'semantic> {
             param_types,
             param_defaults,
             None,
+            None,
             state,
             decides,
             capture_binding_names(captures),
@@ -9883,6 +9957,7 @@ impl<'semantic> Lowerer<'semantic> {
             Vec::new(),
             Vec::new(),
             None,
+            None,
             state,
             false,
             Vec::new(),
@@ -9904,6 +9979,13 @@ impl<'semantic> Lowerer<'semantic> {
         let decides = effects.iter().any(|effect| effect == "decides");
         let external_return_type = matches!(body.kind, ExprKind::External)
             .then(|| self.external_runtime_type_name(return_type, body));
+        let injected_native = external_return_type.as_ref().and_then(|_| {
+            name.as_ref().and_then(|name| {
+                self.injected_native_functions
+                    .get(&(name.clone(), params.len()))
+                    .cloned()
+            })
+        });
         let mut state = ChunkState::with_params(
             name.as_ref()
                 .map_or_else(|| "<anonymous>".to_string(), |name| name.clone()),
@@ -9937,6 +10019,7 @@ impl<'semantic> Lowerer<'semantic> {
                 param_types,
                 param_defaults,
                 external_return_type.clone(),
+                injected_native.clone(),
                 state,
                 decides,
                 capture_binding_names(captures),
@@ -9959,6 +10042,7 @@ impl<'semantic> Lowerer<'semantic> {
             param_types,
             param_defaults,
             external_return_type,
+            injected_native,
             state,
             decides,
             capture_binding_names(captures),
@@ -9973,6 +10057,7 @@ impl<'semantic> Lowerer<'semantic> {
         param_types: Vec<Option<Type>>,
         param_defaults: Vec<Option<Expr>>,
         external_return_type: Option<TypeName>,
+        injected_native: Option<InjectedNativeFunction>,
         state: ChunkState,
         decides: bool,
         capture_names: Vec<String>,
@@ -9986,6 +10071,7 @@ impl<'semantic> Lowerer<'semantic> {
             param_types,
             param_defaults,
             external_return_type,
+            injected_native,
             chunk: chunk_index,
             decides,
             capture_names,
@@ -10113,6 +10199,22 @@ fn collect_top_level_function_names(program: &Program) -> HashSet<String> {
             matches!(expr.kind, ExprKind::Function { .. }).then(|| name.clone())
         })
         .collect()
+}
+
+fn bytecode_import_path(path: &str) -> String {
+    if !path.starts_with('/') {
+        return path.to_string();
+    }
+    let mut components = path.trim_start_matches('/').split('/');
+    let _domain = components.next();
+    let module_path = components
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if module_path.is_empty() {
+        path.to_string()
+    } else {
+        module_path.join(".")
+    }
 }
 
 fn collect_function_captures(

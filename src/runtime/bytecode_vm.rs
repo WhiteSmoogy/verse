@@ -24,6 +24,7 @@ use crate::ir::bytecode::{
     BytecodeChunk, BytecodeProgram, ClassDescriptor, ClassMethodDescriptor, Constant,
     FieldDescriptor, Instruction, InterfaceDescriptor, ObjectKind, RegisterIndex, ValueOperand,
 };
+use crate::native::{InjectedNativeFunction, NativeCallResult, NativeRegistry};
 use crate::runtime::host::{Host, MockHost, PendingToken};
 use crate::token::{CharacterKind, Span};
 
@@ -534,6 +535,7 @@ impl VmTransactionCollector {
 pub(crate) struct BytecodeExecutor<'program, H: Host = MockHost> {
     program: &'program BytecodeProgram,
     host: H,
+    native_registry: NativeRegistry,
     globals: RefCell<HashMap<String, Rc<RefCell<VmValue>>>>,
     tasks: HashMap<usize, VmTaskState<'program>>,
     task_groups: Vec<VmTaskGroup>,
@@ -550,8 +552,16 @@ pub(crate) struct BytecodeExecutor<'program, H: Host = MockHost> {
 }
 
 impl<'program> BytecodeExecutor<'program, MockHost> {
+    #[allow(dead_code)]
     pub(crate) fn new(program: &'program BytecodeProgram) -> Self {
         Self::with_host(program, MockHost::default())
+    }
+
+    pub(crate) fn with_native_registry(
+        program: &'program BytecodeProgram,
+        native_registry: NativeRegistry,
+    ) -> Self {
+        Self::with_host_and_native_registry(program, MockHost::default(), native_registry)
     }
 
     #[cfg(test)]
@@ -581,7 +591,16 @@ fn runtime_class_type_info_from_descriptor(class: &ClassDescriptor) -> RuntimeCl
 }
 
 impl<'program, H: Host> BytecodeExecutor<'program, H> {
+    #[allow(dead_code)]
     pub(crate) fn with_host(program: &'program BytecodeProgram, host: H) -> Self {
+        Self::with_host_and_native_registry(program, host, NativeRegistry::new())
+    }
+
+    pub(crate) fn with_host_and_native_registry(
+        program: &'program BytecodeProgram,
+        host: H,
+        native_registry: NativeRegistry,
+    ) -> Self {
         register_runtime_class_types(
             program
                 .classes()
@@ -591,6 +610,7 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
         Self {
             program,
             host,
+            native_registry,
             globals: RefCell::new(HashMap::new()),
             tasks: HashMap::new(),
             task_groups: Vec::new(),
@@ -3315,6 +3335,9 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
                         span,
                     ));
                 }
+                if let Some(native) = descriptor.injected_native() {
+                    return self.call_injected_native(native, args, span);
+                }
                 let chunk = descriptor.chunk();
                 let external_return_type = descriptor.external_return_type().cloned();
                 let source_params = if external_return_type.is_some() {
@@ -3929,6 +3952,48 @@ impl<'program, H: Host> BytecodeExecutor<'program, H> {
             )),
             VmValue::Uninitialized => Err(VerseError::runtime_at(
                 "cannot call uninitialized bytecode value",
+                span,
+            )),
+        }
+    }
+
+    fn call_injected_native(
+        &mut self,
+        native: &InjectedNativeFunction,
+        args: Vec<VmValue>,
+        span: Span,
+    ) -> Result<CallOutcome<'program>, VerseError> {
+        let args = args
+            .into_iter()
+            .map(|arg| into_runtime(arg, span))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some(result) =
+            self.native_registry
+                .call(&native.runtime_name, native.arity, args, span)
+        else {
+            return Err(VerseError::runtime_at(
+                format!(
+                    "native function `{}`/{} was declared but no host implementation was registered",
+                    native.runtime_name, native.arity
+                ),
+                span,
+            ));
+        };
+        match result {
+            NativeCallResult::Value(value) => Ok(CallOutcome::Value(VmValue::Runtime(value))),
+            NativeCallResult::Failure(reason) if native.decides() => {
+                let _ = reason;
+                Ok(CallOutcome::Failure)
+            }
+            NativeCallResult::Failure(reason) => Err(VerseError::runtime_at(
+                format!("native function `{}` failed: {reason}", native.runtime_name),
+                span,
+            )),
+            NativeCallResult::RuntimeError(message) => Err(VerseError::runtime_at(
+                format!(
+                    "native function `{}` errored: {message}",
+                    native.runtime_name
+                ),
                 span,
             )),
         }

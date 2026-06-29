@@ -211,6 +211,7 @@ pub struct Checker {
     warnings: Vec<Diagnostic>,
     semantic_facts: SemanticFacts,
     package_name: Option<String>,
+    supported_absolute_using_paths: Vec<String>,
     recovering: bool,
 }
 
@@ -794,6 +795,15 @@ fn is_supported_using_path(path: &str) -> bool {
 
 fn is_absolute_module_path(path: &str) -> bool {
     path.starts_with('/')
+}
+
+fn absolute_module_import_path(path: &str) -> Option<String> {
+    let mut components = path.trim_start_matches('/').split('/');
+    components.next()?;
+    let module_path = components
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    (!module_path.is_empty()).then(|| module_path.join("."))
 }
 
 fn is_reserved_type_alias_name(name: &str) -> bool {
